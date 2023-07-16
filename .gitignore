@@ -1,0 +1,6 @@
+# Python virtual env.
+venv/
+
+# Any private seed phrases or keys
+../seed.txt
+../key.txt
