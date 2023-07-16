@@ -13,5 +13,5 @@ def get_local_seed():
 
 if __name__ == "__main__":
     url = "wss://ws.test.azero.dev"
-    seed = get_local_seed()
+    # seed = get_local_seed()
     substrate = SubstrateInterface(url=url)
