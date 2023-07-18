@@ -1,5 +1,6 @@
-# Python virtual env.
+# Potential python environment files
 venv/
+.idea
 
 # Any private seed phrases or keys
 ../seed.txt
