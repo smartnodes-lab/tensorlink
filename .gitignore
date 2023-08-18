@@ -1,7 +1,13 @@
-# Potential python environment files
+# Ignore build artifacts from the local tests sub-crate.
+target/
+.DS_Store
 venv/
-.idea
 
-# Any private seed phrases or keys
-../seed.txt
-../key.txt
+# Ignore backup files creates by cargo fmt.
+**/*.rs.bk
+**/*.pem
+
+# Remove Cargo.lock when creating an executable, leave it for libraries
+# More information here http://doc.crates.io/guide.html#cargotoml-vs-cargolock
+contracts/framework/Cargo.lock
+**/seed.txt
