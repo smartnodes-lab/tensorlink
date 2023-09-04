@@ -1,15 +1,11 @@
-from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key
+from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key, get_public_key_bytes
 from src.p2p.connection import Connection
 
-from cryptography.hazmat.primitives import serialization
 from typing import List
 import threading
 import socket
 import time
-import random
 import ssl
-import hashlib
-import os
 
 
 class Node(threading.Thread):
@@ -17,18 +13,18 @@ class Node(threading.Thread):
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0):
         super(Node, self).__init__()
 
-        self.terminate_flag = threading.Event()
-
+        # User info and P2P connectivity params
+        self.public_key = self.get_public_key()
         self.host: str = host
         self.port: int = port
-        self.id = self.fetch_id() + str(random.random())
         self.debug = debug
         self.max_connections = max_connections
 
+        # Node process and connection params
         self.inbound = []
         self.outbound = []
         self.reconnect = []
-
+        self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
 
@@ -40,23 +36,7 @@ class Node(threading.Thread):
 
     def debug_print(self, message):
         if self.debug:
-            print(f"debug: {message}")
-
-    def fetch_id(self):
-        cwd = os.getcwd()
-        test_dir = os.path.join(cwd, "public_key.pem")
-
-        if not os.path.exists(test_dir):
-            generate_rsa_key_pair()
-
-        key = load_public_key(test_dir)
-
-        key_bytes = key.public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        )
-
-        return key_bytes.decode()
+            print(f"{self.host}:{self.port}-debug: {message}")
 
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -105,34 +85,33 @@ class Node(threading.Thread):
             sock.connect((host, port))
 
             # ID exchange
-            sock.send((self.id + ":" + str(self.port)).encode())
+            sock.send((self.public_key + ":" + str(self.port)).encode())
             connected_node_id = sock.recv(4096).decode()
 
             if authenticate_public_key(connected_node_id) is False:
                 sock.send("closing connection: suspicious uid".encode())
+                self.debug_print(f"closing connection: suspicious uid: {connected_node_id}")
                 sock.close()
                 return False
 
-            # Close process if already connected / self
-            if self.id == connected_node_id or connected_node_id in node_ids:
-                sock.send("closing connection: already connected".encode())
-                sock.close()
-                return True
+            # # Close process if already connected / self (commented out to enable local testing)
+            # if self.public_key == connected_node_id or connected_node_id in node_ids:
+            #     sock.send("closing connection: already connected".encode())
+            #     sock.close()
+            #     return True
 
             # Form connection
-            thread_client = self.create_connection(
-                sock, connected_node_id, host, port)
+            thread_client = self.create_connection(sock, connected_node_id, host, port)
             thread_client.start()
 
             self.outbound.append(thread_client)
 
-            # If reconnection to this host is required, it will be added to the list!
+            # If reconnection to this host is required, add to the list
             if reconnect:
                 self.debug_print(
-                    f"connect_with_node: reconnection check enabled on {host}:{port}")
-                self.reconnect.append({
-                    "host": host, "port": port, "tries": 0
-                })
+                    f"connect_with_node: reconnection check enabled on {host}:{port}"
+                )
+                self.reconnect.append({"host": host, "port": port, "tries": 0})
 
             return True
 
@@ -190,12 +169,12 @@ class Node(threading.Thread):
                     # Basic information exchange (not secure) of the id's of the nodes!
                     # backward compatibility
                     connected_node_port = client_address[1]
-                    connected_node_id = connection.recv(4096).decode('utf-8')
+                    connected_node_id = connection.recv(4096).decode()
                     if ":" in connected_node_id:
                         (connected_node_id, connected_node_port) = connected_node_id.split(
                             ':')  # When a node is connected, it sends it id!
                     # Send my id to the connected node!
-                    connection.send(self.id.encode('utf-8'))
+                    connection.send(self.public_key.encode())
 
                     thread_client = self.create_connection(connection, connected_node_id, client_address[0],
                                                            connected_node_port)
@@ -235,3 +214,8 @@ class Node(threading.Thread):
     def node_message(self, node: Connection, data):
         time_delta = str(time.time() - float(data))
         self.debug_print(f"node_message: {node.id}: {time_delta}")
+
+    def get_public_key(self) -> bytes:
+        generate_rsa_key_pair()
+        public_key = load_public_key()
+        return get_public_key_bytes(public_key)

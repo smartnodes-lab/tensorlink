@@ -1,30 +1,35 @@
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.backends import default_backend
+import os
 
 
-def generate_rsa_key_pair():
-    private_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048
-    )
+def generate_rsa_key_pair() -> None:
+    path = os.path.join(os.path.pardir, "keys")
 
-    # Save private key to a file
-    with open("private_key.pem", "wb") as f:
-        f.write(private_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
+    if not os.path.exists(os.path.join(path, "public_key.pem")):
+        # Save private and public rsa keys to files
+        with open(os.path.join(path, "private_key.pem"), "wb") as f:
+            key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048
+            )
 
-    with open("public_key.pem", "wb") as f:
-        f.write(private_key.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo
-        ))
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            ))
+
+        with open(os.path.join(path, "public_key.pem"), "wb") as f:
+            f.write(key.public_key().public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ))
 
 
-def load_public_key(path):
+def load_public_key():
+    path = os.path.join(os.path.pardir, "keys/public_key.pem")
     with open(path, "rb") as f:
         return serialization.load_pem_public_key(
             f.read(),
@@ -51,3 +56,9 @@ def authenticate_public_key(public_key) -> bool:
         return False
 
 
+def get_public_key_bytes(public_key) -> bytes:
+    public_key_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return public_key_bytes.decode()
