@@ -14,7 +14,7 @@ class SmartNode(Node):
         self.username = username
         self.role = 0
         self.reputations = {}
-        self.seed = self.get_local_seed()
+        self.keypair = self.get_public_key()
         self.chain = SubstrateInterface(url=url)
 
         self.init_node()
@@ -26,15 +26,25 @@ class SmartNode(Node):
         :return:
         """
         self.debug_print(f"Initializing SmartNode ({self.username})")
-        result = self.chain.query("user-net", "get_user", params={})
-        # self.debug_print(f"SmartNode: Storage Function Result -> {result}")
 
-        # if os.path.exists(os.getcwd()):
+        # Query on chain values for user data
+        result = self.chain.query(
+            "user-net", "get_user_data", [self.public_key]
+        )
 
-    def get_local_seed(self):
+        # Determine if user is node operator (contains the private key)
+        if self.get_public_key() in result.decode():
+            self.run()
+
+    def get_public_key(self):
         path = os.getcwd()
         if not os.path.exists(os.path.join(path, "../keys/seed.pem")):
-            return Keypair.create_from_uri("//Alice", self.chain.ss58_format)
+            return Keypair.create_from_uri("//Alice", self.chain.ss58_format).public_key
+
+    def get_private_key(self):
+        path = os.getcwd()
+        if not os.path.exists(os.path.join(path, "../keys/seed.pem")):
+            return Keypair.create_from_uri("//Alice", self.chain.ss58_format).private_key
 
     def create_contract(self):
         pass

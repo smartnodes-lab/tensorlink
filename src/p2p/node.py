@@ -1,4 +1,5 @@
-from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key, get_public_key_bytes
+from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key, \
+    get_public_key_bytes, load_private_key, get_private_key_bytes
 from src.p2p.connection import Connection
 
 from typing import List
@@ -219,3 +220,8 @@ class Node(threading.Thread):
         generate_rsa_key_pair()
         public_key = load_public_key()
         return get_public_key_bytes(public_key)
+
+    def get_private_key(self) -> bytes:
+        generate_rsa_key_pair()
+        private_key = load_private_key()
+        return get_private_key_bytes(private_key)

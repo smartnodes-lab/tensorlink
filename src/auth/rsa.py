@@ -37,6 +37,15 @@ def load_public_key():
         )
 
 
+def load_private_key():
+    path = os.path.join(os.path.pardir, "keys/private_key.pem")
+    with open(path, "rb") as f:
+        return serialization.load_pem_private_key(
+            f.read(),
+            backend=default_backend()
+        )
+
+
 def authenticate_public_key(public_key) -> bool:
     try:
         public_key = serialization.load_pem_public_key(
@@ -62,3 +71,11 @@ def get_public_key_bytes(public_key) -> bytes:
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
     return public_key_bytes.decode()
+
+
+def get_private_key_bytes(private_key) -> bytes:
+    private_key_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL
+    )
+    return private_key_bytes.decode()
