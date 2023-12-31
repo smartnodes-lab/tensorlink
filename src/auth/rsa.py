@@ -5,14 +5,15 @@ import os
 
 
 def generate_rsa_key_pair() -> None:
-    path = os.path.join(os.path.pardir, "keys")
+    path = "keys"
 
     if not os.path.exists(os.path.join(path, "public_key.pem")):
         # Save private and public rsa keys to files
         with open(os.path.join(path, "private_key.pem"), "wb") as f:
             key = rsa.generate_private_key(
                 public_exponent=65537,
-                key_size=2048
+                key_size=2048,
+                backend=default_backend()
             )
 
             f.write(key.private_bytes(
@@ -29,7 +30,7 @@ def generate_rsa_key_pair() -> None:
 
 
 def load_public_key():
-    path = os.path.join(os.path.pardir, "keys/public_key.pem")
+    path = "keys/public_key.pem"
     with open(path, "rb") as f:
         return serialization.load_pem_public_key(
             f.read(),
@@ -38,11 +39,12 @@ def load_public_key():
 
 
 def load_private_key():
-    path = os.path.join(os.path.pardir, "keys/private_key.pem")
+    path = "keys/private_key.pem"
     with open(path, "rb") as f:
         return serialization.load_pem_private_key(
             f.read(),
-            backend=default_backend()
+            backend=default_backend(),
+            password=None
         )
 
 
@@ -61,7 +63,7 @@ def authenticate_public_key(public_key) -> bool:
 
         return True
 
-    except Exception:
+    except Exception as e:
         return False
 
 
@@ -79,3 +81,11 @@ def get_private_key_bytes(private_key) -> bytes:
         format=serialization.PrivateFormat.TraditionalOpenSSL
     )
     return private_key_bytes.decode()
+
+
+def get_public_key_obj(public_key_bytes):
+    return serialization.load_pem_public_key(public_key_bytes, backend=default_backend())
+
+
+def get_private_key_obj(private_key_bytes):
+    return serialization.load_pem_private_key(private_key_bytes, backend=default_backend(), password=None)

@@ -2,26 +2,28 @@ from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_pu
     get_public_key_bytes, load_private_key, get_private_key_bytes
 from src.p2p.connection import Connection
 
+from substrateinterface import SubstrateInterface, Keypair
 from typing import List
 import threading
 import socket
 import time
+import random
 import ssl
 
 
 class Node(threading.Thread):
 
-    def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0):
+    def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
+                 url: str = "wss://ws.test.azero.dev"):
         super(Node, self).__init__()
 
-        # User info and P2P connectivity params
-        self.public_key = self.get_public_key()
+        # User & Connection info
         self.host: str = host
         self.port: int = port
         self.debug = debug
         self.max_connections = max_connections
 
-        # Node process and connection params
+        # Node & Connection parameters
         self.inbound = []
         self.outbound = []
         self.reconnect = []
@@ -29,6 +31,11 @@ class Node(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
 
+        # Smart contract parameters
+        self.keypair = self.get_substrate_keypair()
+        self.chain = SubstrateInterface(url=url)
+
+        # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
 
     @property
@@ -72,8 +79,6 @@ class Node(threading.Thread):
                     f"connect_with_node: already connected with node: {node.id}")
                 return True
 
-        node_ids = [node.id for node in self.all_nodes]
-
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             """
@@ -86,14 +91,20 @@ class Node(threading.Thread):
             sock.connect((host, port))
 
             # ID exchange
-            sock.send((self.public_key + ":" + str(self.port)).encode())
+            sock.send((self.get_rsa_pub_key(b=True)))
             connected_node_id = sock.recv(4096).decode()
 
+            # Check if id is a valid rsa public key
             if authenticate_public_key(connected_node_id) is False:
                 sock.send("closing connection: suspicious uid".encode())
                 self.debug_print(f"closing connection: suspicious uid: {connected_node_id}")
                 sock.close()
                 return False
+
+            # Add a confirmation mechanism where we send randomized number encrypted via
+            # public key to validate identity
+            rand_n = random.random()
+            sock.send(())
 
             # # Close process if already connected / self (commented out to enable local testing)
             # if self.public_key == connected_node_id or connected_node_id in node_ids:
@@ -160,68 +171,31 @@ class Node(threading.Thread):
                     f"reconnect_nodes: removing node {node_to_check['host']}:{node_to_check['port']}")
                 self.reconnect.remove(node_to_check)
 
-    def run(self):
-        while not self.terminate_flag.is_set():
-            try:
-                connection, client_address = self.sock.accept()
-
-                if self.max_connections == 0 or len(self.inbound) < self.max_connections:
-
-                    # Basic information exchange (not secure) of the id's of the nodes!
-                    # backward compatibility
-                    connected_node_port = client_address[1]
-                    connected_node_id = connection.recv(4096).decode()
-                    if ":" in connected_node_id:
-                        (connected_node_id, connected_node_port) = connected_node_id.split(
-                            ':')  # When a node is connected, it sends it id!
-                    # Send my id to the connected node!
-                    connection.send(self.public_key.encode())
-
-                    thread_client = self.create_connection(connection, connected_node_id, client_address[0],
-                                                           connected_node_port)
-                    thread_client.start()
-
-                    self.inbound.append(thread_client)
-                    self.outbound.append(thread_client)
-
-                else:
-                    self.debug_print(
-                        "node: Connection refused: maximum connection limit reached!")
-                    connection.close()
-
-            except socket.timeout:
-                self.debug_print('node: Connection timeout!')
-
-            except Exception as e:
-                raise e
-
-            self.reconnect_nodes()
-
-            time.sleep(0.01)
-
-        print("Node stopping...")
-        for node in self.all_nodes:
-            node.stop()
-
-        time.sleep(1)
-
-        for node in self.all_nodes:
-            node.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
-
     def node_message(self, node: Connection, data):
         time_delta = str(time.time() - float(data))
         self.debug_print(f"node_message: {node.id}: {time_delta}")
 
-    def get_public_key(self) -> bytes:
+    def get_substrate_keypair(self):
+        private_key = "LYTsri2KlgMT3HBCQ6qcp1ABVLRHyRem5mcggAC2GB4AgAAAAQAAAAgAAAAWjo0DwTtIIdfd67DXrpE3eEDYiuRG4TVVUt" \
+                      "yS1dGmJJdJnuEBWqgcB3wCxbZ9bfIBr1aDJSAb2FEf7f6jqwWhPPmJQHhDN7Qf9Yj5CjiYtmvMyhSXDcCCUIXl2jqetpqa" \
+                      "LeO3Jq6H5sieYjKnI/ythH4ylhh5+FyOV8b77rGV4ILRWdOI79pXbdkWnNAQTWYH5ZYkUIfZWWiwcvsL"
+
+        return Keypair.create_from_private_key(private_key=private_key, ss58_format=self.chain.ss58_format)
+
+    def get_rsa_pub_key(self, b=False):
         generate_rsa_key_pair()
         public_key = load_public_key()
-        return get_public_key_bytes(public_key)
 
-    def get_private_key(self) -> bytes:
+        if b is True:
+            return get_public_key_bytes(public_key)
+        else:
+            return public_key
+
+    def get_rsa_priv_key(self, b=False):
         generate_rsa_key_pair()
         private_key = load_private_key()
-        return get_private_key_bytes(private_key)
+
+        if b is True:
+            return get_private_key_bytes(private_key)
+        else:
+            return private_key
