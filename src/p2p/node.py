@@ -1,17 +1,22 @@
 from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key, \
-    get_public_key_bytes, load_private_key, get_private_key_bytes
+    get_public_key_bytes, load_private_key, get_private_key_bytes, get_public_key_obj
 from src.p2p.connection import Connection
 
-from substrateinterface import SubstrateInterface, Keypair
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
 from typing import List
 import threading
+import base64
 import socket
 import time
-import random
-import ssl
 
 
 class Node(threading.Thread):
+    """
+    TODO:
+    - add EOF sequence for streaming messages
+
+    """
 
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
                  url: str = "wss://ws.test.azero.dev"):
@@ -31,10 +36,6 @@ class Node(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
 
-        # Smart contract parameters
-        self.keypair = self.get_substrate_keypair()
-        self.chain = SubstrateInterface(url=url)
-
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
 
@@ -49,7 +50,7 @@ class Node(threading.Thread):
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.host, self.port))
-        self.sock.settimeout(10.0)
+        self.sock.settimeout(3.0)
         self.sock.listen(1)
 
     def create_connection(self, connection: socket.socket, id: str, host: str, port: int) -> Connection:
@@ -91,20 +92,22 @@ class Node(threading.Thread):
             sock.connect((host, port))
 
             # ID exchange
-            sock.send((self.get_rsa_pub_key(b=True)))
-            connected_node_id = sock.recv(4096).decode()
+            sock.send(self.get_rsa_pub_key(b=True))
+            verification = sock.recv(4096)
+            proof = self.decrypt(verification)
+            sock.send(proof)
 
-            # Check if id is a valid rsa public key
-            if authenticate_public_key(connected_node_id) is False:
-                sock.send("closing connection: suspicious uid".encode())
-                self.debug_print(f"closing connection: suspicious uid: {connected_node_id}")
-                sock.close()
-                return False
+            # # Check if id is a valid rsa public key
+            # if authenticate_public_key(node_id) is False:
+            #     sock.send("closing connection: suspicious uid".encode())
+            #     self.debug_print(f"closing connection: suspicious uid: {node_id}")
+            #     sock.close()
+            #     return False
 
             # Add a confirmation mechanism where we send randomized number encrypted via
             # public key to validate identity
-            rand_n = random.random()
-            sock.send(())
+            # rand_n = random.random()
+            # sock.send(())
 
             # # Close process if already connected / self (commented out to enable local testing)
             # if self.public_key == connected_node_id or connected_node_id in node_ids:
@@ -113,7 +116,7 @@ class Node(threading.Thread):
             #     return True
 
             # Form connection
-            thread_client = self.create_connection(sock, connected_node_id, host, port)
+            thread_client = self.create_connection(sock, "test-ID", host, port)
             thread_client.start()
 
             self.outbound.append(thread_client)
@@ -142,7 +145,7 @@ class Node(threading.Thread):
             )
 
     def stop(self) -> None:
-        self.debug_print("node stopping")
+        self.debug_print("Node stopping")
         self.terminate_flag.set()
 
     def reconnect_nodes(self) -> None:
@@ -173,14 +176,8 @@ class Node(threading.Thread):
 
     def node_message(self, node: Connection, data):
         time_delta = str(time.time() - float(data))
-        self.debug_print(f"node_message: {node.id}: {time_delta}")
-
-    def get_substrate_keypair(self):
-        private_key = "LYTsri2KlgMT3HBCQ6qcp1ABVLRHyRem5mcggAC2GB4AgAAAAQAAAAgAAAAWjo0DwTtIIdfd67DXrpE3eEDYiuRG4TVVUt" \
-                      "yS1dGmJJdJnuEBWqgcB3wCxbZ9bfIBr1aDJSAb2FEf7f6jqwWhPPmJQHhDN7Qf9Yj5CjiYtmvMyhSXDcCCUIXl2jqetpqa" \
-                      "LeO3Jq6H5sieYjKnI/ythH4ylhh5+FyOV8b77rGV4ILRWdOI79pXbdkWnNAQTWYH5ZYkUIfZWWiwcvsL"
-
-        return Keypair.create_from_private_key(private_key=private_key, ss58_format=self.chain.ss58_format)
+        self.debug_print(f"node_message: {node.id}: start time: {data}")
+        self.debug_print(f"node_message: {node.id}: time delta: {time_delta}")
 
     def get_rsa_pub_key(self, b=False):
         generate_rsa_key_pair()
@@ -199,3 +196,35 @@ class Node(threading.Thread):
             return get_private_key_bytes(private_key)
         else:
             return private_key
+
+    def encrypt(self, data, pub_key: bytes = None):
+        # Encrypt the data using RSA-OAEP
+        if pub_key is None:
+            pub_key = self.get_rsa_pub_key()
+        else:
+            pub_key = get_public_key_obj(pub_key)
+
+        encrypted_data = pub_key.encrypt(
+            data,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        return base64.b64encode(encrypted_data)
+
+    def decrypt(self, data):
+        private_key = self.get_rsa_priv_key()
+
+        decrypted_data = private_key.decrypt(
+            base64.b64decode(data),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        return decrypted_data

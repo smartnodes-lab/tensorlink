@@ -1,18 +1,26 @@
-from src.auth.rsa import get_public_key_obj
-from src.p2p.node import Node
+from src.p2p.linked_node import LinkedNode
 
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
+import torch.nn as nn
+import torch
 import random
-import base64
 import socket
 import time
+import os
 
 
-class Worker(Node):
+class Worker(LinkedNode):
+    """
+    TODO:
+    - confirm workers public key with smart contract
+
+    """
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
                  url: str = "wss://ws.test.azero.dev"):
         super(Worker, self).__init__(host, port, debug, max_connections, url)
+
+        # Model training parameters
+        self.training = False
+        self.models = {}
 
     def run(self):
         while not self.terminate_flag.is_set():
@@ -20,37 +28,18 @@ class Worker(Node):
                 connection, client_address = self.sock.accept()
 
                 if self.max_connections == 0 or len(self.inbound) < self.max_connections:
-
-                    # When a node connects, it sends its public key
-                    connected_node_id = connection.recv(4096).decode()
-
-                    # Send random number to confirm their identity\
-                    randn = str(random.random())
-
-                    connection.send(
-                        self.encrypt(randn, connected_node_id)
-                    )
-
-                    [response, node_id, node_port] = connection.recv(4096).decode().split(",")
-
-                    if response == randn:
-                        thread_client = self.create_connection(connection, connected_node_id, client_address[0],
-                                                               connected_node_port)
-                    thread_client.start()
-
-                    self.inbound.append(thread_client)
-                    self.outbound.append(thread_client)
+                    self.handshake(connection, client_address)
 
                 else:
                     self.debug_print(
-                        "node: Connection refused: mat reached!")
+                        "node: Connection refused: Max connections reached!")
                     connection.close()
 
             except socket.timeout:
                 self.debug_print('node: Connection timeout!')
 
             except Exception as e:
-                raise e
+                print(str(e))
 
             self.reconnect_nodes()
 
@@ -69,37 +58,35 @@ class Worker(Node):
         self.sock.close()
         print("Node stopped")
 
-    def encrypt(self, data, pub_key: bytes = None):
-        # Encrypt the data using RSA-OAEP
-        if pub_key is None:
-            pub_key = self.get_public_key()
-        else:
-            pub_key = get_public_key_obj(pub_key)
+    def get_gpu_memory(self):
+        # Check how much available memory we can allocate to the node
+        memory = 0
+        
+        if torch.cuda.is_available():
+            devices = list(range(torch.cuda.device_count()))
+            memory += torch.cuda.memory
 
-        encrypted_data = pub_key.encrypt(
-            data,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
+            for device in devices:
+                torch.cuda.set_device(device)
+                memory_stats = torch.cuda.memory_stats(device)
+                device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
+                memory += device_memory
 
-        return base64.b64encode(encrypted_data)
+        return memory
 
-    def decrypt(self, data):
-        private_key = self.get_private_key()
+    def load_model(self, model: nn.Module):
+        self.model = model
 
-        decrypted_data = private_key.decrypt(
-            base64.b64decode(data),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
+    def broadcast_statistics(self):
+        memory = str(self.get_gpu_memory())
 
-        return decrypted_data
+        if self.training:
+            # Incorporate proofs of training
+            proof1 = self.proof_of_model()
+            proof2 = self.proof_of_optimization()
+            proof3 = self.proof_of_output()
+        
+        self.send_to_nodes(memory.encode())
 
     def proof_of_optimization(self):
         pass
@@ -109,3 +96,7 @@ class Worker(Node):
 
     def proof_of_model(self):
         pass
+
+    def get_job(self):
+        pass
+        # Confirm job details with smart contract, receive initial details from a node?
