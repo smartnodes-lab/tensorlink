@@ -19,7 +19,7 @@ class Node(threading.Thread):
     """
 
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
-                 url: str = "wss://ws.test.azero.dev"):
+                 callback=None):
         super(Node, self).__init__()
 
         # User & Connection info
@@ -27,6 +27,7 @@ class Node(threading.Thread):
         self.port: int = port
         self.debug = debug
         self.max_connections = max_connections
+        self.callback = callback
 
         # Node & Connection parameters
         self.inbound = []
@@ -175,9 +176,11 @@ class Node(threading.Thread):
                 self.reconnect.remove(node_to_check)
 
     def node_message(self, node: Connection, data):
-        time_delta = str(time.time() - float(data))
-        self.debug_print(f"node_message: {node.id}: start time: {data}")
-        self.debug_print(f"node_message: {node.id}: time delta: {time_delta}")
+        self.debug_print(f"node_message from {node.host}:{node.port}")
+        self.debug_print(f"{data}")
+
+        if self.callback is not None:
+            self.callback("node_message", self, node, data)
 
     def get_rsa_pub_key(self, b=False):
         generate_rsa_key_pair()

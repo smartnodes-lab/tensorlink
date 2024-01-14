@@ -1,145 +1,130 @@
-# from src.ml.worker import Worker
-# import time
+from src.ml.worker import Worker
+# from src.ml.master import Master
+import time
+
+
+# # List of IP addresses for workers
+# worker_ips = ["worker1_ip", "worker2_ip", "worker3_ip"]
+#
+# init_method = "tcp://" + ",".join(worker_ips) + ":port_number"
+#
+# dist.init_process_group("gloo", init_method=init_method)
 #
 #
-# # # List of IP addresses for workers
-# # worker_ips = ["worker1_ip", "worker2_ip", "worker3_ip"]
-# #
-# # init_method = "tcp://" + ",".join(worker_ips) + ":port_number"
-# #
-# # dist.init_process_group("gloo", init_method=init_method)
-# #
-# #
-# # def discover_devices():
-# #     num_cuda_devices = torch.cuda.device_count()
-# #     devices = []
-# #
-# #     for i in range(num_cuda_devices):
-# #         device_properties = torch.cuda.get_device_properties(i)
-# #         devices.append({
-# #             "index": i,
-# #             "name": device_properties.name,
-# #             "cuda_cores": device_properties.multi_processor_count * 64  # Assuming 64 CUDA cores per SM
-# #         })
-# #
-# #     return devices
-# #
-# #
-# # def assign_modules(modules, devices, latency_threshold):
-# #     devices.sort(key=lambda x: x["cuda_cores"], reverse=True)
-# #
-# #     assignments = []
-# #     current_device = 0
-# #
-# #     for module in modules:
-# #         pass
+# def discover_devices():
+#     num_cuda_devices = torch.cuda.device_count()
+#     devices = []
+#
+#     for i in range(num_cuda_devices):
+#         device_properties = torch.cuda.get_device_properties(i)
+#         devices.append({
+#             "index": i,
+#             "name": device_properties.name,
+#             "cuda_cores": device_properties.multi_processor_count * 64  # Assuming 64 CUDA cores per SM
+#         })
+#
+#     return devices
 #
 #
-# ip = "127.0.0.1"
-# port = 5026
+# def assign_modules(modules, devices, latency_threshold):
+#     devices.sort(key=lambda x: x["cuda_cores"], reverse=True)
 #
-# node = Worker(
-#     host=ip,
-#     port=port,
-#     debug=True
-# )
+#     assignments = []
+#     current_device = 0
 #
-# node2 = Worker(
-#     host=ip,
-#     port=port + 1,
-#     debug=True
-# )
+#     for module in modules:
+#         pass
+
+
+ip = "127.0.0.1"
+port = 5026
+
+node = Worker(
+    host=ip,
+    port=port,
+    debug=True
+)
+
+node2 = Worker(
+    host=ip,
+    port=port + 1,
+    debug=True
+)
+
+master = Master()
+
+node.start()
+node2.start()
+
+node.connect_with_node(ip, port + 1)
+
+# with open("tensor.pt", "rb") as f:
+#     tensor_bytes = f.read()
+# node.send_to_nodes(tensor_bytes)
+
+node.send_to_nodes("sallam".encode())
+time.sleep(3)
+
+node2.send_to_nodes("shallom!".encode())
+node.stop()
+node2.stop()
+
+
+# from networkx import DiGraph, draw
+# import matplotlib.pyplot as plt
+# from torchviz import make_dot
 #
-# node.start()
-# node2.start()
+# from transformers import BertModel, PreTrainedModel
+# import torch.nn as nn
+# import torch
 #
-# time.sleep(1)
 #
-# node.connect_with_node(ip, port + 1)
+# class DirectedGraph:
+#     def __init__(self):
+#         self.params = {}
+#         self.graph = DiGraph()
+#         self.optimizer = torch.optim.Adam
 #
-# start_time = str(time.time()).encode()
-# node.send_to_nodes(start_time)
+#     def recurse_model(self, model: nn.Module, input_size: torch.Tensor):
+#         if len(list(model.children())) > 0:
+#             for name, submodule in model.named_children():
+#                 input_size = self.recurse_model(submodule, input_size)
+#             return input_size
+#         else:
+#             # mem_estimate = estimate_memory_requirement(model, input_size, self.optimizer)
+#             # print(f"Memory estimate: {mem_estimate}")
 #
-# time.sleep(1)
+#             if isinstance(model, nn.modules.sparse.Embedding):
+#                 input_size = input_size.size() + (model.embedding_dim,)
+#                 print(f"Module Type: {type(model)}, Output size: {input_size}")
 #
-# node.stop()
-# node2.stop()
+#             elif hasattr(model, "out_features"):
+#                 input_size = input_size.size()[:-1] + (model.out_features,)
+#                 print(f"Module Type: {type(model)}, Output size: {input_size}")
 #
-
-
-from networkx import DiGraph, draw
-import matplotlib.pyplot as plt
-from torchviz import make_dot
-
-from transformers import BertModel, PreTrainedModel
-import torch.nn as nn
-import torch
-
-
-class DDG:
-    def __init__(self):
-        self.params = {}
-        self.seen = set()
-        self.graph = DiGraph()
-
-    def get_var_name(self, var):
-        # Get the name of the variable and its size
-        name = self.params.get(id(var), "")
-        return "%s\n %s" % (name, "(" + ", ".join(["%d" % v for v in var.size()]) + ")")
-
-    def get_nodes(self, fn):
-        assert not torch.is_tensor(fn)
-
-        print(f"Class: {fn.__class__.__name__}")
-
-        if hasattr(fn, "variable"):
-            # If the function has a variable (e.g., layer), add it to the graph
-            var = fn.variable
-            self.graph.add_node(str(id(var)), label=self.get_var_name(var))
-            self.graph.add_edge(str(id(var)), str(id(fn)), label="Layer")
-
-        # Add the current function to the graph
-        self.graph.add_node(str(id(fn)), label=str(fn.__class__.__name__))
-
-        if hasattr(fn, "next_functions"):
-            for u in fn.next_functions:
-                if u[0] is not None:
-                    # Add edges and nodes for the next functions in the computation
-                    self.graph.add_edge(str(id(u[0])), str(id(fn)), label="Next Function")
-                    self.get_nodes(u[0])
-
-        if hasattr(fn, "saved_tensors"):
-            for t in fn.saved_tensors:
-                # Add edges and nodes for saved tensors
-                self.graph.add_edge(str(id(t)), str(id(fn)), label="Saved Tensor")
-                self.graph.add_node(str(id(t)), label=self.get_var_name(t))
-
-    def parse_model(self, model: nn.Module, dummy_input: torch.Tensor):
-        output = model(dummy_input)
-        self.graph = DiGraph()
-
-        # Parse the model to build the graph
-        if hasattr(output, "grad_fn"):
-            self.get_nodes(output.grad_fn)
-
-        elif hasattr(output, "last_hidden_state"):
-            self.get_nodes(output.last_hidden_state.grad_fn)
-
-
-model = BertModel.from_pretrained('bert-base-uncased')
-dummy_input = torch.zeros((1, 3), dtype=torch.long)
-
-for i, (name, submodule) in enumerate(model.named_children()):
-    if i == 0:
-        dummy_input = submodule(dummy_input)
-    else:
-        # for n, (name, submodule) in enumerate(submodule.named_children()):
-        d = DDG()
-        d.parse_model(submodule, dummy_input)
-
-        plt.figure(figsize=(12, 8))
-        draw(d.graph, with_labels=True, font_size=8, font_color='black', node_color='skyblue', edge_color='gray', arrowsize=10)
-        plt.title("Computation Graph")
-        plt.show()
-        break
-        # break
+#             else:
+#                 input_size = input_size.size()
+#                 print(f"\033[91mModule Type: {type(model)}, Input size: {input_size}\033[0m")
+#
+#             return torch.zeros(input_size)
+#
+#     def get_nodes(self, fn):
+#         assert not torch.is_tensor(fn)
+#
+#         if hasattr(fn, "variable"):
+#             var = fn.variable
+#             self.graph.add_node(size_to_str(var.size()))
+#             self.graph.add_edge(size_to_str(var.size()), fn)
+#
+#         self.graph.add_node(fn)
+#
+#         if hasattr(fn, "next_functions"):
+#             for u in fn.next_functions:
+#                 if u[0] is not None:
+#                     self.graph.add_edge(u[0], fn)
+#                     self.get_nodes(u[0])
+#
+#         if hasattr(fn, "saved_tensors"):
+#             for t in fn.saved_tensors:
+#                 self.graph.add_edge(t.name(), fn.name())
+#                 self.graph.add_node(t.name())

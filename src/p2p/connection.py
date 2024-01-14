@@ -63,16 +63,18 @@ class Connection(threading.Thread):
         if packet.find(self.COMPR_CHAR) == len(packet) - 1:
             packet = self.decompress(packet[0:-1])
 
-        try:
-            packet_decoded = packet.decode('utf-8')
+        return packet
 
-            try:
-                return json.loads(packet_decoded)
-            except json.decoder.JSONDecodeError:
-                return packet_decoded
-
-        except UnicodeDecodeError:
-            return packet
+        # try:
+        #     packet_decoded = packet.decode()
+        #
+        #     try:
+        #         return json.loads(packet_decoded)
+        #     except json.decoder.JSONDecodeError:
+        #         return packet_decoded
+        #
+        # except UnicodeDecodeError:
+        #     return packet
 
     def run(self):
         buffer = b""
@@ -81,7 +83,7 @@ class Connection(threading.Thread):
             chunk = b""
 
             try:
-                chunk = self.sock.recv(4096)
+                chunk = self.sock.recv(10_000)
             except socket.timeout:
                 self.main_node.debug_print(f"connection timeout")
             except Exception as e:
@@ -96,11 +98,9 @@ class Connection(threading.Thread):
                     packet = buffer[:eot_pos]
                     buffer = buffer[eot_pos + 1:]
 
-                    self.main_node.node_message(self, self.parse_packet(packet))
-
                     eot_pos = buffer.find(self.EOT_CHAR)
 
-            time.sleep(0.01)
+            time.sleep(0.001)
 
         self.sock.settimeout(None)
         self.sock.close()

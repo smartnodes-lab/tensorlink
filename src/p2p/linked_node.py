@@ -17,8 +17,8 @@ class LinkedNode(Node):
     """
 
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
-                 url: str = "wss://ws.test.azero.dev"):
-        super(LinkedNode, self).__init__(host, port, debug, max_connections, url)
+                 url: str = "wss://ws.test.azero.dev", callback=None):
+        super(LinkedNode, self).__init__(host, port, debug, max_connections, callback)
 
         # Smart contract parameters
         self.chain = SubstrateInterface(url=url)
@@ -59,11 +59,14 @@ class LinkedNode(Node):
                 self.debug_print("node: connection refused, invalid ID proof!")
                 connection.close()
 
-    def run(self):
+    def listen(self):
         while not self.terminate_flag.is_set():
+            # Accept validation connections from registered nodes
             try:
+                # Unpack connection info
                 connection, client_address = self.sock.accept()
 
+                # Attempt SC-secured connection if we can handle more
                 if self.max_connections == 0 or len(self.inbound) < self.max_connections:
                     self.handshake(connection, client_address)
 
@@ -78,22 +81,7 @@ class LinkedNode(Node):
             except Exception as e:
                 print(str(e))
 
-            self.reconnect_nodes()
-
-            time.sleep(0.01)
-
-        print("Node stopping...")
-        for node in self.all_nodes:
-            node.stop()
-
-        time.sleep(1)
-
-        for node in self.all_nodes:
-            node.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
+            time.sleep(0.1)
 
     def get_job(self):
         # Confirm job details with smart contract, receive initial details from a node?

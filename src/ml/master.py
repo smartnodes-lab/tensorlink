@@ -28,9 +28,3 @@ def get_devices():
 def parse_model(model):
     pass
 
-
-if __name__ == '__main__':
-    gpu_memory_total = get_gpu_memory()
-
-    if gpu_memory_total is not None:
-        print(f"Total GPU Memory: {gpu_memory_total} MB")
