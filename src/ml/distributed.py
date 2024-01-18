@@ -91,6 +91,8 @@ def get_shape(torch_node):
 
 
 def torch_id(node):
+    # op = node.kind()
+    # input_ids = [i.unique()]
     return node.scopeName() + "/outputs/" + "/".join(["{}".format(o.unique()) for o in node.outputs()])
 
 
@@ -117,6 +119,7 @@ class Node:
         self.output_shape = output_shape
         self.params = params if params else {}
         self._caption = ""
+        self.memory_reqs = None
 
     @property
     def title(self):
@@ -231,7 +234,7 @@ class DirectedGraph:
         nodes = nodes if isinstance(nodes, list) else [nodes]
         # Is the new node part of the replace nodes (i.e. want to collapse
         # a group of nodes into one of them)?
-        collapse = self.id(node) in self.nodes
+        collapse = node_id(node) in self.nodes
         # Add new node and edges
         if not collapse:
             self.add_node(node)
@@ -264,16 +267,18 @@ class DirectedGraph:
         torch_graph = torch.onnx._optimize_graph(trace, torch.onnx.OperatorExportTypes.ONNX)
 
         for torch_node in torch_graph.nodes():
-            op = torch_node.kind()
+            op = torch_node.kind() + str(torch_node.output().type().sizes())
             params = {k: torch_node[k] for k in torch_node.attributeNames()}
             outputs = [o.unique() for o in torch_node.outputs()]  # TODO: inputs = [i.unique() for i in node.inputs()]
 
             # Get output shape
             output_shape = get_shape(torch_node)
+            node_name = torch_id(torch_node)
 
             # Add HL node
-            hl_node = Node(uid=torch_id(torch_node), name=None, op=op,
+            hl_node = Node(uid=node_name, name=None, op=op,
                            output_shape=output_shape, params=params)
+            # hl_node.memory_reqs = estimate_memory_requirement()
             self.add_node(hl_node)
 
             # Add edges
@@ -282,14 +287,14 @@ class DirectedGraph:
                 if set(outputs) & set(target_inputs):
                     self.add_edge_by_id(torch_id(torch_node), torch_id(target_torch_node), output_shape)
 
-    def build_dot(self):
+    def build_dot(self, filename):
         """Generate a GraphViz Dot graph.
 
         Returns a GraphViz Digraph object.
         """
+        # Build GraphViz Digraph
         from graphviz import Digraph
 
-        # Build GraphViz Digraph
         dot = Digraph()
         dot.attr("graph",
                  bgcolor=self.theme["background_color"],
@@ -298,7 +303,7 @@ class DirectedGraph:
                  fontcolor=self.theme["font_color"],
                  fontname=self.theme["font_name"],
                  margin=self.theme["margin"],
-                 rankdir="LR",
+                 rankdir="TD",
                  pad=self.theme["padding"])
         dot.attr("node", shape="box",
                  style="filled", margin="0,0",
@@ -321,19 +326,25 @@ class DirectedGraph:
                 label += "<tr><td align='right' cellpadding='2'>x{}</td></tr>".format(n.repeat)
             label = "<<table border='0' cellborder='0' cellpadding='0'>" + label + "</table>>"
             dot.node(str(k), label)
+
         for a, b, label in self.edges:
             if isinstance(label, (list, tuple)):
                 label = "x".join([str(l or "?") for l in label])
 
             dot.edge(str(a), str(b), label)
-        return dot
+
+        dot.render(filename=filename)
 
 
 d = DirectedGraph()
 m = BertModel.from_pretrained('bert-base-uncased')
-d.create_graph(m, torch.zeros((1, 1), dtype=torch.long))
-dot = d.build_dot()
-dot.render()
+_, submodule1 = list(m.named_children())[0]
+_, submodule2 = list(m.named_children())[1]
+
+dummy_input = torch.zeros((1, 1), dtype=torch.long)
+
+d.create_graph(m, dummy_input)
+d.build_dot("Bert.pdf")
 
 # out = subm(torch.zeros((1, 1), dtype=torch.long))
 # d.get_nodes(out[0].grad_fn)
