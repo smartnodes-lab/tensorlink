@@ -32,7 +32,7 @@ def get_gpu_memory():
 
 def get_first_layer(model: nn.Module):
     if len(list(model.children())) > 0:
-        _, submodule = next(model.named_children())
+        submodule = next(model.children())
         return get_first_layer(submodule)
     else:
         return model
@@ -67,7 +67,7 @@ class Worker(LinkedNode):
 
         self.model = None
         self.optimizer = None
-        self.loss = nn.MSELoss()
+        self.loss = None
 
     def stream_data(self):
         pass
@@ -138,20 +138,14 @@ class Worker(LinkedNode):
         self.send_to_node(node, tensor_bytes)
         # Handle tensor files post-send
 
-    def initialize_job(self):
+    def initialize_job(self, model: nn.Module):
         """
         Todo:
             - connect to master node via SC and load in model
             - attempt to assign and relay model to other idle connected workers
             - determine relevant connections
         """
-        self.model = nn.Sequential(
-            nn.Linear(10, 1024),
-            nn.Linear(1024, 1024)
-        ) if self.port == 5026 else nn.Sequential(
-            nn.Linear(1024, 1024),
-            nn.Linear(10, 1024)
-        )
+        self.model = model
 
         self.optimizer = torch.optim.Adam(self.model.parameters())
         self.previous_node = 0

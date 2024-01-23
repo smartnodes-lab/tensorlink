@@ -40,41 +40,6 @@ THEMES = {
 }
 
 
-def parameter_memory(module):
-    return sum(p.numel() * p.element_size() for p in module.parameters())
-
-
-def activation_memory(output: torch.Tensor):
-    return output.element_size() * output.numel()
-
-
-def gradient_memory(module):
-    gradients = [p.grad for p in module.parameters() if p.grad is not None]
-    return sum(g.numel() * g.element_size() for g in gradients) if gradients else 0
-
-
-def optimizer_memory(optimizer):
-    return sum(state.numel() * state.element_size() for group in optimizer.param_groups for state in group['params'])
-
-
-def estimate_memory_requirement(layer, dummy_input: torch.Tensor, optimizer):
-    layer.eval()
-
-    output = layer(dummy_input)
-    loss = output.sum()
-
-    optimizer = optimizer(layer.parameters())
-    optimizer.zero_grad()
-    loss.backward()
-
-    params_mem = parameter_memory(layer)
-    activations_mem = activation_memory(output)  # in case of non-modular activations (eg. nn.functional.relu)
-    gradient_mem = gradient_memory(layer)
-    optimizer_mem = optimizer_memory(optimizer)
-
-    return sum([params_mem, activations_mem, gradient_mem, optimizer_mem]) / (1024 ** 2)
-
-
 def size_to_str(size):
     return '(' + ', '.join(['%d' % v for v in size]) + ')'
 
@@ -338,13 +303,15 @@ class DirectedGraph:
 
 d = DirectedGraph()
 m = BertModel.from_pretrained('bert-base-uncased')
-_, submodule1 = list(m.named_children())[0]
-_, submodule2 = list(m.named_children())[1]
+d.create_graph(m, torch.zeros((1, 1), dtype=torch.long))
 
-dummy_input = torch.zeros((1, 1), dtype=torch.long)
-
-d.create_graph(m, dummy_input)
-d.build_dot("Bert.pdf")
+# _, submodule1 = list(m.named_children())[0]
+# _, submodule2 = list(m.named_children())[1]
+#
+# dummy_input = torch.zeros((1, 1), dtype=torch.long)
+#
+# d.create_graph(m, dummy_input)
+# d.build_dot("Bert.pdf")
 
 # out = subm(torch.zeros((1, 1), dtype=torch.long))
 # d.get_nodes(out[0].grad_fn)

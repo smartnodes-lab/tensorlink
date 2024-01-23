@@ -33,6 +33,7 @@ class Node(threading.Thread):
         self.inbound = []
         self.outbound = []
         self.reconnect = []
+        self.latency = {}
         self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
@@ -179,6 +180,9 @@ class Node(threading.Thread):
         self.debug_print(f"node_message from {node.host}:{node.port}")
         self.debug_print(f"{data}")
 
+        if data == b"PING":
+            self.send_to_node(node, b"PONG")
+
         if self.callback is not None:
             self.callback("node_message", self, node, data)
 
@@ -231,3 +235,9 @@ class Node(threading.Thread):
         )
 
         return decrypted_data
+
+    def measure_latency(self):
+        for node in self.all_nodes:
+            if node != self:
+                start_time = time.time()
+                self.send_to_node(node, b"PING")

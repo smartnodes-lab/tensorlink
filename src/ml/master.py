@@ -1,30 +1,15 @@
+from src.ml.worker import Worker
 import torch.nn as nn
 import subprocess
 
 
-def get_gpu_memory():
-    try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader,nounits'],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        if result.returncode == 0:
-            # Extract the GPU memory total from the output
-            gpu_memory_total = int(result.stdout.strip())
-            return gpu_memory_total
+class Master(Worker):
+    def __init__(self, host, port):
+        super(Master, self).__init__(host, port)
 
-        else:
-            print(f"Error running nvidia-smi: {result.stderr}")
-            return None
+        self.model = None
+        self.optimizer = None
+        self.loss = None
 
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-
-def get_devices():
-    # Query network for
-    pass
-
-
-def parse_model(model):
-    pass
-
+    def load_model(self, model):
+        self.model = model
