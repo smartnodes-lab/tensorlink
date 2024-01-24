@@ -1,4 +1,4 @@
-from transformers import BertModel
+from transformers import BertModel, AutoModelForCausalLM
 from torchviz import make_dot
 import torch.nn as nn
 import networkx as nx
@@ -23,6 +23,14 @@ def parse_edge(edge):
         left_num = edge[:arrow_idx].strip()
         right_num = edge[arrow_idx + 2:].strip().split()[0]
         return left_num, right_num
+
+
+def handle_output(tensor):
+    if hasattr(tensor, "last_hidden_state"):
+        tensor = tensor.last_hidden_state
+    if isinstance(tensor, tuple):
+        tensor = tensor[0]
+    return tensor
 
 
 def create_graph(module: nn.Module, dummy_input: torch.Tensor):
@@ -53,17 +61,22 @@ class DAG:
         self.edges = edges
         self.graph = nx.DiGraph()
         self.graph.add_edges_from(self.edges)
-        self.graph = nx.relabel_nodes(self.graph, self.nodes)
 
     def is_subgraph(self, subgraph: nx.DiGraph):
-        gm = nx.isomorphism.GraphMatcher(self.graph, subgraph)
+        parent_graph = nx.relabel_nodes(self.graph, self.nodes)
+        gm = nx.isomorphism.GraphMatcher(parent_graph, subgraph)
         return gm.subgraph_is_monomorphic()
 
-    def distribute_model(self):
-        pass
+
+def estimate_memory(module):
+    """
+    Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy
+    forward pass and thus is preferred for now.
+    """
+    return 4 * sum(param.numel() * param.element_size() for param in module.parameters())
 
 
 # model = AutoModelForCausalLM.from_pretrained("microsoft/phi-2")
 model = BertModel.from_pretrained('bert-base-uncased')
-dummy_in = torch.zeros((32, 1), dtype=torch.long)
-recurse_model(model, dummy_in)
+dummy_in = torch.zeros((1, 1), dtype=torch.long)
+dag = DAG(model, dummy_in)

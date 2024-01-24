@@ -1,5 +1,7 @@
 from src.ml.worker import Worker
-# from src.ml.master import Master
+
+from transformers import BertModel
+import torch
 import time
 
 
@@ -30,9 +32,6 @@ ip = "127.0.0.1"
 port = 5026
 
 
-master =
-
-
 worker1 = Worker(
     host=ip,
     port=port,
@@ -45,22 +44,17 @@ worker2 = Worker(
     debug=True
 )
 
-# master = Master()
 
 worker1.start()
 worker2.start()
+worker1.connect_with_node("127.0.0.1", port + 1)
 
-worker1.connect_with_node(ip, port + 1)
-
-# with open("tensor.pt", "rb") as f:
-#     tensor_bytes = f.read()
-# node.send_to_nodes(tensor_bytes)
-
-worker1.send_to_nodes("sallam".encode())
 time.sleep(1)
 
-worker2.send_to_nodes("shallom!".encode())
-time.sleep(1)
+# Worker 1 acts as master node in this scenario
+model = BertModel.from_pretrained("bert-base-uncased")
+optimizer = torch.optim.Adam
+worker1.send_module(next(model.children()))
 
 worker1.stop()
 worker2.stop()

@@ -32,6 +32,14 @@ def optimizer_memory(optimizer):
     return sum(state.numel() * state.element_size() for group in optimizer.param_groups for state in group['params'])
 
 
+def estimate_memory(module):
+    """
+    Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy
+    forward pass and thus is preferred for now.
+    """
+    return 4 * sum(param.numel() * param.element_size() for param in module.parameters())
+
+
 def estimate_memory_requirement(layer, dummy_input: torch.Tensor, optimizer):
     layer.eval()
     output = handle_output(layer(dummy_input.detach()))
@@ -128,6 +136,14 @@ def edit_module_code(module):
                             wrapped_module = ModuleWrapper(original_module)
                             setattr(module, target.attr, wrapped_module)
     return module
+
+
+def get_first_layer(model: nn.Module):
+    if len(list(model.children())) > 0:
+        submodule = next(model.children())
+        return get_first_layer(submodule)
+    else:
+        return model
 
 
 def parse_node(node):

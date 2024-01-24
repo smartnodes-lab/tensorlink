@@ -9,16 +9,15 @@ import time
 import os
 
 
-class LinkedNode(Node):
+class SmartNode(Node):
     """
     TODO:
-    - confirm workers public key with smart contract
-
+    - confirm workers public key with smart contract ID
     """
 
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
                  url: str = "wss://ws.test.azero.dev", callback=None):
-        super(LinkedNode, self).__init__(host, port, debug, max_connections, callback)
+        super(SmartNode, self).__init__(host, port, debug, max_connections, callback)
 
         # Smart contract parameters
         self.chain = SubstrateInterface(url=url)
@@ -34,19 +33,28 @@ class LinkedNode(Node):
         #     )
 
     def handshake(self, connection, client_address):
+        """
+        Validates incoming connection's keys with a random number swap
+        """
         connected_node_id = connection.recv(4096)
 
+        # Generate random number to confirm with incoming node
         randn = str(random.random())
         message = randn
 
+        # Authenticate incoming node's id is valid key
         if authenticate_public_key(connected_node_id) is True:
             id_bytes = connected_node_id
+
+            # Encrypt random number with node's key
             connection.send(
                 self.encrypt(message.encode(), id_bytes)
             )
 
+            # Await response
             response = connection.recv(4096)
 
+            # Confirm number and form conenction
             if response.decode() == randn:
                 thread_client = self.create_connection(connection, connected_node_id, client_address[0],
                                                        client_address[1])
@@ -60,6 +68,9 @@ class LinkedNode(Node):
                 connection.close()
 
     def listen(self):
+        """
+        Listen for incoming connections and confirm via custom handshake
+        """
         while not self.terminate_flag.is_set():
             # Accept validation connections from registered nodes
             try:

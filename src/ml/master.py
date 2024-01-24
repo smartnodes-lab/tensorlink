@@ -1,4 +1,6 @@
+from src.ml.model_analyzer import distribute_model
 from src.ml.worker import Worker
+
 import torch.nn as nn
 import subprocess
 
@@ -13,3 +15,4 @@ class Master(Worker):
 
     def load_model(self, model):
         self.model = model
+        distribute_model(model)

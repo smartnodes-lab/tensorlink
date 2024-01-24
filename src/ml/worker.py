@@ -1,11 +1,12 @@
-from src.p2p.linked_node import LinkedNode
+from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
+from src.ml.model_analyzer import estimate_memory, get_first_layer
 
-from transformers import BertModel
 import torch.nn as nn
 import threading
 import random
 import socket
+import pickle
 import torch
 import queue
 import time
@@ -30,75 +31,78 @@ def get_gpu_memory():
     return memory
 
 
-def get_first_layer(model: nn.Module):
-    if len(list(model.children())) > 0:
-        submodule = next(model.children())
-        return get_first_layer(submodule)
-    else:
-        return model
-
-
-def load_module(module_bytes: bytes):
-    tensor = torch.load(io.BytesIO(module_bytes))
-    return tensor
-
-
-class Worker(LinkedNode):
+class Worker(SmartNode):
     """
     model:
     - neighbouring and master node connections (including their relevant parameters + reputation?)
     - relevant data pertaining to worker's proof of work
 
-    TODO:
-    - confirm workers public key with smart contract
+    Todo:
+        - confirm workers public key with smart contract
     """
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
                  url: str = "wss://ws.test.azero.dev"):
-        super(Worker, self).__init__(host, port, debug, max_connections, url)
+        super(Worker, self).__init__(host, port, debug, max_connections, url, self.stream_data)
 
         # Model training parameters
         self.training = False
+        self.master = False
 
         self.forward_batches = queue.Queue()
         self.backward_batches = queue.Queue()
 
-        self.previous_node = None
-        self.following_node = None
-
-        self.model = None
+        self.modules = []
         self.optimizer = None
         self.loss = None
 
-    def stream_data(self):
-        pass
+        # Data transmission variables
+        self.BoT = 0x00.to_bytes(1, 'big')
+        self.EoT = 0x01.to_bytes(1, 'big')
+
+    def stream_data(self, data: bytes, node: Connection):
+        """
+        Handle incoming tensors from connected nodes and new job requests
+
+        Todo:
+            - ensure correct nodes sending data
+            - track position of tensor in the training session
+            - potentially move/forward method directly to Connection to save data via identifying data
+                type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
+        """
+        try:
+            if b"TENSOR" == data[:6]:
+                if self.training:
+                    tensor = pickle.loads(data[6:])
+
+                    # Confirm identity/role of node
+                    if node in self.inbound:
+                        self.forward_batches.put(tensor)
+                    elif node in self.outbound:
+                        self.backward_batches.put(tensor)
+
+            elif b"MODEL_REQUEST" == data[:13]:
+                if self.training is False:
+                    # Load in model
+                    pickled = pickle.loads(data[13:])
+                    self.modules.append(pickled)
+                    self.training = True
+
+        except Exception as e:
+            self.debug_print(f"worker:stream_data:{e}")
 
     def run(self):
         # Thread for handling incoming connections
         listener = threading.Thread(target=self.listen, daemon=True)
         listener.start()
 
-        # # Thread for handling incoming data
+        # # Thread for handling incoming tensors from connected nodes
         # data_stream = threading.Thread(target=self.stream_data, daemon=True)
         # data_stream.start()
 
         # Main worker loop
         while not self.terminate_flag.is_set():
             if self.training:
-                if self.backward_batches.empty() is False:
-                    # Grab backwards pass from previous node
-                    assoc_forward, backward_batch = self.backward_batches.get()
-                    loss = self.loss(assoc_forward, backward_batch)
-                    self.optimizer.zero_grad()
-                    loss.backward(retain_graph=True)
-                    self.optimizer.step()
-
-                    dvalues = get_first_layer(self.model).weight.grad.detach()
-                    self.send_tensor(dvalues, self.previous_node)
-
-                elif self.forward_batches.empty() is False:
-                    forward_batch = self.forward_batches.get()
-                    out = self.model(forward_batch)
-                    self.send_tensor(out, self.following_node)
+                self.train_loop()
 
             # Include the following steps:
             # 1. Broadcast GPU memory statistics
@@ -129,14 +133,34 @@ class Worker(LinkedNode):
         self.sock.close()
         print("Node stopped")
 
+    def train_loop(self):
+        # Complete any outstanding back propagations
+        if self.backward_batches.empty() is False:
+            # Grab backwards pass from forward node and our associated forward pass output
+            assoc_forward, backward_batch = self.backward_batches.get()
+
+            # Continue backwards pass on our section of model
+            loss = assoc_forward.backward(backward_batch, retain_graph=True)  # Do we need retain graph?
+            self.optimizer.zero_grad()
+            self.optimizer.step()
+
+            # Pass along backwards pass to next node
+            dvalues = get_first_layer(self.model).weight.grad.detach()
+            self.send_tensor(dvalues, self.previous_node)
+        # Complete any forward pass
+        elif self.forward_batches.empty() is False:
+            forward_batch = self.forward_batches.get()
+            out = self.model(forward_batch)
+            self.send_tensor(out, self.following_node)
+
     def send_tensor(self, tensor: torch.Tensor, node: Connection):
-        torch.save(tensor, "tensor.pt")
-
-        with open("tensor.pt", "rb") as f:
-            tensor_bytes = f.read()
-
+        # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
+        tensor_bytes = b"TENSOR" + pickle.dumps(tensor)
+        self.debug_print(f"worker: sending {round(tensor_bytes.__sizeof__() / 1e9, 3)} GB")
         self.send_to_node(node, tensor_bytes)
-        # Handle tensor files post-send
+
+    def send_module(self, module: nn.Module):
+        pass
 
     def initialize_job(self, model: nn.Module):
         """
@@ -145,22 +169,25 @@ class Worker(LinkedNode):
             - attempt to assign and relay model to other idle connected workers
             - determine relevant connections
         """
-        self.model = model
-
-        self.optimizer = torch.optim.Adam(self.model.parameters())
-        self.previous_node = 0
-        self.following_node = 1
+        self.optimizer = torch.optim.Adam
         self.training = True
+        self.distribute_model(model)  # Add master vs worker functionality
 
-        # Dummy model split in 2, preset optimizer, static node determination for testing
-        submodule = nn.Sequential(
-            nn.Linear(10, 1024),
-            nn.Linear(1024, 1024))
+    def distribute_model(self, model: nn.Module):
+        """
+        Distribute model to connected nodes, assign modules based on memory requirements & latency
+        """
+        offloaded_memory = 0
+        candidate_node = max(enumerate(node.memory for node in self.all_nodes), key=lambda x: x[1])[0]
 
-        optimizer = torch.optim.Adam(submodule.parameters())
+        if len(list(model.children())) > 0:
+            for name, submodule in model.named_children():
+                submodule_memory_estimate = estimate_memory(submodule)
+                offloaded_memory += submodule_memory_estimate
 
-        self.load_job(submodule, optimizer)
+                self.send_module(submodule)
 
+    """Key Methods to Implement"""
     def proof_of_optimization(self):
         pass
 

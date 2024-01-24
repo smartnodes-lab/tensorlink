@@ -8,6 +8,10 @@ import base64
 
 
 class Connection(threading.Thread):
+    """
+    Connection thread between two nodes that are able to send/stream data from/to
+    the connected node.
+    """
     def __init__(self, main_node, sock: socket.socket, id: str, host: str, port: int):
         super(Connection, self).__init__()
 
@@ -18,11 +22,12 @@ class Connection(threading.Thread):
         self.terminate_flag = threading.Event()
 
         self.id = id
-        self.sock.settimeout(5)
+        self.sock.settimeout(3)
+        self.latency = 0
 
         # End of transmission + compression characters for the network messages.
-        self.EOT_CHAR = 0x04.to_bytes(1, 'big')
-        self.COMPR_CHAR = 0x02.to_bytes(1, 'big')
+        self.EOT_CHAR = 0x03.to_bytes(4, 'big')
+        self.COMPR_CHAR = 0x02.to_bytes(4, 'big')
 
     def compress(self, data):
         compressed = data
@@ -40,7 +45,7 @@ class Connection(threading.Thread):
         try:
             decompressed = zlib.decompress(decompressed)
         except Exception as e:
-            print(f"Exception: {e}")
+            self.main_node.debug_print(f"decompression-error: {e}")
 
         return decompressed
 
@@ -90,6 +95,8 @@ class Connection(threading.Thread):
                 self.terminate_flag.set()
                 self.main_node.debug_print(f"unexpected error: {e}")
 
+
+
             if chunk != b"":
                 buffer += chunk
                 eot_pos = buffer.find(self.EOT_CHAR)
@@ -97,10 +104,18 @@ class Connection(threading.Thread):
                 while eot_pos > 0:
                     packet = buffer[:eot_pos]
                     buffer = buffer[eot_pos + 1:]
-                    self.main_node.node_message(self, self.parse_packet(packet))
                     eot_pos = buffer.find(self.EOT_CHAR)
+                    self.main_node.handle_message(self, self.parse_packet(packet))
 
             time.sleep(0.001)
 
         self.sock.settimeout(None)
         self.sock.close()
+
+    def measure_latency(self) -> float:
+        start_time = time.time()
+        self.send(b"LATENCY_TEST")
+        self.sock.recv(128)
+        end_time = time.time()
+        return end_time - start_time
+

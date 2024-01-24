@@ -15,7 +15,7 @@ class Node(threading.Thread):
     """
     TODO:
     - add EOF sequence for streaming messages
-
+    - ping pong auto-handling
     """
 
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
@@ -33,7 +33,7 @@ class Node(threading.Thread):
         self.inbound = []
         self.outbound = []
         self.reconnect = []
-        self.latency = {}
+
         self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
@@ -52,7 +52,7 @@ class Node(threading.Thread):
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.host, self.port))
-        self.sock.settimeout(3.0)
+        self.sock.settimeout(10.0)
         self.sock.listen(1)
 
     def create_connection(self, connection: socket.socket, id: str, host: str, port: int) -> Connection:
@@ -176,15 +176,14 @@ class Node(threading.Thread):
                     f"reconnect_nodes: removing node {node_to_check['host']}:{node_to_check['port']}")
                 self.reconnect.remove(node_to_check)
 
-    def node_message(self, node: Connection, data):
-        self.debug_print(f"node_message from {node.host}:{node.port}")
-        self.debug_print(f"{data}")
+    def handle_message(self, node: Connection, data):
+        self.debug_print(f"handle_message from {node.host}:{node.port}")
 
-        if data == b"PING":
-            self.send_to_node(node, b"PONG")
+        # if data == b"PING":
+        #     self.send_to_node(node, b"PONG")
 
         if self.callback is not None:
-            self.callback("node_message", self, node, data)
+            self.callback(data, node)
 
     def get_rsa_pub_key(self, b=False):
         generate_rsa_key_pair()
