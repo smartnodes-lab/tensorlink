@@ -178,7 +178,7 @@ class Node(threading.Thread):
 
     def handle_message(self, node: Connection, data):
         self.debug_print(f"handle_message from {node.host}:{node.port}")
-
+        self.debug_print(f"{data}")
         # if data == b"PING":
         #     self.send_to_node(node, b"PONG")
 

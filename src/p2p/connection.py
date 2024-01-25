@@ -11,6 +11,10 @@ class Connection(threading.Thread):
     """
     Connection thread between two nodes that are able to send/stream data from/to
     the connected node.
+
+    TODO
+        Send message size before to prepare accordingly.
+        Switch between saving bytes to loading directly based on packet size.
     """
     def __init__(self, main_node, sock: socket.socket, id: str, host: str, port: int):
         super(Connection, self).__init__()
@@ -22,12 +26,13 @@ class Connection(threading.Thread):
         self.terminate_flag = threading.Event()
 
         self.id = id
-        self.sock.settimeout(3)
+        self.sock.settimeout(60)
         self.latency = 0
+        self.chunk_size = 131_072
 
         # End of transmission + compression characters for the network messages.
-        self.EOT_CHAR = 0x03.to_bytes(4, 'big')
-        self.COMPR_CHAR = 0x02.to_bytes(4, 'big')
+        self.EOT_CHAR = b"SHALLOM"
+        self.COMPR_CHAR = 0x02.to_bytes(16, 'big')
 
     def compress(self, data):
         compressed = data
@@ -54,9 +59,16 @@ class Connection(threading.Thread):
             if compression:
                 data = self.compress(data)
                 if data is not None:
-                    self.sock.sendall(data + self.COMPR_CHAR + self.EOT_CHAR)
+                    for i in range(0, len(data), self.chunk_size):
+                        chunk = data[i:i + self.chunk_size]
+                        self.sock.sendall(chunk + self.COMPR_CHAR)
+                    self.sock.sendall(self.EOT_CHAR)
+                    print("Done Sending")
             else:
-                self.sock.sendall(data + self.EOT_CHAR)
+                for i in range(0, len(data), self.chunk_size):
+                    chunk = data[i:i + self.chunk_size]
+                    self.sock.sendall(chunk)
+                self.sock.sendall(self.EOT_CHAR)
         except Exception as e:
             self.main_node.debug_print(f"connection send error: {e}")
             self.stop()
@@ -83,31 +95,46 @@ class Connection(threading.Thread):
 
     def run(self):
         buffer = b""
+        b_size = 0
 
         while not self.terminate_flag.is_set():
             chunk = b""
 
             try:
-                chunk = self.sock.recv(10_000)
+                chunk = self.sock.recv(1_000_000)
             except socket.timeout:
                 self.main_node.debug_print(f"connection timeout")
             except Exception as e:
                 self.terminate_flag.set()
                 self.main_node.debug_print(f"unexpected error: {e}")
 
-
-
             if chunk != b"":
+                eot_pos = chunk.find(self.EOT_CHAR)
+
+                # We have reached the end of one nodes processing
+                if eot_pos > 0:
+                    packet = buffer + chunk[:eot_pos]
+                    buffer = chunk[eot_pos + 1:]
+                    with open(f"streamed_data_{self.host}_{self.port}", "ab") as f:
+                        f.write(packet)
+                        time.sleep(0.001)
+                        b_size += buffer.__sizeof__()
+
+                    self.main_node.handle_message(self, b"DONE STREAM")
+
+                if buffer.__sizeof__() > 40_000_000:
+                    try:
+                        with open(f"streamed_data_{self.host}_{self.port}", "ab") as f:
+                            b_size += buffer.__sizeof__()
+                            f.write(buffer)
+                            buffer = b""
+
+                    except Exception as e:
+                        raise e
+
                 buffer += chunk
-                eot_pos = buffer.find(self.EOT_CHAR)
 
-                while eot_pos > 0:
-                    packet = buffer[:eot_pos]
-                    buffer = buffer[eot_pos + 1:]
-                    eot_pos = buffer.find(self.EOT_CHAR)
-                    self.main_node.handle_message(self, self.parse_packet(packet))
-
-            time.sleep(0.001)
+            time.sleep(0.01)
 
         self.sock.settimeout(None)
         self.sock.close()

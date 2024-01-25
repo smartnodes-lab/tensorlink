@@ -1,17 +1,30 @@
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
-from src.ml.model_analyzer import estimate_memory, get_first_layer
+from src.ml.model_analyzer import estimate_memory, get_first_layer, edit_module_code
 
 import torch.nn as nn
 import threading
+import inspect
 import random
-import socket
 import pickle
 import torch
 import queue
 import time
-import io
-import os
+import ast
+
+
+class DistributedModule(nn.Module):
+    def __init__(self, module, master_node, worker_node: Connection):
+        super().__init__()
+        self.master_node = master_node
+        self.worker_node = worker_node
+
+    def forward(self, *args, **kwargs):
+        self.master_node.send_tensor((args, kwargs), self.worker_node)
+        # while self.master_node.
+
+    def backward(self, *args, **kwargs):
+        self.master_node.send_tensor((args, kwargs), self.worker_node)
 
 
 def get_gpu_memory():
@@ -27,6 +40,9 @@ def get_gpu_memory():
             memory_stats = torch.cuda.memory_stats(device)
             device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
             memory += device_memory
+    else:
+        # CPU should be able to handle 1GB (temporary fix)
+        memory += 1.4e9
 
     return memory
 
@@ -47,11 +63,13 @@ class Worker(SmartNode):
         # Model training parameters
         self.training = False
         self.master = False
+        self.available_memory = get_gpu_memory()
 
+        self.connections = {}
         self.forward_batches = queue.Queue()
         self.backward_batches = queue.Queue()
 
-        self.modules = []
+        self.model = None
         self.optimizer = None
         self.loss = None
 
@@ -80,15 +98,24 @@ class Worker(SmartNode):
                     elif node in self.outbound:
                         self.backward_batches.put(tensor)
 
-            elif b"MODEL_REQUEST" == data[:13]:
-                if self.training is False:
+            elif b"MODEL" == data[:5]:
+                print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                if self.training and not self.model:
                     # Load in model
-                    pickled = pickle.loads(data[13:])
-                    self.modules.append(pickled)
+                    pickled = pickle.loads(data[5:])
+                    self.model = pickled
                     self.training = True
+                    print(f"Loaded submodule!")
+
+            elif b"DONE STREAM" == data:
+                with open(f"streamed_data_{node.host}_{node.port}", "rb") as f:
+                    streamed_bytes = f.read()
+
+                self.stream_data(streamed_bytes, node)
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
+            raise e
 
     def run(self):
         # Thread for handling incoming connections
@@ -136,6 +163,7 @@ class Worker(SmartNode):
     def train_loop(self):
         # Complete any outstanding back propagations
         if self.backward_batches.empty() is False:
+            next_node = self.all_nodes[0]
             # Grab backwards pass from forward node and our associated forward pass output
             assoc_forward, backward_batch = self.backward_batches.get()
 
@@ -146,46 +174,97 @@ class Worker(SmartNode):
 
             # Pass along backwards pass to next node
             dvalues = get_first_layer(self.model).weight.grad.detach()
-            self.send_tensor(dvalues, self.previous_node)
+            self.send_tensor(dvalues, next_node)
+
         # Complete any forward pass
         elif self.forward_batches.empty() is False:
+            next_node = self.all_nodes[0]
             forward_batch = self.forward_batches.get()
-            out = self.model(forward_batch)
-            self.send_tensor(out, self.following_node)
+            args, kwargs = forward_batch
+            out = self.model(*args, **kwargs)
+            self.send_tensor(out, next_node)
 
-    def send_tensor(self, tensor: torch.Tensor, node: Connection):
+    def send_tensor(self, tensor, node: Connection):
         # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
         tensor_bytes = b"TENSOR" + pickle.dumps(tensor)
         self.debug_print(f"worker: sending {round(tensor_bytes.__sizeof__() / 1e9, 3)} GB")
         self.send_to_node(node, tensor_bytes)
 
-    def send_module(self, module: nn.Module):
-        pass
+    def send_module(self, module: nn.Module, node: Connection):
+        module_bytes = pickle.dumps(module)
+        module_bytes = b"MODEL" + module_bytes
+        print("SENDING MODULE")
+        self.send_to_node(node, module_bytes)
+        time.sleep(10)
 
-    def initialize_job(self, model: nn.Module):
-        """
-        Todo:
-            - connect to master node via SC and load in model
-            - attempt to assign and relay model to other idle connected workers
-            - determine relevant connections
-        """
-        self.optimizer = torch.optim.Adam
-        self.training = True
-        self.distribute_model(model)  # Add master vs worker functionality
+    # def host_job(self, model: nn.Module):
+    #     """
+    #     Todo:
+    #         - connect to master node via SC and load in model
+    #         - attempt to assign and relay model to other idle connected workers
+    #         - determine relevant connections
+    #     """
+    #     self.optimizer = torch.optim.Adam
+    #     self.training = True
+    #     self.distribute_model(model)  # Add master vs worker functionality
 
-    def distribute_model(self, model: nn.Module):
+    def distribute_submodules(self, model: nn.Module):
         """
         Distribute model to connected nodes, assign modules based on memory requirements & latency
         """
-        offloaded_memory = 0
-        candidate_node = max(enumerate(node.memory for node in self.all_nodes), key=lambda x: x[1])[0]
+        # available_nodes = self.all_nodes
+        # candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
+        candidate_node = self.all_nodes[0]  # Placeholder
+        candidate_node_memory = 2e9  # keeps track of offloaded memory to node
 
-        if len(list(model.children())) > 0:
-            for name, submodule in model.named_children():
-                submodule_memory_estimate = estimate_memory(submodule)
-                offloaded_memory += submodule_memory_estimate
+        source_code = inspect.getsource(type(model))
+        parsed_code = ast.parse(source_code)
 
-                self.send_module(submodule)
+        children = dict(model.named_children())
+
+        for node in ast.walk(parsed_code):
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+                for sub_node in node.body:
+                    if isinstance(sub_node, ast.Assign):
+                        for target in sub_node.targets:
+                            if (
+                                isinstance(target, ast.Attribute)
+                                and isinstance(target.value, ast.Name)
+                                and target.attr in children.keys()
+                            ):
+                                # Get to submodules defined in main model __init__
+                                original_module = getattr(model, target.attr)
+                                module_memory = estimate_memory(original_module)  # Must accommodate batch sizes etc
+
+                                # Accommodate on our device if we can
+                                if module_memory < self.available_memory:
+                                    self.available_memory -= module_memory
+
+                                # Distribute otherwise
+                                elif module_memory < candidate_node_memory:
+                                    print(f"distributing {target.attr}")
+                                    wrapped_module = DistributedModule(original_module, self, candidate_node)
+                                    self.send_module(original_module, candidate_node)
+                                    setattr(model, target.attr, wrapped_module)
+                                    candidate_node_memory -= module_memory
+
+        self.model = model
+
+    # if len(list(model.children())) > 0:
+    #     for name, submodule in model.named_children():
+    #         submodule_memory_estimate = estimate_memory(submodule)
+    #
+    #         # Compute sections we are able to accommodate
+    #         if submodule_memory_estimate < self.available_memory:
+    #             self.available_memory -= submodule_memory_estimate
+    #         elif submodule_memory_estimate < candidate_node_memory:
+    #             # Connect submodule to node
+    #             submodule = edit_module_code(submodule)
+    #             candidate_node_memory -= submodule_memory_estimate
+    #         else:
+    #             offloaded_memory = 0
+    #             # available_nodes = available_nodes[:candidate_node] + available_nodes[candidate_nodes + 1:]
+    #             # candidate_nodes = max(enumerate(node.memory for node in available_nodes), key=lambda x: x[1])[0]
 
     """Key Methods to Implement"""
     def proof_of_optimization(self):

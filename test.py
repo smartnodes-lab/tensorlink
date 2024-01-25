@@ -47,17 +47,33 @@ worker2 = Worker(
 
 worker1.start()
 worker2.start()
-worker1.connect_with_node("127.0.0.1", port + 1)
 
+worker1.connect_with_node("127.0.0.1", port + 1)
 time.sleep(1)
+
+worker2.training = True
+
+# print(f"Worker 1: {worker1.all_nodes}")
+# print(f"Worker 2: {worker2.all_nodes}")
+#
+# print("Sending data to Worker 2")
+# worker1.send_to_node(worker1.all_nodes[0], b"SALLLAM" * 5_000 + b"SEEEEELIIIIM!")
+# time.sleep(1)
+#
+# worker2.send_to_node(worker2.all_nodes[0], b"Okay.")
+# time.sleep(1)
+
 
 # Worker 1 acts as master node in this scenario
 model = BertModel.from_pretrained("bert-base-uncased")
-optimizer = torch.optim.Adam
-worker1.send_module(next(model.children()))
+dummy_input = torch.zeros((1, 1), dtype=torch.long)
 
-worker1.stop()
-worker2.stop()
+optimizer = torch.optim.Adam
+worker1.distribute_submodules(model)
+worker1.model(dummy_input)
+
+# worker1.stop()
+# worker2.stop()
 
 
 # def is_subgraph(onnx_graph, onnx_subgraph):
