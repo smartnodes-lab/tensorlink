@@ -21,9 +21,10 @@ class DistributedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         self.master_node.send_tensor((args, kwargs), self.worker_node)
-        # while self.master_node.
+        # Must somehow wait for the response output from the worker
 
     def backward(self, *args, **kwargs):
+        # Must somehow get the response output from the worker
         self.master_node.send_tensor((args, kwargs), self.worker_node)
 
 
@@ -41,7 +42,7 @@ def get_gpu_memory():
             device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
             memory += device_memory
     else:
-        # CPU should be able to handle 1GB (temporary fix)
+        # CPU should be able to handle 1 GB (temporary fix)
         memory += 1.4e9
 
     return memory
@@ -99,13 +100,13 @@ class Worker(SmartNode):
                         self.backward_batches.put(tensor)
 
             elif b"MODEL" == data[:5]:
-                print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.training and not self.model:
                     # Load in model
                     pickled = pickle.loads(data[5:])
                     self.model = pickled
                     self.training = True
-                    print(f"Loaded submodule!")
+                    self.debug_print(f"Loaded submodule: {pickled}")
 
             elif b"DONE STREAM" == data:
                 with open(f"streamed_data_{node.host}_{node.port}", "rb") as f:
@@ -173,8 +174,8 @@ class Worker(SmartNode):
             self.optimizer.step()
 
             # Pass along backwards pass to next node
-            dvalues = get_first_layer(self.model).weight.grad.detach()
-            self.send_tensor(dvalues, next_node)
+            dvalues = get_first_layer(self.model).weight.grad
+            self.send_tensor(dvalues.detach(), next_node)
 
         # Complete any forward pass
         elif self.forward_batches.empty() is False:
@@ -182,7 +183,7 @@ class Worker(SmartNode):
             forward_batch = self.forward_batches.get()
             args, kwargs = forward_batch
             out = self.model(*args, **kwargs)
-            self.send_tensor(out, next_node)
+            self.send_tensor(out.detach(), next_node)
 
     def send_tensor(self, tensor, node: Connection):
         # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
@@ -212,6 +213,7 @@ class Worker(SmartNode):
         """
         Distribute model to connected nodes, assign modules based on memory requirements & latency
         """
+
         # available_nodes = self.all_nodes
         # candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
         candidate_node = self.all_nodes[0]  # Placeholder
@@ -249,23 +251,7 @@ class Worker(SmartNode):
                                     candidate_node_memory -= module_memory
 
         self.model = model
-
-    # if len(list(model.children())) > 0:
-    #     for name, submodule in model.named_children():
-    #         submodule_memory_estimate = estimate_memory(submodule)
-    #
-    #         # Compute sections we are able to accommodate
-    #         if submodule_memory_estimate < self.available_memory:
-    #             self.available_memory -= submodule_memory_estimate
-    #         elif submodule_memory_estimate < candidate_node_memory:
-    #             # Connect submodule to node
-    #             submodule = edit_module_code(submodule)
-    #             candidate_node_memory -= submodule_memory_estimate
-    #         else:
-    #             offloaded_memory = 0
-    #             # available_nodes = available_nodes[:candidate_node] + available_nodes[candidate_nodes + 1:]
-    #             # candidate_nodes = max(enumerate(node.memory for node in available_nodes), key=lambda x: x[1])[0]
-
+        
     """Key Methods to Implement"""
     def proof_of_optimization(self):
         pass
