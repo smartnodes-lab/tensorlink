@@ -213,6 +213,14 @@ class Worker(SmartNode):
         """
         Distribute model to available connected nodes, assign modules based on memory requirements & latency
         """
+        # Test set of nodes, real set will be obtained from either the worker's list of nodes,
+        # some form of network propagation, or the smart contract
+        available_nodes = [
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []}
+        ]
 
         # Placeholder for method to grab candidate nodes from the network
         # available_nodes = self.all_nodes
@@ -275,11 +283,14 @@ class Worker(SmartNode):
 
     def broadcast_statistics(self):
         memory = str(get_gpu_memory())
+        self.send_to_nodes(memory.encode())
 
+    def receive_worker_statistics(self):
+        pass
+
+    def proof_of_learning(self):
         if self.training:
             # Incorporate proofs of training
             proof1 = self.proof_of_model()
             proof2 = self.proof_of_optimization()
             proof3 = self.proof_of_output()
-
-        self.send_to_nodes(memory.encode())

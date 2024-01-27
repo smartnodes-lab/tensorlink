@@ -1,6 +1,6 @@
-from src.ml.distributed import run_worker
+from src.ml.distributed import run_worker, distribute_model
 
-import torch.distributed as dist
+from transformers import BertModel
 import torch.multiprocessing as mp
 import time
 import os
@@ -11,8 +11,11 @@ os.environ["MASTER_PORT"] = "5028"
 
 
 if __name__ == "__main__":
-    world_size = 2
+    model = BertModel.from_pretrained("bert-base-uncased")
+    # distribute_model(model)
+    submodules = list(model.children())
+    world_size = 3
     tik = time.time()
-    mp.spawn(run_worker, args=(world_size,), nprocs=world_size)
+    mp.spawn(run_worker, args=(world_size, submodules), nprocs=world_size)
     tok = time.time()
     print(f"Execution time: {round(tok - tik, 1)}s")

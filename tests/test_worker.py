@@ -38,6 +38,7 @@ worker1 = Worker(
     debug=True
 )
 
+
 worker2 = Worker(
     host=ip,
     port=port + 1,
@@ -57,7 +58,7 @@ worker2.training = True
 # print(f"Worker 2: {worker2.all_nodes}")
 #
 # print("Sending data to Worker 2")
-# worker1.send_to_node(worker1.all_nodes[0], b"SALLLAM" * 5_000 + b"SEEEEELIIIIM!")
+# worker1.send_to_node(worker1.all_nodes[0], b"SALLLAM" * 5_000 + b"shallom!")
 # time.sleep(1)
 #
 # worker2.send_to_node(worker2.all_nodes[0], b"Okay.")

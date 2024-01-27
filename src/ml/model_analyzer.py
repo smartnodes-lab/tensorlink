@@ -5,16 +5,6 @@ import torch
 import ast
 
 
-class ModuleWrapper(nn.Module):
-    def __init__(self, module):
-        super().__init__()
-        self.module = module
-
-    def forward(self, *args, **kwargs):
-        forward_args = {k: v for k, v in kwargs.items() if k in inspect.signature(self.module.forward).parameters}
-        return self.module(*args, **forward_args)
-
-
 def parameter_memory(module):
     return sum(param.numel() * param.element_size() for param in module.parameters())
 
@@ -66,76 +56,50 @@ def handle_output(tensor):
     return tensor
 
 
-# Distribute model to available nodes
-def distribute_model(model, dummy_input, available_nodes=None):
+# Analyze model for distribution
+def distribute_model(model, available_nodes=None, indent=0):
+    class Colours:
+        RED = '\033[91m'
+        GREEN = '\033[92m'
+        YELLOW = '\033[93m'
+        BLUE = '\033[94m'
+        RESET = '\033[0m'
+
     if available_nodes is None:
-        # Test set of nodes
+        # Test set of nodes, real set will be obtained from either the worker's list of nodes,
+        # some form of network propagation, or the smart contract
         available_nodes = [
-            {
-                "memory": 4e9,
-                "latency_matrix": []
-            },
-            {
-                "memory": 4e9,
-                "latency_matrix": []
-            },
-            {
-                "memory": 4e9,
-                "latency_matrix": []
-            },
-            {
-                "memory": 4e9,
-                "latency_matrix": []
-            }
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []},
+            {"memory": 1e9, "latency_matrix": []}
         ]
 
+    # While we initialize the model candidate worker nodes should be put on standby as we assign the submodules
+
     # Estimate memory requirements for the model
-    _, model_mem = estimate_memory_requirement(model, dummy_input, torch.optim.Adam)
-    print(f"Parent Module: {model.__class__}\n{round(model_mem / 1e9, 3)} GB")
-    offloaded_memory = 0
+    model_memory = estimate_memory(model)
+    print("   " * indent + f"Parent Module: {round(model_memory / 1e9, 3)} GB")
+
+    # Variables for keeping track of offloaded workers + modules
     candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
+    indent += 1
 
     if len(list(model.children())) > 0:
         for name, submodule in model.named_children():
-            # dummy_input, acc = distribute_model(submodule, dummy_input)
-            dummy_input, submodule_mem = estimate_memory_requirement(submodule, dummy_input, torch.optim.Adam)
-            print(f"    {name}: {round(submodule_mem / 1e9, 3)} GB")
-
+            submodule_memory = estimate_memory(submodule)
             # TODO:
             #  Priority: check for lowest latency x high memory node to offload first submodule to.
             #  Later: if submodule is too big we can call the distribute model again.
-            if submodule_mem < available_nodes[candidate_node]["memory"]:
-                edit_module_code(submodule)
-                offloaded_memory += submodule_mem
+            if submodule_memory < available_nodes[candidate_node]["memory"]:
+                available_nodes[candidate_node]["memory"] -= submodule_memory
+                print(Colours.GREEN + "   " * indent + f"{name}: {round(submodule_memory / 1e9, 3)} GB" + Colours.RESET)
             else:
-                offloaded_memory = 0
                 available_nodes = available_nodes[:candidate_node] + available_nodes[candidate_node + 1:]
                 candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
-
-
-# Wrap assigned module in our distributed package
-def edit_module_code(module):
-    source_code = inspect.getsource(type(module))
-    parsed_code = ast.parse(source_code)
-
-    children = dict(module.named_children())
-
-    # Search for children in the init file
-    for node in ast.walk(parsed_code):
-        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
-            for sub_node in node.body:
-                if isinstance(sub_node, ast.Assign):
-                    for target in sub_node.targets:
-                        if (
-                            isinstance(target, ast.Attribute)
-                            and isinstance(target.value, ast.Name)
-                            and target.attr in children.keys()
-                        ):
-                            # Grab original module and wrap it
-                            original_module = getattr(module, target.attr)
-                            wrapped_module = ModuleWrapper(original_module)
-                            setattr(module, target.attr, wrapped_module)
-    return module
+                print("   " * indent + Colours.RED + "Can't accommodate sub-module on worker, distributing further..." +
+                      Colours.RESET)
+                distribute_model(submodule, available_nodes, indent)
 
 
 def get_first_layer(model: nn.Module):
