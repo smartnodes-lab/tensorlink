@@ -56,6 +56,55 @@ def handle_output(tensor):
     return tensor
 
 
+def inspect_module_code(self, model: nn.Module, submodules):
+    """
+    Distribute model to available connected nodes, assign modules based on memory requirements & latency
+    """
+
+    # Placeholder for method to grab candidate nodes from the network
+    # available_nodes = self.all_nodes
+    # candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
+    candidate_node = self.all_nodes[0]  # Placeholder
+    candidate_node_memory = 1.4e9  # keeps track of offloaded memory to node
+
+    # Grab model source code
+    source_code = inspect.getsource(type(model))
+    parsed_code = ast.parse(source_code)
+    children = dict(model.named_children())
+
+    for node in ast.walk(parsed_code):
+        # Identify init method of model
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+            for sub_node in node.body:
+                if isinstance(sub_node, ast.Assign):
+                    for target in sub_node.targets:
+                        # Find modules in init method that match the name of the named_children
+                        if (
+                            isinstance(target, ast.Attribute)
+                            and isinstance(target.value, ast.Name)
+                            and target.attr in children.keys()
+                        ):
+                            # Get the original module + required memory
+                            original_module = getattr(model, target.attr)
+                            module_memory = estimate_memory(original_module) # Must improve estimation (accommodate batch sizes etc)
+
+                            # Accommodate on our device if we can
+                            if module_memory < self.available_memory:
+                                self.available_memory -= module_memory
+
+                            # Distribute otherwise
+                            elif module_memory < candidate_node_memory:
+                                print(f"distributing {target.attr}")
+
+                                # Wrapping module custom nn.Module that will handle forward and backward passes
+                                # between nodes
+                                wrapped_module = DistributedModule(self, candidate_node)
+
+                                self.send_module(original_module, candidate_node)
+                                setattr(model, target.attr, wrapped_module)
+                                candidate_node_memory -= module_memory
+
+
 # Analyze model for distribution
 def distribute_model(model, available_nodes=None, indent=0):
     class Colours:

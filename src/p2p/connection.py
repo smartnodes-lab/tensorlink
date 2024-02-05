@@ -63,11 +63,13 @@ class Connection(threading.Thread):
                         chunk = data[i:i + self.chunk_size]
                         self.sock.sendall(chunk + self.COMPR_CHAR)
                     self.sock.sendall(self.EOT_CHAR)
-                    print("Done Sending")
+            elif len(data) < self.chunk_size:
+                self.sock.sendall(data + self.EOT_CHAR)
             else:
                 for i in range(0, len(data), self.chunk_size):
                     chunk = data[i:i + self.chunk_size]
                     self.sock.sendall(chunk)
+
                 self.sock.sendall(self.EOT_CHAR)
         except Exception as e:
             self.main_node.debug_print(f"connection send error: {e}")
@@ -110,29 +112,31 @@ class Connection(threading.Thread):
 
             if chunk != b"":
                 eot_pos = chunk.find(self.EOT_CHAR)
+                file_name = f"streamed_data_{self.host}_{self.port}"
 
                 # We have reached the end of one nodes processing
                 if eot_pos > 0:
                     packet = buffer + chunk[:eot_pos]
-                    buffer = chunk[eot_pos + 1:]
-                    with open(f"streamed_data_{self.host}_{self.port}", "ab") as f:
+                    with open(file_name, "ab") as f:
                         f.write(packet)
                         time.sleep(0.001)
-                        b_size += buffer.__sizeof__()
+                        buffer = b""
+                        b_size = 0
 
                     self.main_node.handle_message(self, b"DONE STREAM")
 
-                if buffer.__sizeof__() > 40_000_000:
+                elif len(buffer) > 40_000_000:
                     try:
-                        with open(f"streamed_data_{self.host}_{self.port}", "ab") as f:
-                            b_size += buffer.__sizeof__()
+                        with open(file_name, "ab") as f:
+                            b_size += len(buffer)
                             f.write(buffer)
-                            buffer = b""
+                            buffer = chunk
 
                     except Exception as e:
                         raise e
 
-                buffer += chunk
+                else:
+                    buffer += chunk
 
             time.sleep(0.01)
 

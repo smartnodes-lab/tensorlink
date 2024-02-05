@@ -1,6 +1,8 @@
 from src.ml.worker import Worker
 
 from transformers import BertModel
+from src.ml.model_analyzer import handle_output
+import torch.nn as nn
 import torch
 import time
 
@@ -32,27 +34,29 @@ ip = "127.0.0.1"
 port = 5026
 
 
-worker1 = Worker(
+master = Worker(
     host=ip,
     port=port,
     debug=True
 )
 
 
-worker2 = Worker(
+worker1 = Worker(
     host=ip,
     port=port + 1,
     debug=True
 )
 
 
+master.start()
 worker1.start()
-worker2.start()
 
-worker1.connect_with_node("127.0.0.1", port + 1)
+master.connect_with_node("127.0.0.1", port + 1)
+worker1.connect_with_node("127.0.0.1", port)
 time.sleep(1)
 
-worker2.training = True
+master.training = True
+worker1.training = True
 
 # print(f"Worker 1: {worker1.all_nodes}")
 # print(f"Worker 2: {worker2.all_nodes}")
@@ -65,13 +69,45 @@ worker2.training = True
 # time.sleep(1)
 
 
+def custom_backward(s):
+    print("POOP")
+
+
 # Worker 1 acts as master node in this scenario
 model = BertModel.from_pretrained("bert-base-uncased")
+model.backward = custom_backward
+
+# model = nn.Sequential(nn.Linear(10, 6000000), nn.Linear(6000000, 2))
 dummy_input = torch.zeros((1, 1), dtype=torch.long)
 
 optimizer = torch.optim.Adam
-worker1.distribute_submodules(model)
-worker1.model(dummy_input)
+master.distribute_model(model)
+out = master.model.forward(dummy_input)
+print(out)
+# out.sum().backward()
 
-# worker1.stop()
-# worker2.stop()
+
+# layer1 = nn.Linear(10, 100)
+# layer2 = nn.Linear(100, 10)
+# inp = torch.zeros((1, 10))
+#
+# op1 = torch.optim.Adam(layer1.parameters())
+# op2 = torch.optim.Adam(layer2.parameters())
+#
+# out1 = layer1(inp)
+# intermediate = out1.clone().detach().requires_grad_()
+#
+# out2 = layer2(intermediate)
+# out2.retain_grad()
+# loss2 = out2.sum()
+# loss2.backward()
+#
+# out1.backward(intermediate.grad, retain_graph=True)
+#
+# op1.zero_grad()
+# op2.zero_grad()
+# op1.step()
+# op2.step()
+
+master.stop()
+worker1.stop()

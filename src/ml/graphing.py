@@ -75,9 +75,13 @@ class DAG:
         gm = nx.isomorphism.GraphMatcher(parent_graph, subgraph)
         return gm.subgraph_is_monomorphic()
 
+    def has_residuals(self):
+        pass
+
 
 # model = AutoModelForCausalLM.from_pretrained("microsoft/phi-2")
 model = BertModel.from_pretrained('bert-base-uncased')
+submodels = model.children()
 dummy_in = torch.zeros((1, 1), dtype=torch.long)
 dag = DAG(model, dummy_in)
 
