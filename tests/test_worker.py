@@ -51,41 +51,19 @@ worker1 = Worker(
 master.start()
 worker1.start()
 
-master.connect_with_node("127.0.0.1", port + 1)
-worker1.connect_with_node("127.0.0.1", port)
-time.sleep(1)
+master.connect_with_node(ip, port + 1)
+worker1.connect_with_node(ip, port)
 
 master.training = True
 worker1.training = True
 
-# print(f"Worker 1: {worker1.all_nodes}")
-# print(f"Worker 2: {worker2.all_nodes}")
-#
-# print("Sending data to Worker 2")
-# worker1.send_to_node(worker1.all_nodes[0], b"SALLLAM" * 5_000 + b"shallom!")
-# time.sleep(1)
-#
-# worker2.send_to_node(worker2.all_nodes[0], b"Okay.")
-# time.sleep(1)
-
-
-def custom_backward(s):
-    print("POOP")
-
-
-# Worker 1 acts as master node in this scenario
 model = BertModel.from_pretrained("bert-base-uncased")
-model.backward = custom_backward
-
-# model = nn.Sequential(nn.Linear(10, 6000000), nn.Linear(6000000, 2))
 dummy_input = torch.zeros((1, 1), dtype=torch.long)
 
-optimizer = torch.optim.Adam
-master.distribute_model(model)
+master.distribute_model(model)  # Move to bert forward source code
 out = master.model.forward(dummy_input)
-print(out)
-# out.sum().backward()
-
+out = handle_output(out)
+out.sum().backward()
 
 # layer1 = nn.Linear(10, 100)
 # layer2 = nn.Linear(100, 10)
@@ -95,10 +73,9 @@ print(out)
 # op2 = torch.optim.Adam(layer2.parameters())
 #
 # out1 = layer1(inp)
-# intermediate = out1.clone().detach().requires_grad_()
+# intermediate = out1.clone().detach().requires_grad_()  # On second node
 #
 # out2 = layer2(intermediate)
-# out2.retain_grad()
 # loss2 = out2.sum()
 # loss2.backward()
 #

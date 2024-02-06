@@ -1,38 +1,46 @@
-import torch
-
 from src.ml.distributed import DistributedModel
+from src.ml.model_analyzer import handle_output
+from src.ml.worker import Worker
 
 from transformers import BertModel
-import torch.multiprocessing as mp
-import torch.distributed.rpc as rpc
 import torch.nn as nn
+import torch
 import time
 import os
 
 
-os.environ["MASTER_ADDR"] = "127.0.0.1"
-os.environ["MASTER_PORT"] = "5028"
-
-
 if __name__ == "__main__":
+    ip = "127.0.0.1"
+    port = 5026
+
+    master = Worker(host=ip, port=port, debug=True)
+    worker1 = Worker(host=ip, port=port + 1, debug=True)
+
+    master.master = True
+    master.training = True
+    worker1.training = True
+
+    master.start()
+    worker1.start()
+    master.connect_with_node(ip, port + 1)
+    worker1.connect_with_node(ip, port)
 
     model = BertModel.from_pretrained("bert-base-uncased")
-    # model = nn.Sequential(nn.Linear(10, 6000000), nn.Linear(6000000, 2))
+    dummy_input = torch.zeros((1, 1), dtype=torch.long)
 
-    model = DistributedModel(model)
+    nodes = [
+        {"id": 1, "memory": 1.4e9, "connection": master.outbound[0], "latency_matrix": []}
+    ]
 
-    # model = nn.ModuleList([
-    #     nn.Linear(1, 10),
-    #     nn.Linear(10, 10),
-    #     nn.Linear(10, 10)
-    # ])
-    #
-    # submodules = list(model.children())
-    # world_size = 3
-    # tik = time.time()
-    #
-    # mp.spawn(run_worker, args=(world_size, submodules), nprocs=world_size)
-    #
-    # tok = time.time()
-    # print(f"Execution time: {round(tok - tik, 1)}s")
+    distributed = DistributedModel(master, model, nodes)
+    distributed.create_distributed_model()
 
+    distributed.master_node.intermediates.append([dummy_input])  # To be moved to model source code
+    out = distributed.model.forward(dummy_input)
+
+    loss = handle_output(out).sum()
+
+    distributed.backward(loss)
+
+    master.stop()
+    worker1.stop()

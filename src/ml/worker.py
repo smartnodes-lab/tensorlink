@@ -26,10 +26,10 @@ class DistributedModule(nn.Module):
         self.master_node.send_forward(self.worker_node, (args, kwargs))
 
         # Must somehow wait for the response output from the worker
-        time.sleep(1)
+        time.sleep(3)
 
-        if self.master_node.forward_batches.not_empty:
-            return self.master_node.forward_batches.get()
+        if self.master_node.forward_relays.not_empty:
+            return self.master_node.forward_relays.get()
 
     def backward(self, *args, **kwargs):
 
@@ -66,6 +66,7 @@ class Worker(SmartNode):
         - link workers to database for complete offloading
         - different subclasses of Worker for memory requirements to designate memory-specific
             tasks, ie distributing a model too large to handle on a single computer / user
+        - function that detaches the huggingface wrapped outputs tensor without modifying the rest
     """
     def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
                  url: str = "wss://ws.test.azero.dev"):
@@ -75,10 +76,11 @@ class Worker(SmartNode):
         self.training = False
         self.master = False
         self.available_memory = get_gpu_memory()
+        self.nodes = []
 
-        self.connections = {}
-        self.forward_batches = queue.Queue()
-        self.backward_batches = queue.Queue()
+        self.forward_relays = queue.Queue()
+        self.backward_relays = queue.Queue()
+        self.intermediates = []
 
         self.model = None
         self.optimizer = None
@@ -106,9 +108,9 @@ class Worker(SmartNode):
 
                     # Confirm identity/role of node
                     if node in self.inbound:
-                        self.forward_batches.put(tensor)
+                        self.forward_relays.put(tensor)
                     elif node in self.outbound:
-                        self.backward_batches.put(tensor)
+                        self.backward_relays.put(tensor)
 
             elif b"MODEL" == data[:5]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
@@ -130,9 +132,15 @@ class Worker(SmartNode):
 
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD")
-                if self.training and self.model:
+                if self.master or (self.training and self.model):
                     pickled = pickle.loads(data[7:])
-                    self.forward_batches.put(pickled)
+                    self.forward_relays.put(pickled)
+
+            elif b"BACKWARD" == data[:8]:
+                self.debug_print(f"RECEIVED BACKWARD")
+                if self.master or (self.training and self.model):
+                    pickled = pickle.loads(data[8:])
+                    self.backward_relays.put(pickled)
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
@@ -147,15 +155,18 @@ class Worker(SmartNode):
         # Placeholder for method to grab candidate nodes from the network
         # available_nodes = self.all_nodes
         # candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
-        candidate_node = self.outbound[0]  # Placeholder
-        candidate_node_memory = 1.4e9  # keeps track of offloaded memory to node
+        if not self.nodes:
+            self.nodes = [
+                {"id": 1, "memory": 1.4e9, "connection": self.outbound[0], "latency_matrix": []}
+            ]
+
+        candidate_node = self.nodes[0]  # Placeholder
+        candidate_node_memory = candidate_node["memory"]  # keeps track of offloaded memory to node
 
         # Create a dict of submodules and available nodes to distribute task to.
         # Ideally we build the model with our own memory (or designated memory) and then
         # create a distributed model wrapper handling the distributed environment
         # Could be replaced with smart contract function in the future.
-        # for name, submodule in model_children:
-        #     module_memory = estimate_memory(submodule)
 
         # Grab model source code
         source_code = inspect.getsource(type(model))
@@ -188,9 +199,9 @@ class Worker(SmartNode):
 
                                     # Wrapping module custom nn.Module that will handle forward and backward passes
                                     # between nodes
-                                    wrapped_module = DistributedModule(self, candidate_node)
+                                    wrapped_module = DistributedModule(self, candidate_node["connection"])
 
-                                    self.send_module(original_module, candidate_node)
+                                    self.send_module(original_module, candidate_node["connection"])
                                     setattr(model, target.attr, wrapped_module)
                                     candidate_node_memory -= module_memory
 
@@ -241,26 +252,28 @@ class Worker(SmartNode):
 
     def train_loop(self):
         # Complete any outstanding back propagations
-        if self.backward_batches.empty() is False:
+        if self.backward_relays.empty() is False:
             next_node = self.outbound[0]  # Placeholder for the connecting node
 
-            # Grab backwards pass from forward node and our associated forward pass output
-            assoc_forward, backward_batch = self.backward_batches.get()
+            # Grab backwards pass from forward node and our associated input/output from forward pass
+            loss_relay = self.backward_relays.get()
+            assoc_inter, assoc_output = self.intermediates.pop(-1)
 
             # Continue backwards pass on our section of model
-            loss = assoc_forward.backward(backward_batch, retain_graph=True)  # Do we need retain graph?
+            assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
 
-            self.optimizer.zero_grad()
-            self.optimizer.step()
+            # self.optimizer.zero_grad()
+            # self.optimizer.step()
+
+            dvalues = assoc_inter.grad
 
             # Pass along backwards pass to next node
-            dvalues = assoc_forward.grad
-            self.send_tensor(dvalues.detach(), next_node)
+            self.send_backward(next_node, dvalues)
 
         # Complete any forward pass
-        elif self.forward_batches.empty() is False:
+        elif self.forward_relays.empty() is False:
             next_node = self.inbound[0]  # Placeholder for the appropriate node
-            prev_forward = self.forward_batches.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
+            prev_forward = self.forward_relays.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
 
             if isinstance(prev_forward, tuple):
                 args, kwargs = prev_forward
@@ -268,7 +281,14 @@ class Worker(SmartNode):
                 args = prev_forward
                 kwargs = {}
 
-            out = self.model(handle_output(args), **kwargs)
+            # Clear tensor of any previous info, set up for custom backward pass
+            inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
+            out = self.model(inp, **kwargs)
+
+            # Store output and input tensor for backward pass
+            self.intermediates.append([inp, handle_output(out)])
+
+            # Relay forward pass to the next node
             self.send_forward(next_node, out)
 
     def send_tensor(self, tensor, node: Connection):
@@ -279,6 +299,10 @@ class Worker(SmartNode):
 
     def send_forward(self, node: Connection, args):
         pickled_data = b"FORWARD" + pickle.dumps(args)
+        self.send_to_node(node, pickled_data)
+
+    def send_backward(self, node: Connection, args):
+        pickled_data = b"BACKWARD" + pickle.dumps(args)
         self.send_to_node(node, pickled_data)
 
     def send_module(self, module: nn.Module, node: Connection):
