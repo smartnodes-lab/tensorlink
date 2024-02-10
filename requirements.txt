@@ -27,7 +27,7 @@ PyNaCl==1.5.0
 requests==2.31.0
 scalecodec==1.2.6
 six==1.16.0
-substrate-interface==1.7.3
+substrate-interface==1.7.5
 sympy==1.12
 toolz==0.12.0
 torch==2.1.2

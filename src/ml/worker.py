@@ -1,17 +1,13 @@
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
-from src.ml.model_analyzer import estimate_memory, get_first_layer, handle_output
+from src.ml.model_analyzer import estimate_memory, handle_output
 
-import torch.distributed.rpc as rpc
 import torch.nn as nn
 import threading
-import inspect
-import random
 import pickle
 import torch
 import queue
 import time
-import ast
 import os
 
 
@@ -68,9 +64,10 @@ class Worker(SmartNode):
             tasks, ie distributing a model too large to handle on a single computer / user
         - function that detaches the huggingface wrapped outputs tensor without modifying the rest
     """
-    def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
-                 url: str = "wss://ws.test.azero.dev"):
-        super(Worker, self).__init__(host, port, debug, max_connections, url, self.stream_data)
+    def __init__(self, host: str, port: int, wallet_address: str, debug: bool = False, max_connections: int = 0):
+        super(Worker, self).__init__(
+            host, port, wallet_address, debug=debug, max_connections=max_connections, callback=self.stream_data
+        )
 
         # Model training parameters
         self.training = False
@@ -102,7 +99,16 @@ class Worker(SmartNode):
         """
 
         try:
-            if b"TENSOR" == data[:6]:
+            if b"DONE STREAM" == data:
+                file_name = f"streamed_data_{node.host}_{node.port}"
+
+                with open(file_name, "rb") as f:
+                    streamed_bytes = f.read()
+
+                self.stream_data(streamed_bytes, node)
+                os.remove(file_name)
+
+            elif b"TENSOR" == data[:6]:
                 if self.training:
                     tensor = pickle.loads(data[6:])
 
@@ -121,15 +127,6 @@ class Worker(SmartNode):
                     self.training = True
                     self.debug_print(f"Loaded submodule!")
 
-            elif b"DONE STREAM" == data:
-                file_name = f"streamed_data_{node.host}_{node.port}"
-
-                with open(file_name, "rb") as f:
-                    streamed_bytes = f.read()
-
-                self.stream_data(streamed_bytes, node)
-                os.remove(file_name)
-
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD")
                 if self.master or (self.training and self.model):
@@ -142,70 +139,15 @@ class Worker(SmartNode):
                     pickled = pickle.loads(data[8:])
                     self.backward_relays.put(pickled)
 
+            elif b"POL" == data[:3]:
+                self.debug_print(f"RECEIVED POL REQUEST")
+                if self.training and self.model:
+                    proof_of_learning = self.proof_of_learning()
+                    self.send_to_node(node, proof_of_learning)
+
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
             raise e
-
-    def distribute_model(self, model: nn.Module):
-        """
-        Distribute model to available connected nodes, assign modules based on memory requirements & latency
-        """
-        model_children = dict(model.named_children())
-
-        # Placeholder for method to grab candidate nodes from the network
-        # available_nodes = self.all_nodes
-        # candidate_node = max(enumerate([node["memory"] for node in available_nodes]), key=lambda x: x[1])[0]
-        if not self.nodes:
-            self.nodes = [
-                {"id": 1, "memory": 1.4e9, "connection": self.outbound[0], "latency_matrix": []}
-            ]
-
-        candidate_node = self.nodes[0]  # Placeholder
-        candidate_node_memory = candidate_node["memory"]  # keeps track of offloaded memory to node
-
-        # Create a dict of submodules and available nodes to distribute task to.
-        # Ideally we build the model with our own memory (or designated memory) and then
-        # create a distributed model wrapper handling the distributed environment
-        # Could be replaced with smart contract function in the future.
-
-        # Grab model source code
-        source_code = inspect.getsource(type(model))
-        parsed_code = ast.parse(source_code)
-
-        # Replace offloaded modules in model source code with DistributedModules
-        for node in ast.walk(parsed_code):
-            # Identify init method of model
-            if isinstance(node, ast.FunctionDef) and node.name == "__init__":
-                for sub_node in node.body:
-                    if isinstance(sub_node, ast.Assign):
-                        for target in sub_node.targets:
-                            # Find modules in init method that match the name of the named_children
-                            if (
-                                isinstance(target, ast.Attribute)
-                                and isinstance(target.value, ast.Name)
-                                and target.attr in model_children.keys()
-                            ):
-                                # Get the original module + required memory
-                                original_module = getattr(model, target.attr)
-                                module_memory = estimate_memory(original_module)  # Must improve estimation (accommodate batch sizes etc)
-
-                                # Accommodate on our device if we can
-                                if module_memory < self.available_memory:
-                                    self.available_memory -= module_memory
-
-                                # Distribute otherwise
-                                elif module_memory < candidate_node_memory:
-                                    print(f"distributing {target.attr}")
-
-                                    # Wrapping module custom nn.Module that will handle forward and backward passes
-                                    # between nodes
-                                    wrapped_module = DistributedModule(self, candidate_node["connection"])
-
-                                    self.send_module(original_module, candidate_node["connection"])
-                                    setattr(model, target.attr, wrapped_module)
-                                    candidate_node_memory -= module_memory
-
-        self.model = model
 
     def run(self):
         # Thread for handling incoming connections
@@ -257,7 +199,7 @@ class Worker(SmartNode):
 
             # Grab backwards pass from forward node and our associated input/output from forward pass
             loss_relay = self.backward_relays.get()
-            assoc_inter, assoc_output = self.intermediates.pop(-1)
+            assoc_input, assoc_output = self.intermediates.pop(-1)
 
             # Continue backwards pass on our section of model
             assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
@@ -265,7 +207,7 @@ class Worker(SmartNode):
             # self.optimizer.zero_grad()
             # self.optimizer.step()
 
-            dvalues = assoc_inter.grad
+            dvalues = assoc_input.grad
 
             # Pass along backwards pass to next node
             self.send_backward(next_node, dvalues)
@@ -311,6 +253,17 @@ class Worker(SmartNode):
         print("SENDING MODULE")
         self.send_to_node(node, module_bytes)
         time.sleep(1)
+
+    def send_proof_of_learning(self, dummy_input: torch.Tensor):
+        proof = {
+            "node_id": self.name,
+            "memory": self.available_memory,
+            "learning": self.training,
+            "model": self.model,
+        }
+
+        if self.training:
+            proof["output"] = handle_output(self.model(dummy_input)).sum()
 
     # def host_job(self, model: nn.Module):
     #     """

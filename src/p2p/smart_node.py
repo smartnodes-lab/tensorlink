@@ -1,7 +1,8 @@
 from src.auth.rsa import get_public_key_obj, authenticate_public_key
+from src.auth.substrate_keys import load_substrate_keypair
 from src.p2p.node import Node
 
-from substrateinterface import SubstrateInterface, Keypair
+from substrateinterface import SubstrateInterface
 from substrateinterface.contracts import ContractCode, ContractInstance, ContractMetadata
 import random
 import socket
@@ -15,22 +16,21 @@ class SmartNode(Node):
     - confirm workers public key with smart contract ID
     """
 
-    def __init__(self, host: str, port: int, debug: bool = False, max_connections: int = 0,
-                 url: str = "wss://ws.test.azero.dev", callback=None):
+    def __init__(self, host: str, port: int, public_key: str, url: str = "wss://ws.test.azero.dev",
+                 contract: str = "5EYpWTZahNC6ko7nmEAVZrnWsW39tRRDX3UhPKDcsFQeQQMh", debug: bool = False,
+                 max_connections: int = 0, callback=None,):
         super(SmartNode, self).__init__(host, port, debug, max_connections, callback)
 
         # Smart contract parameters
         self.chain = SubstrateInterface(url=url)
-        self.keypair = self.get_substrate_keypair()
-        self.contract_address = ""
+        self.keypair = load_substrate_keypair(public_key, "      ")
+        self.contract_address = contract
+        self.contract = None
 
-        # contract_info = self.chain.query("Contracts", "ContractInfoOf", [self.contract_address])
-        # if contract_info.value:
-        #     self.chain.get_metadata_module()
-        #     contract = ContractInstance.create_from_address(
-        #         contract_address=self.contract_address,
-        #         metadata_file=os.path.join(os.path.dirname(__file__), "assets", "")
-        #     )
+        # Grab the SmartNode contract
+        contract_info = self.chain.query("Contracts", "ContractInfoOf", [self.contract_address])
+        if contract_info.value:
+            self.contract = contract_info
 
     def handshake(self, connection, client_address):
         """
@@ -54,7 +54,7 @@ class SmartNode(Node):
             # Await response
             response = connection.recv(4096)
 
-            # Confirm number and form conenction
+            # Confirm number and form connection
             if response.decode() == randn:
                 thread_client = self.create_connection(connection, connected_node_id, client_address[0],
                                                        client_address[1])
@@ -96,12 +96,15 @@ class SmartNode(Node):
 
     def get_job(self):
         # Confirm job details with smart contract, receive initial details from a node?
-        self.chain.query("")
+        # self.chain.query("")
+        pass
 
-    def get_substrate_keypair(self):
-        # with open("../keys/README.json", "r") as f:
-        #     data = json.load(f)
-        #
-        # encoded_key = base64.b64decode(data["encoded"]).hex()
-        # return Keypair.create_from_private_key(private_key=encoded_key, ss58_format=self.chain.ss58_format)
-        return Keypair.create_from_uri("//Alice")
+    # def get_user_info(self, user_address):
+    #
+    #     try:
+    #         user_info = self.chain.compose_call(
+    #             call_module="",
+    #             call_function="",
+    #             call_params={}
+    #         )
+    #     pass

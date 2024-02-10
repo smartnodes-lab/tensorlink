@@ -38,6 +38,10 @@ class Colours:
 
 
 class DistributedModule(nn.Module):
+    """
+    TODO:
+        - Create method for node selection and peers to include in job
+    """
     def __init__(self, master_node, worker_node):
         super().__init__()
         self.master_node = master_node
@@ -76,6 +80,7 @@ class DistributedModel(nn.Module):
         # self.distribute_model(self.model)
 
     def backward(self, loss):
+
         while len(self.master_node.intermediates) > 0:
             vals = self.master_node.intermediates.pop(-1)
 
@@ -86,7 +91,7 @@ class DistributedModel(nn.Module):
                 loss = assoc_input.grad
                 self.master_node.send_backward(connection, loss)
 
-                time.sleep(1)
+                time.sleep(0.5)
 
                 if self.master_node.backward_relays.not_empty:
                     loss = self.master_node.backward_relays.get()
@@ -98,7 +103,7 @@ class DistributedModel(nn.Module):
                 if isinstance(val1, torch.Tensor):
                     assoc_input, assoc_output = vals
                     assoc_output.backward(loss, retain_graph=True)
-                    time.sleep(1)
+                    time.sleep(0.5)
                     print("BACKWARD DONE!")
                 # Pass of the last section
                 else:
@@ -111,7 +116,7 @@ class DistributedModel(nn.Module):
                     else:
                         self.master_node.send_backward(connection, loss)
 
-                    time.sleep(3)
+                    time.sleep(0.5)
 
                     if not self.master_node.backward_relays.empty():
                         loss = self.master_node.backward_relays.get()
