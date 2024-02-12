@@ -1,6 +1,7 @@
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output
+from src.ml.distributed import DistributedModel
 
 import torch.nn as nn
 import threading
@@ -48,7 +49,7 @@ def get_gpu_memory():
             memory += device_memory
     else:
         # CPU should be able to handle 1 GB (temporary fix)
-        memory += 1.4e9
+        memory += 0.4e9
 
     return memory
 
@@ -74,11 +75,13 @@ class Worker(SmartNode):
         self.master = False
         self.available_memory = get_gpu_memory()
         self.nodes = []
+        self.peer_stats = []
 
+        # For storing forward, backward, and intermediate tensors
+        # Should be switched to some other data structure that relates to specific epochs
         self.forward_relays = queue.Queue()
         self.backward_relays = queue.Queue()
         self.intermediates = []
-
         self.model = None
         self.optimizer = None
         self.loss = None
@@ -99,14 +102,36 @@ class Worker(SmartNode):
         """
 
         try:
-            if b"DONE STREAM" == data:
+            if b"DONE STREAM" == data[:11]:
                 file_name = f"streamed_data_{node.host}_{node.port}"
 
                 with open(file_name, "rb") as f:
                     streamed_bytes = f.read()
 
                 self.stream_data(streamed_bytes, node)
+
                 os.remove(file_name)
+
+            elif b"FORWARD" == data[:7]:
+                self.debug_print(f"RECEIVED FORWARD")
+                if self.master or (self.training and self.model):
+                    pickled = pickle.loads(data[7:])
+                    self.forward_relays.put(pickled)
+
+            elif b"BACKWARD" == data[:8]:
+                self.debug_print(f"RECEIVED BACKWARD")
+                if self.master or (self.training and self.model):
+                    pickled = pickle.loads(data[8:])
+                    self.backward_relays.put(pickled)
+
+            elif b"PoL" == data[:3]:
+                self.debug_print(f"RECEIVED PoL REQUEST")
+                if self.training and self.model:
+                    dummy_input = pickle.loads(data[3:])
+
+                    proof_of_learning = self.proof_of_learning(dummy_input)
+
+                    self.send_to_node(node, proof_of_learning)
 
             elif b"TENSOR" == data[:6]:
                 if self.training:
@@ -127,23 +152,16 @@ class Worker(SmartNode):
                     self.training = True
                     self.debug_print(f"Loaded submodule!")
 
-            elif b"FORWARD" == data[:7]:
-                self.debug_print(f"RECEIVED FORWARD")
-                if self.master or (self.training and self.model):
-                    pickled = pickle.loads(data[7:])
-                    self.forward_relays.put(pickled)
-
-            elif b"BACKWARD" == data[:8]:
-                self.debug_print(f"RECEIVED BACKWARD")
-                if self.master or (self.training and self.model):
-                    pickled = pickle.loads(data[8:])
-                    self.backward_relays.put(pickled)
-
-            elif b"POL" == data[:3]:
-                self.debug_print(f"RECEIVED POL REQUEST")
-                if self.training and self.model:
-                    proof_of_learning = self.proof_of_learning()
-                    self.send_to_node(node, proof_of_learning)
+            elif b"DMODEL" == data[:6]:
+                self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                if self.training and not self.model:
+                    # Load in model
+                    pickled = pickle.loads(data[6:])
+                    # self.request_statistics()
+                    time.sleep(0.5)
+                    self.model = DistributedModel(self, pickled, self.peer_stats)
+                    self.training = True
+                    self.debug_print(f"Loaded distributed module!")
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
@@ -166,12 +184,6 @@ class Worker(SmartNode):
             # Include the following steps:
             # 1. Broadcast GPU memory statistics
             # self.broadcast_statistics()
-
-            # 3. Load the required model (if applicable)
-            # For example, you can call self.load_model(model) with the model received from another node.
-
-            # 4. Send output to the following node
-            # For example, you can call self.send_to_nodes(output_data.encode())
 
             # 5. Handle requests for proof of training
             # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
@@ -213,7 +225,7 @@ class Worker(SmartNode):
             self.send_backward(next_node, dvalues)
 
         # Complete any forward pass
-        elif self.forward_relays.empty() is False:
+        if self.forward_relays.empty() is False:
             next_node = self.inbound[0]  # Placeholder for the appropriate node
             prev_forward = self.forward_relays.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
 
@@ -233,6 +245,17 @@ class Worker(SmartNode):
             # Relay forward pass to the next node
             self.send_forward(next_node, out)
 
+    def proof_of_learning(self, dummy_input: torch.Tensor):
+        proof = {
+            "node_id": self.name,
+            "memory": self.available_memory,
+            "learning": self.training,
+            "model": self.model,
+        }
+
+        if self.training:
+            proof["output"] = handle_output(self.model(dummy_input)).sum()
+
     def send_tensor(self, tensor, node: Connection):
         # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
         tensor_bytes = b"TENSOR" + pickle.dumps(tensor)
@@ -247,23 +270,12 @@ class Worker(SmartNode):
         pickled_data = b"BACKWARD" + pickle.dumps(args)
         self.send_to_node(node, pickled_data)
 
-    def send_module(self, module: nn.Module, node: Connection):
+    def send_module(self, module: nn.Module, node: Connection, prefix: bytes = b""):
         module_bytes = pickle.dumps(module)
-        module_bytes = b"MODEL" + module_bytes
+        module_bytes = prefix + b"MODEL" + module_bytes
         print("SENDING MODULE")
         self.send_to_node(node, module_bytes)
         time.sleep(1)
-
-    def send_proof_of_learning(self, dummy_input: torch.Tensor):
-        proof = {
-            "node_id": self.name,
-            "memory": self.available_memory,
-            "learning": self.training,
-            "model": self.model,
-        }
-
-        if self.training:
-            proof["output"] = handle_output(self.model(dummy_input)).sum()
 
     # def host_job(self, model: nn.Module):
     #     """
@@ -292,3 +304,7 @@ class Worker(SmartNode):
             # proof3 = self.proof_of_output()
 
         self.send_to_nodes(memory.encode())
+
+    def update_statistics(self):
+        self.peer_stats = [{"id": i, "memory": 0.4e9, "connection": self.outbound[i],
+                            "latency_matrix": self.outbound[i].latency} for i in range(len(self.outbound))]

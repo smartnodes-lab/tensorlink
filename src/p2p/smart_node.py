@@ -46,6 +46,7 @@ class SmartNode(Node):
         if authenticate_public_key(connected_node_id) is True:
             id_bytes = connected_node_id
 
+            start_time = time.time()
             # Encrypt random number with node's key
             connection.send(
                 self.encrypt(message.encode(), id_bytes)
@@ -53,12 +54,15 @@ class SmartNode(Node):
 
             # Await response
             response = connection.recv(4096)
+            latency = time.time() - start_time
 
             # Confirm number and form connection
             if response.decode() == randn:
                 thread_client = self.create_connection(connection, connected_node_id, client_address[0],
                                                        client_address[1])
                 thread_client.start()
+
+                thread_client.latency = latency
 
                 self.inbound.append(thread_client)
                 self.outbound.append(thread_client)

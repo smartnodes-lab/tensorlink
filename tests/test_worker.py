@@ -6,13 +6,15 @@ port = 5026
 
 
 master = Worker(host=ip, port=port, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh", debug=True)
-# worker1 = Worker(host=ip, port=port + 1, debug=True)
+worker1 = Worker(host=ip, port=port + 1, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh", debug=True)
 
 master.start()
-# worker1.start()
+worker1.start()
 
-# master.connect_with_node(ip, port + 1)
-# worker1.connect_with_node(ip, port)
+master.connect_with_node(ip, port + 1)
+worker1.connect_with_node(ip, port)
+
+master.send_to_nodes(b"a")
 
 master.stop()
-# worker1.stop()
+worker1.stop()

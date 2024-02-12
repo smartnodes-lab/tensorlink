@@ -13,34 +13,38 @@ if __name__ == "__main__":
     ip = "127.0.0.1"
     port = 5026
 
-    master = Worker(host=ip, port=port, debug=True)
-    worker1 = Worker(host=ip, port=port + 1, debug=True)
+    worker1 = Worker(host=ip, port=port, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+                     debug=True)
+    worker2 = Worker(host=ip, port=port + 1, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+                     debug=True)
+    worker3 = Worker(host=ip, port=port + 2, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+                     debug=True)
 
-    master.master = True
-    master.training = True
+    worker1.master = True
     worker1.training = True
+    worker2.training = True
+    worker3.training = True
 
-    master.start()
     worker1.start()
-    master.connect_with_node(ip, port + 1)
-    worker1.connect_with_node(ip, port)
+    worker2.start()
+    worker3.start()
 
-    model = BertModel.from_pretrained("bert-base-uncased")
+    # worker1.connect_with_node(ip, port + 1)
+    worker2.connect_with_node(ip, port)
+    worker3.connect_with_node(ip, port)
+    worker3.connect_with_node(ip, port + 1)
+
+    worker1.update_statistics()
+    worker2.update_statistics()
+    worker3.update_statistics()
+
     dummy_input = torch.zeros((1, 1), dtype=torch.long)
+    model = BertModel.from_pretrained("bert-base-uncased")
 
-    nodes = [
-        {"id": 1, "memory": 1.4e9, "connection": master.outbound[0], "latency_matrix": []}
-    ]
+    distributed = DistributedModel(worker1, model, worker1.peer_stats)
+    time.sleep(10)
+    distributed(dummy_input)
 
-    distributed = DistributedModel(master, model, nodes)
-    distributed.create_distributed_model()
-
-    distributed.master_node.intermediates.append([dummy_input])  # To be moved to model source code
-    out = distributed.model.forward(dummy_input)
-
-    loss = handle_output(out).sum()
-
-    distributed.backward(loss)
-
-    master.stop()
     worker1.stop()
+    worker2.stop()
+    worker3.stop()

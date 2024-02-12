@@ -93,9 +93,12 @@ class Node(threading.Thread):
             self.debug_print(f"connecting to {host} port {port}")
             sock.connect((host, port))
 
+            start_time = time.time()
+
             # ID exchange
             sock.send(self.get_rsa_pub_key(b=True))
             verification = sock.recv(4096)
+            latency = time.time() - start_time
             proof = self.decrypt(verification)
             sock.send(proof)
 
@@ -120,6 +123,7 @@ class Node(threading.Thread):
             # Form connection
             thread_client = self.create_connection(sock, "test-ID", host, port)
             thread_client.start()
+            thread_client.latency = latency
 
             self.outbound.append(thread_client)
 
@@ -179,8 +183,10 @@ class Node(threading.Thread):
     def handle_message(self, node: Connection, data):
         self.debug_print(f"handle_message from {node.host}:{node.port}")
         self.debug_print(f"{data}")
-        # if data == b"PING":
-        #     self.send_to_node(node, b"PONG")
+
+        # Handle ping requests
+        if data == b"PING":
+            self.send_to_node(node, b"PONG")
 
         if self.callback is not None:
             self.callback(data, node)
@@ -235,8 +241,6 @@ class Node(threading.Thread):
 
         return decrypted_data
 
-    def measure_latency(self):
-        for node in self.all_nodes:
-            if node != self:
-                start_time = time.time()
-                self.send_to_node(node, b"PING")
+    # def measure_latency(self, node: Connection):
+    #     start_time = time.time()
+

@@ -24,7 +24,7 @@ def get_gpu_memory():
             memory += device_memory
     else:
         # CPU should be able to handle 1 GB (temporary fix)
-        memory += 1.4e9
+        memory += 0.4e9
 
     return memory
 
@@ -46,6 +46,7 @@ class DistributedModule(nn.Module):
         super().__init__()
         self.master_node = master_node
         self.worker_node = worker_node
+        # self.event = threading.Event()
 
     def forward(self, *args, **kwargs):
         # Relay forward pass to next node
@@ -77,7 +78,7 @@ class DistributedModel(nn.Module):
         self.graph = []
         self.available_memory = get_gpu_memory()
 
-        # self.distribute_model(self.model)
+        self.create_distributed_model(self.model)
 
     def backward(self, loss):
 
@@ -186,7 +187,7 @@ class DistributedModel(nn.Module):
                                                          "distributing further..." + Colours.RESET)
                     self.distribute_model(submodule, indent)
 
-    def create_distributed_model(self):
+    def create_distributed_model(self, model):
         """
         Distribute model to available connected nodes, assign modules based on memory requirements & latency
         """
@@ -194,9 +195,9 @@ class DistributedModel(nn.Module):
         #     self.distribute_model(self.model)
 
         # Grab model source code
-        source_code = inspect.getsource(type(self.model))
+        source_code = inspect.getsource(type(model))
         parsed_code = ast.parse(source_code)
-        children = dict(self.model.named_children())
+        children = dict(model.named_children())
 
         candidate_node = self.nodes[0]
         candidate_node_memory = candidate_node["memory"]
@@ -214,7 +215,7 @@ class DistributedModel(nn.Module):
                                     and target.attr in children.keys()
                             ):
                                 # Get the original module + required memory
-                                original_module = getattr(self.model, target.attr)
+                                original_module = getattr(model, target.attr)
                                 module_memory = estimate_memory(original_module)  # Must improve estimation (accommodate batch sizes etc)
 
                                 # Accommodate on our device if we can
@@ -222,15 +223,42 @@ class DistributedModel(nn.Module):
                                     self.available_memory -= module_memory
                                     self.graph.append((None, target.attr))
 
-                                # Distribute otherwise
-                                elif module_memory < candidate_node_memory:
-                                    print(f"distributing {target.attr}")
+                                # In the instance we have a large model list
+                                elif isinstance(original_module, nn.ModuleList):
+                                    for name, submodule in original_module.named_children():
+                                        submodule_memory = estimate_memory(submodule)
+                                        if submodule_memory < self.available_memory:
+                                            self.graph.append((None, name))
+                                            self.available_memory -= submodule_memory
+                                        elif submodule_memory < candidate_node_memory:
+                                            print(f"distributing {target.attr}")
+                                            self.master_node.send_module(submodule, candidate_node["connection"])
+                                            candidate_node_memory -= submodule_memory
+                                        else:
+                                            self.nodes = self.nodes[:candidate_node["id"]] + self.nodes[
+                                                                                             candidate_node["id"] + 1:]
+                                            candidate_node = max(self.nodes, key=lambda x: x["memory"])
 
-                                    # Wrapping module custom nn.Module that will handle forward and backward passes
-                                    # between nodes
+                                # Distribute otherwise
+                                else:
                                     wrapped_module = DistributedModule(self.master_node, candidate_node["connection"])
 
-                                    self.master_node.send_module(original_module, candidate_node["connection"])
-                                    setattr(self.model, target.attr, wrapped_module)
+                                    # Try offloading entire model to worker
+                                    if module_memory < candidate_node_memory:
+                                        print(f"distributing {target.attr}")
+                                        # Wrapping module custom nn.Module that will handle forward and backward passes
+                                        # between nodes
+                                        self.master_node.send_module(original_module, candidate_node["connection"])
+                                        candidate_node_memory -= module_memory
+
+                                    # Assign worker as local master node otherwise
+                                    else:
+                                        print(f"distributing dist_{target.attr}")
+                                        self.master_node.send_module(original_module, candidate_node["connection"], b"D")
+
+                                        self.nodes = self.nodes[:candidate_node["id"]] + self.nodes[candidate_node["id"] + 1:]
+
+                                        candidate_node = max(self.nodes, key=lambda x: x["memory"])
+
                                     self.graph.append((candidate_node["connection"], target.attr))
-                                    candidate_node_memory -= module_memory
+                                    setattr(self.model, target.attr, wrapped_module)
