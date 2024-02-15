@@ -24,7 +24,7 @@ def get_gpu_memory():
             memory += device_memory
     else:
         # CPU should be able to handle 1 GB (temporary fix)
-        memory += 0.4e9
+        memory += 0.5e9
 
     return memory
 
@@ -33,6 +33,7 @@ class Colours:
     RED = '\033[91m'
     GREEN = '\033[92m'
     YELLOW = '\033[93m'
+    PURPLE = '\033[95m'
     BLUE = '\033[94m'
     RESET = '\033[0m'
 
@@ -78,7 +79,7 @@ class DistributedModel(nn.Module):
         self.graph = []
         self.available_memory = get_gpu_memory()
 
-        self.create_distributed_model(self.model)
+        # self.create_distributed_model(self.model)
 
     def backward(self, loss):
 
@@ -139,54 +140,6 @@ class DistributedModel(nn.Module):
         #         if self.master_node.loss_relays.not_empty:
         #             loss = self.master_node.loss_relays.get()
 
-    def distribute_model(self, module, indent=0):
-        if self.nodes is None:
-            # Test set of nodes, real set will be obtained from either the worker's list of nodes,
-            # some form of network propagation, or the smart contract.
-            self.nodes = [
-                # {"id": 0, "memory": 1.4e9, "connection": None, "latency_matrix": []},
-                {"id": 1, "memory": 1.4e9, "connection": self.master_node.outbound[0], "latency_matrix": []}
-            ]
-
-        # While we initialize the model candidate worker nodes should be put on standby to receive submodules
-
-        # Estimate memory requirements for the model
-        module_memory = estimate_memory(module)
-        named_children = list(self.model.children())
-        print("   " * indent + f"Parent Module: {round(module_memory / 1e9, 3)} GB")
-
-        # Variables for keeping track of offloaded workers + modules
-        candidate_node = max(enumerate([node["memory"] for node in self.nodes]), key=lambda x: x[1])[0]
-        indent += 1
-
-        if len(named_children) > 0:
-            for name, submodule in module.named_children():
-                # TODO:
-                #  Priority: check for lowest latency x high memory node to offload first submodule to.
-                #  Later: if submodule is too big we can call the distribute model again.
-                #  Tail recursion / some output to carry current candidate node. Avoid sending tensor to master if we
-                #    handle the next submodule and there isn't any intermediate computations between children.
-
-                submodule_memory = estimate_memory(submodule)
-
-                # Check if best/current candidate can support the submodule
-                if submodule_memory < self.nodes[candidate_node]["memory"]:
-                    # Update available memory for node
-                    self.nodes[candidate_node]["memory"] -= submodule_memory
-
-                    # Add node + submodule to graph
-                    self.graph.append((self.nodes[candidate_node]["id"], name, submodule))
-
-                    print(Colours.GREEN + "   " * indent + f"{name}: {round(submodule_memory / 1e9, 3)} GB -> device: "
-                                                           f"{self.nodes[candidate_node]['id']}" + Colours.RESET)
-                # If we cannot, further distribute the submodule by assigning it to a
-                else:
-                    self.nodes = self.nodes[:candidate_node] + self.nodes[candidate_node + 1:]
-                    candidate_node = max(enumerate([node["memory"] for node in self.nodes]), key=lambda x: x[1])[0]
-                    print("   " * indent + Colours.RED + "Cannot accommodate submodule on current worker, "
-                                                         "distributing further..." + Colours.RESET)
-                    self.distribute_model(submodule, indent)
-
     def create_distributed_model(self, model):
         """
         Distribute model to available connected nodes, assign modules based on memory requirements & latency
@@ -201,6 +154,8 @@ class DistributedModel(nn.Module):
 
         candidate_node = self.nodes[0]
         candidate_node_memory = candidate_node["memory"]
+
+        submodule_counter = []
 
         for node in ast.walk(parsed_code):
             # Identify init method of model
@@ -223,7 +178,7 @@ class DistributedModel(nn.Module):
                                     self.available_memory -= module_memory
                                     self.graph.append((None, target.attr))
 
-                                # In the instance we have a large model list
+                                # If submodule is a large module list, distribute the contents in a leaf-like structure
                                 elif isinstance(original_module, nn.ModuleList):
                                     for name, submodule in original_module.named_children():
                                         submodule_memory = estimate_memory(submodule)
@@ -262,3 +217,56 @@ class DistributedModel(nn.Module):
 
                                     self.graph.append((candidate_node["connection"], target.attr))
                                     setattr(self.model, target.attr, wrapped_module)
+
+
+# Test simulation of the distribution process
+def print_distribute_model(module, nodes=None, candidate_node=None, indent=0):
+    if nodes is None:
+        # Test set of nodes, real set will be obtained from either the worker's list of nodes,
+        # some form of network propagation, or the smart contract.
+        nodes = [
+            {"id": 0, "memory": 0.6e9, "connection": 0, "latency_matrix": [], "colour": Colours.GREEN},
+            {"id": 1, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.RED},
+            {"id": 2, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.YELLOW},
+            {"id": 3, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.BLUE},
+            {"id": 4, "memory": 0.7e9, "connection": 0, "latency_matrix": [], "colour": Colours.PURPLE}
+        ]
+
+    # While we initialize the model candidate worker nodes should be put on standby to receive submodules
+
+    # Estimate memory requirements for the model
+    module_memory = estimate_memory(module)
+    module_children = list(module.named_children())
+    module_name = f"{type(module)}".split(".")[-1].split(">")[0]
+    prefix = "  " * indent
+
+    if candidate_node is None:
+        candidate_node = max(nodes, key=lambda x: x["memory"])
+
+    # See if we can handle module on current node
+    if module_memory < candidate_node["memory"]:
+        print(candidate_node["colour"] + prefix + f"Loaded: {module_name} on worker: {candidate_node['id']}")
+        nodes[candidate_node['id']]["memory"] -= module_memory
+        return nodes
+
+    # Check to see if next candidate node can handle module
+    elif module_memory < max(nodes[:candidate_node["id"]] + nodes[candidate_node["id"] + 1:], key=lambda x: x["memory"])["memory"]:
+        candidate_node = max(nodes[:candidate_node["id"]] + nodes[candidate_node["id"] + 1:], key=lambda x: x["memory"])
+        nodes[candidate_node["id"]]["memory"] -= module_memory
+        print(candidate_node["colour"] + prefix + f"Loaded: {module_name} on worker: {candidate_node['id']}")
+
+    else:
+        print(candidate_node["colour"] + prefix + f"Loaded Distributed Module: {module_name} on worker: {candidate_node['id']}")
+
+        # Some test case to see if we can further split the model or not (ie do the forward passes prevent modularization)
+        for name, submodule in module_children:
+            if isinstance(submodule, nn.ModuleList):
+                nodes = print_distribute_model(submodule, nodes, candidate_node, indent)
+            else:
+                nodes = print_distribute_model(submodule, nodes, indent=indent+1)
+
+    # TODO:
+    #  Priority: check for lowest latency x high memory node to offload first submodule to.
+    #  Later: if submodule is too big we can call the distribute model again.
+    #  Tail recursion / some output to carry current candidate node. Avoid sending tensor to master if we
+    #    handle the next submodule and there isn't any intermediate computations between children.

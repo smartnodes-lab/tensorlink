@@ -306,5 +306,5 @@ class Worker(SmartNode):
         self.send_to_nodes(memory.encode())
 
     def update_statistics(self):
-        self.peer_stats = [{"id": i, "memory": 0.4e9, "connection": self.outbound[i],
+        self.peer_stats = [{"id": i, "memory": 0.5e9, "connection": self.outbound[i],
                             "latency_matrix": self.outbound[i].latency} for i in range(len(self.outbound))]
