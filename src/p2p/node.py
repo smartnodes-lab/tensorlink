@@ -30,8 +30,9 @@ class Node(threading.Thread):
         self.callback = callback
 
         # Node & Connection parameters
-        self.inbound = []
-        self.outbound = []
+        # self.inbound = []
+        # self.outbound = []
+        self.all_nodes = []
         self.reconnect = []
 
         self.terminate_flag = threading.Event()
@@ -41,9 +42,9 @@ class Node(threading.Thread):
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
 
-    @property
-    def all_nodes(self):
-        return self.inbound + self.outbound
+    # @property
+    # def all_nodes(self):
+    #     return self.inbound + self.outbound
 
     def debug_print(self, message):
         if self.debug:
@@ -125,7 +126,8 @@ class Node(threading.Thread):
             thread_client.start()
             thread_client.latency = latency
 
-            self.outbound.append(thread_client)
+            self.all_nodes.append(thread_client)
+            # self.outbound.append(thread_client)
 
             # If reconnection to this host is required, add to the list
             if reconnect:
@@ -142,7 +144,7 @@ class Node(threading.Thread):
             return False
 
     def disconnect_with_node(self, node: Connection) -> None:
-        if node in self.outbound:
+        if node in self.all_nodes:
             node.stop()
             self.debug_print(f"node disconnected.")
         else:
@@ -162,7 +164,7 @@ class Node(threading.Thread):
             self.debug_print(
                 f"reconnect_nodes: Checking node {node_to_check['host']}:{node_to_check['port']}")
 
-            for node in self.outbound:
+            for node in self.all_nodes:
                 if node.host == node_to_check["host"] and node.port == node_to_check["port"]:
                     found_node = True
                     node_to_check["trials"] = 0  # Reset the trials

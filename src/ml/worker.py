@@ -1,15 +1,21 @@
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output
-from src.ml.distributed import DistributedModel
+from src.ml.distributed import DistributedModel, get_gpu_memory
 
 import torch.nn as nn
 import threading
+import random
 import pickle
 import torch
 import queue
 import time
+import uuid
 import os
+
+
+COLOURS = ['\033[91m', '\033[92m', '\033[93m', '\033[95m', '\033[94m']
+RESET = '\033[0m'
 
 
 class DistributedModule(nn.Module):
@@ -34,26 +40,6 @@ class DistributedModule(nn.Module):
         self.master_node.send_tensor((args, kwargs), self.worker_node)
 
 
-def get_gpu_memory():
-    # Check how much available memory we can allocate to the node
-    memory = 0
-
-    if torch.cuda.is_available():
-        devices = list(range(torch.cuda.device_count()))
-        memory += torch.cuda.memory
-
-        for device in devices:
-            torch.cuda.set_device(device)
-            memory_stats = torch.cuda.memory_stats(device)
-            device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
-            memory += device_memory
-    else:
-        # CPU should be able to handle 1 GB (temporary fix)
-        memory += 0.4e9
-
-    return memory
-
-
 class Worker(SmartNode):
     """
     Todo:
@@ -74,21 +60,18 @@ class Worker(SmartNode):
         self.training = False
         self.master = False
         self.available_memory = get_gpu_memory()
-        self.nodes = []
-        self.peer_stats = []
+        self.validator_nodes = []
+        self.worker_nodes = []
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
         self.forward_relays = queue.Queue()
         self.backward_relays = queue.Queue()
         self.intermediates = []
+
         self.model = None
         self.optimizer = None
         self.loss = None
-
-        # Data transmission variables
-        self.BoT = 0x00.to_bytes(1, 'big')
-        self.EoT = 0x01.to_bytes(1, 'big')
 
     def stream_data(self, data: bytes, node: Connection):
         """
@@ -96,12 +79,12 @@ class Worker(SmartNode):
 
         Todo:
             - ensure correct nodes sending data
-            - track position of tensor in the training session
             - potentially move/forward method directly to Connection to save data via identifying data
                 type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
         """
 
         try:
+            # The case where we load via downloaded pickle file (potential security threat)
             if b"DONE STREAM" == data[:11]:
                 file_name = f"streamed_data_{node.host}_{node.port}"
 
@@ -113,25 +96,25 @@ class Worker(SmartNode):
                 os.remove(file_name)
 
             elif b"FORWARD" == data[:7]:
-                self.debug_print(f"RECEIVED FORWARD")
+                self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.master or (self.training and self.model):
                     pickled = pickle.loads(data[7:])
                     self.forward_relays.put(pickled)
 
             elif b"BACKWARD" == data[:8]:
-                self.debug_print(f"RECEIVED BACKWARD")
+                self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.master or (self.training and self.model):
                     pickled = pickle.loads(data[8:])
                     self.backward_relays.put(pickled)
 
-            elif b"PoL" == data[:3]:
-                self.debug_print(f"RECEIVED PoL REQUEST")
-                if self.training and self.model:
-                    dummy_input = pickle.loads(data[3:])
-
-                    proof_of_learning = self.proof_of_learning(dummy_input)
-
-                    self.send_to_node(node, proof_of_learning)
+            # elif b"PoL" == data[:3]:
+            #     self.debug_print(f"RECEIVED PoL REQUEST")
+            #     if self.training and self.model:
+            #         dummy_input = pickle.loads(data[3:])
+            #
+            #         proof_of_learning = self.proof_of_learning(dummy_input)
+            #
+            #         self.send_to_node(node, proof_of_learning)
 
             elif b"TENSOR" == data[:6]:
                 if self.training:
@@ -145,6 +128,7 @@ class Worker(SmartNode):
 
             elif b"MODEL" == data[:5]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                #
                 if self.training and not self.model:
                     # Load in model
                     pickled = pickle.loads(data[5:])
@@ -173,7 +157,7 @@ class Worker(SmartNode):
         listener.start()
 
         # # Thread for handling incoming tensors from connected nodes
-        # data_stream = threading.Thread(target=self.stream_data, daemon=True)
+        # data_stream = threading.Thread(target=self.stream_data, daemo=True)
         # data_stream.start()
 
         # Main worker loop
@@ -277,6 +261,74 @@ class Worker(SmartNode):
         self.send_to_node(node, module_bytes)
         time.sleep(1)
 
+    """Key Methods to Implement"""
+    def distribute_model(self, model: nn.Module):
+        # Retrieve model names and associated offloaded workers. Contact candidate workers
+        # and ensure they are ready to receive the model / train
+        def recurse_model(module, nodes, candidate_node=None):
+            # Get module information
+            module_memory = estimate_memory(module)
+            module_children = list(module.named_children())
+            module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
+
+            # See if we can handle the input first
+            if module_memory < self.available_memory:
+                self.available_memory -= module_memory
+                return nodes, f"MASTER"
+
+            elif module_memory < max(nodes, key=lambda x: x["memory"])["memory"]:
+                candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
+                nodes[candidate_node]["memory"] -= module_memory
+                return nodes, f"{nodes[candidate_node]['id']}"
+
+            # We cannot handle the module on the master node, there are now three options:
+            # assume intermediate DistributedModel on master if graph is empty (or user wants to maximize his compute
+            # contribution before offloading?)
+            # attempt to offload module on best candidate
+            # attempt intermediate DistributedModel on best candidate
+            # elif not distributed_graph: # Commented out for the same reason as the multi-masternode stuff below...
+            # For now, we are just attempting candidate node offload and then defaulting to User masternode distribution
+            elif isinstance(module, nn.ModuleList):
+                graph = []
+                for layer in module:
+                    nodes, subgraph = recurse_model(layer, nodes, candidate_node)
+                    graph.append(subgraph)
+                return nodes, graph
+
+            else:
+                # Spawn secondary DistributedModel on master (subgraph)
+                graph_name = f"DistributedModel:{module_name}:MASTER"
+                graph = {graph_name: {}}
+
+                for name, submodule in module_children:
+                    if len(graph[graph_name]) > 0:
+                        candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
+
+                    # Handle submodule
+                    nodes, subgraph = recurse_model(submodule, nodes, candidate_node)
+
+                    graph[graph_name][f"DistributedSubModule:{name}"] = subgraph
+
+                return nodes, graph
+
+        worker_nodes = self.request_workers()
+        nodes, graph = recurse_model(model, worker_nodes)
+
+
+
+    # def request_worker(self, nodes, module_memory: int, module_type: int):
+    #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough memory
+    #     if module_type == 0:
+    #         candidate_node = max(nodes, key=lambda x: x["memory"])
+    #
+    #     # module_type = 1 when model is not modular, select the new master based on both the minimum of a latency
+    #     # matrix (low latency to other good workers), and memory
+    #     elif module_type == 1:
+    #         candidate_node = max(nodes, key=lambda x: x["latency"])
+
+    # def acknowledge(self):
+    #     pass
+
     # def host_job(self, model: nn.Module):
     #     """
     #     Todo:
@@ -288,7 +340,6 @@ class Worker(SmartNode):
     #     self.training = True
     #     self.distribute_model(model)  # Add master vs worker functionality
 
-    """Key Methods to Implement"""
     def get_jobs(self):
         pass
         # Confirm job details with smart contract, receive initial details from a node?
@@ -305,6 +356,10 @@ class Worker(SmartNode):
 
         self.send_to_nodes(memory.encode())
 
-    def update_statistics(self):
-        self.peer_stats = [{"id": i, "memory": 0.5e9, "connection": self.outbound[i],
-                            "latency_matrix": self.outbound[i].latency} for i in range(len(self.outbound))]
+    def request_workers(self):
+        worker_nodes = []
+        for i in range(5):  # range(len(self.all_nodes)):
+            worker_nodes.append({"id": str(uuid.uuid4()), "memory": 0.5e9})
+            # "connection": self.all_nodes[i], "latency_matrix": self.all_nodes[i].latency
+
+        return worker_nodes

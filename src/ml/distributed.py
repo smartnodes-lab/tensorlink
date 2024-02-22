@@ -79,7 +79,7 @@ class DistributedModel(nn.Module):
         self.graph = []
         self.available_memory = get_gpu_memory()
 
-        # self.create_distributed_model(self.model)
+        self.create_distributed_model(self.model)
 
     def backward(self, loss):
 
@@ -142,10 +142,9 @@ class DistributedModel(nn.Module):
 
     def create_distributed_model(self, model):
         """
-        Distribute model to available connected nodes, assign modules based on memory requirements & latency
+        Distribute model to available connected nodes, assign modules based on memory requirements & latency.
+        Replace distributed modules with shell objects in master's instantiation to preserve tensor-flow
         """
-        # if not self.graph:
-        #     self.distribute_model(self.model)
 
         # Grab model source code
         source_code = inspect.getsource(type(model))
@@ -223,13 +222,13 @@ class DistributedModel(nn.Module):
 def print_distribute_model(module, nodes=None, candidate_node=None, indent=0):
     if nodes is None:
         # Test set of nodes, real set will be obtained from either the worker's list of nodes,
-        # some form of network propagation, or the smart contract.
+        # some form of network propagation, or the smart contract.768uy
         nodes = [
-            {"id": 0, "memory": 0.6e9, "connection": 0, "latency_matrix": [], "colour": Colours.GREEN},
-            {"id": 1, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.RED},
+            {"id": 0, "memory": 1e9, "connection": 0, "latency_matrix": [], "colour": Colours.GREEN},
+            {"id": 1, "memory": 1e9, "connection": 0, "latency_matrix": [], "colour": Colours.RED},
             {"id": 2, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.YELLOW},
             {"id": 3, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.BLUE},
-            {"id": 4, "memory": 0.7e9, "connection": 0, "latency_matrix": [], "colour": Colours.PURPLE}
+            {"id": 4, "memory": 0.5e9, "connection": 0, "latency_matrix": [], "colour": Colours.PURPLE}
         ]
 
     # While we initialize the model candidate worker nodes should be put on standby to receive submodules
@@ -237,7 +236,7 @@ def print_distribute_model(module, nodes=None, candidate_node=None, indent=0):
     # Estimate memory requirements for the model
     module_memory = estimate_memory(module)
     module_children = list(module.named_children())
-    module_name = f"{type(module)}".split(".")[-1].split(">")[0]
+    module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
     prefix = "  " * indent
 
     if candidate_node is None:
@@ -249,21 +248,43 @@ def print_distribute_model(module, nodes=None, candidate_node=None, indent=0):
         nodes[candidate_node['id']]["memory"] -= module_memory
         return nodes
 
-    # Check to see if next candidate node can handle module
-    elif module_memory < max(nodes[:candidate_node["id"]] + nodes[candidate_node["id"] + 1:], key=lambda x: x["memory"])["memory"]:
-        candidate_node = max(nodes[:candidate_node["id"]] + nodes[candidate_node["id"] + 1:], key=lambda x: x["memory"])
-        nodes[candidate_node["id"]]["memory"] -= module_memory
-        print(candidate_node["colour"] + prefix + f"Loaded: {module_name} on worker: {candidate_node['id']}")
+    # Workflow for non-modularized modules (ie can't be distributed linearly) [currently just handles for modulelist]
+    elif any(isinstance(module_children[i][1], nn.ModuleList) for i in range(len(module_children))):
+        # Update candidate node to the best worker to handle the majority of work
+        candidate_node = max(nodes, key=lambda x: x["memory"])
+        print(candidate_node["colour"] + prefix + f"Loaded Skeleton Module: {module_name} on worker: {candidate_node['id']}")
+        print(prefix + f"Distributing Leafs: {module_children[0][0]}")
 
-    else:
-        print(candidate_node["colour"] + prefix + f"Loaded Distributed Module: {module_name} on worker: {candidate_node['id']}")
+        # Must dish out submodules in a leaf-like manner not, filling up the master (current) node first
+        # The workflow below can be condensed into some sort of recursive call
+        for _, parent_submodule in module_children:
+            parent_submodule_memory = estimate_memory(parent_submodule)
 
-        # Some test case to see if we can further split the model or not (ie do the forward passes prevent modularization)
-        for name, submodule in module_children:
-            if isinstance(submodule, nn.ModuleList):
-                nodes = print_distribute_model(submodule, nodes, candidate_node, indent)
+            # See if parent submodule can be loaded on current node
+            if parent_submodule_memory < candidate_node["memory"]:
+                nodes = print_distribute_model(parent_submodule, nodes, candidate_node, indent=indent+1)
+            # Else it has to be split up,
             else:
-                nodes = print_distribute_model(submodule, nodes, indent=indent+1)
+                # See if we can distribute parent module submodules
+                for name, submodule in parent_submodule.named_children():
+                    submodule_memory = estimate_memory(submodule)
+                    # Fill up parent if we can (pass candidate node)
+                    if submodule_memory < candidate_node["memory"]:
+                        nodes = print_distribute_model(submodule, nodes, candidate_node, indent=indent+1)
+                    # Distribute otherwise
+                    else:
+                        nodes = print_distribute_model(submodule, nodes, indent=indent+1)
+
+    # Module is too large but IS modularizable
+    else:
+        print(candidate_node["colour"] + prefix + f"Distributing {module_name} Modules...")
+
+        # Send submodule
+        for name, submodule in module_children:
+            nodes = print_distribute_model(submodule, nodes, candidate_node, indent=indent+1)
+
+            # Fill workers up with submodules before switching to the next
+            # candidate_node = max(nodes, key=lambda x: x["memory"])
 
     # TODO:
     #  Priority: check for lowest latency x high memory node to offload first submodule to.

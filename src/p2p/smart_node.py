@@ -63,9 +63,10 @@ class SmartNode(Node):
                 thread_client.start()
 
                 thread_client.latency = latency
+                self.all_nodes.append(thread_client)
 
-                self.inbound.append(thread_client)
-                self.outbound.append(thread_client)
+                # self.inbound.append(thread_client)
+                # self.outbound.append(thread_client)
 
             else:
                 self.debug_print("node: connection refused, invalid ID proof!")
@@ -82,7 +83,7 @@ class SmartNode(Node):
                 connection, client_address = self.sock.accept()
 
                 # Attempt SC-secured connection if we can handle more
-                if self.max_connections == 0 or len(self.inbound) < self.max_connections:
+                if self.max_connections == 0 or len(self.all_nodes) < self.max_connections:
                     self.handshake(connection, client_address)
 
                 else:
