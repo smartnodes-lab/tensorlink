@@ -9,7 +9,7 @@ chain = SubstrateInterface(url="wss://ws.test.azero.dev")
 contract = ContractInstance.create_from_address(
     substrate=chain,
     contract_address="5GMGXFH8W6xe89wmNbtxUNtWhJ7iAaPvMyLGPeta72ue8uaj",
-    metadata_file="../src/smartnodes.json"  # Temp path to contract metadata
+    metadata_file="../src/assets/smartnodes.json"  # Temp path to contract metadata
 )
 keypair = load_substrate_keypair(
     public_key="test",
