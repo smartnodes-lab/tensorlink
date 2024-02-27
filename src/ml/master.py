@@ -1,8 +1,4 @@
-from src.ml.model_analyzer import distribute_model
-from src.ml.worker import Worker
-
-import torch.nn as nn
-import subprocess
+from src.roles.worker import Worker
 
 
 class Master(Worker):

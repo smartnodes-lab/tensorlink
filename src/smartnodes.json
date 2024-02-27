@@ -1,0 +1,475 @@
+{
+  "source": {
+    "hash": "0x1b7230a23d7410352f251b50ca66341363f576bccb9433d18418ffd8eccd7616",
+    "language": "ink! 4.3.0",
+    "compiler": "rustc 1.78.0-nightly",
+    "build_info": {
+      "build_mode": "Release",
+      "cargo_contract_version": "3.0.1",
+      "rust_toolchain": "nightly-aarch64-apple-darwin",
+      "wasm_opt_settings": {
+        "keep_debug_symbols": false,
+        "optimization_passes": "Z"
+      }
+    }
+  },
+  "contract": {
+    "name": "smartnodes",
+    "version": "0.1.0",
+    "authors": [
+      "[your_name] <[your_email]>"
+    ]
+  },
+  "spec": {
+    "constructors": [
+      {
+        "args": [],
+        "default": false,
+        "docs": [
+          "Constructor that initializes the `bool` value to the given `init_value`."
+        ],
+        "label": "new",
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink_primitives",
+            "ConstructorResult"
+          ],
+          "type": 6
+        },
+        "selector": "0x9bae9d5e"
+      }
+    ],
+    "docs": [],
+    "environment": {
+      "accountId": {
+        "displayName": [
+          "AccountId"
+        ],
+        "type": 11
+      },
+      "balance": {
+        "displayName": [
+          "Balance"
+        ],
+        "type": 13
+      },
+      "blockNumber": {
+        "displayName": [
+          "BlockNumber"
+        ],
+        "type": 16
+      },
+      "chainExtension": {
+        "displayName": [
+          "ChainExtension"
+        ],
+        "type": 17
+      },
+      "hash": {
+        "displayName": [
+          "Hash"
+        ],
+        "type": 14
+      },
+      "maxEventTopics": 4,
+      "timestamp": {
+        "displayName": [
+          "Timestamp"
+        ],
+        "type": 15
+      }
+    },
+    "events": [],
+    "lang_error": {
+      "displayName": [
+        "ink",
+        "LangError"
+      ],
+      "type": 8
+    },
+    "messages": [
+      {
+        "args": [
+          {
+            "label": "pub_key",
+            "type": {
+              "displayName": [
+                "Vec"
+              ],
+              "type": 3
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "create_worker",
+        "mutates": true,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 6
+        },
+        "selector": "0x564ae8d8"
+      },
+      {
+        "args": [
+          {
+            "label": "pub_key",
+            "type": {
+              "displayName": [
+                "Vec"
+              ],
+              "type": 3
+            }
+          }
+        ],
+        "default": false,
+        "docs": [],
+        "label": "check_worker",
+        "mutates": false,
+        "payable": false,
+        "returnType": {
+          "displayName": [
+            "ink",
+            "MessageResult"
+          ],
+          "type": 9
+        },
+        "selector": "0x0606f252"
+      }
+    ]
+  },
+  "storage": {
+    "root": {
+      "layout": {
+        "struct": {
+          "fields": [
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 0
+                }
+              },
+              "name": "id_counter"
+            },
+            {
+              "layout": {
+                "leaf": {
+                  "key": "0x00000000",
+                  "ty": 1
+                }
+              },
+              "name": "workers"
+            },
+            {
+              "layout": {
+                "root": {
+                  "layout": {
+                    "leaf": {
+                      "key": "0x403dff70",
+                      "ty": 0
+                    }
+                  },
+                  "root_key": "0x403dff70"
+                }
+              },
+              "name": "worker_map"
+            }
+          ],
+          "name": "SmartNodes"
+        }
+      },
+      "root_key": "0x00000000"
+    }
+  },
+  "types": [
+    {
+      "id": 0,
+      "type": {
+        "def": {
+          "primitive": "i32"
+        }
+      }
+    },
+    {
+      "id": 1,
+      "type": {
+        "def": {
+          "sequence": {
+            "type": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "name": "uid",
+                "type": 0,
+                "typeName": "i32"
+              },
+              {
+                "name": "pub_key",
+                "type": 3,
+                "typeName": "Vec<u8>"
+              },
+              {
+                "name": "reputation",
+                "type": 5,
+                "typeName": "i8"
+              }
+            ]
+          }
+        },
+        "path": [
+          "smartnodes",
+          "smartnodes",
+          "Worker"
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": {
+        "def": {
+          "sequence": {
+            "type": 4
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": {
+        "def": {
+          "primitive": "u8"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": {
+        "def": {
+          "primitive": "i8"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 7
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 8
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 7
+          },
+          {
+            "name": "E",
+            "type": 8
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": {
+        "def": {
+          "tuple": []
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "index": 1,
+                "name": "CouldNotReadInput"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "LangError"
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "type": {
+        "def": {
+          "variant": {
+            "variants": [
+              {
+                "fields": [
+                  {
+                    "type": 10
+                  }
+                ],
+                "index": 0,
+                "name": "Ok"
+              },
+              {
+                "fields": [
+                  {
+                    "type": 8
+                  }
+                ],
+                "index": 1,
+                "name": "Err"
+              }
+            ]
+          }
+        },
+        "params": [
+          {
+            "name": "T",
+            "type": 10
+          },
+          {
+            "name": "E",
+            "type": 8
+          }
+        ],
+        "path": [
+          "Result"
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "type": {
+        "def": {
+          "primitive": "bool"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "type": 12,
+                "typeName": "[u8; 32]"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "types",
+          "AccountId"
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": {
+        "def": {
+          "array": {
+            "len": 32,
+            "type": 4
+          }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": {
+        "def": {
+          "primitive": "u128"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": {
+        "def": {
+          "composite": {
+            "fields": [
+              {
+                "type": 12,
+                "typeName": "[u8; 32]"
+              }
+            ]
+          }
+        },
+        "path": [
+          "ink_primitives",
+          "types",
+          "Hash"
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "type": {
+        "def": {
+          "primitive": "u64"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": {
+        "def": {
+          "primitive": "u32"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": {
+        "def": {
+          "variant": {}
+        },
+        "path": [
+          "ink_env",
+          "types",
+          "NoChainExtension"
+        ]
+      }
+    }
+  ],
+  "version": "4"
+}

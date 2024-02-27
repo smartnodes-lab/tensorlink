@@ -1,7 +1,7 @@
-from src.p2p.smart_node import SmartNode
+from src.ml.torch_node import TorchNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output
-from src.ml.distributed import DistributedModel, get_gpu_memory
+from src.ml.distributed import DistributedModel
 
 import torch.nn as nn
 import threading
@@ -40,7 +40,7 @@ class DistributedModule(nn.Module):
         self.master_node.send_tensor((args, kwargs), self.worker_node)
 
 
-class Worker(SmartNode):
+class Worker(TorchNode):
     """
     Todo:
         - confirm workers public key with smart contract
@@ -59,9 +59,6 @@ class Worker(SmartNode):
         # Model training parameters
         self.training = False
         self.master = False
-        self.available_memory = get_gpu_memory()
-        self.validator_nodes = []
-        self.worker_nodes = []
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
@@ -69,7 +66,7 @@ class Worker(SmartNode):
         self.backward_relays = queue.Queue()
         self.intermediates = []
 
-        self.model = None
+        self.modules = []
         self.optimizer = None
         self.loss = None
 
@@ -97,15 +94,26 @@ class Worker(SmartNode):
 
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.master or (self.training and self.model):
+                if self.master or (self.training and self.modules):
                     pickled = pickle.loads(data[7:])
                     self.forward_relays.put(pickled)
 
             elif b"BACKWARD" == data[:8]:
                 self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.master or (self.training and self.model):
+                if self.master or (self.training and self.modules):
                     pickled = pickle.loads(data[8:])
                     self.backward_relays.put(pickled)
+
+            elif b"REQUEST" == data[:7]:
+                self.debug_print(f"RECEIVED STATS REQUEST")
+                self.broadcast_statistics(node)
+
+            elif b"RESPONSE" == data[:8]:
+                self.debug_print(f"RECEIVED NODE STATS")
+
+                pickled = pickle.loads(data[8:])
+                node_id, stats = pickled
+                self.nodes[node_id] = stats
 
             # elif b"PoL" == data[:3]:
             #     self.debug_print(f"RECEIVED PoL REQUEST")
@@ -115,18 +123,18 @@ class Worker(SmartNode):
             #         proof_of_learning = self.proof_of_learning(dummy_input)
             #
             #         self.send_to_node(node, proof_of_learning)
+            #
+            # elif b"TENSOR" == data[:6]:
+            #     if self.training:
+            #         tensor = pickle.loads(data[6:])
+            #
+            #         # Confirm identity/role of node
+            #         if node in self.inbound:
+            #             self.forward_relays.put(tensor)
+            #         elif node in self.outbound:
+            #             self.backward_relays.put(tensor)
 
-            elif b"TENSOR" == data[:6]:
-                if self.training:
-                    tensor = pickle.loads(data[6:])
-
-                    # Confirm identity/role of node
-                    if node in self.inbound:
-                        self.forward_relays.put(tensor)
-                    elif node in self.outbound:
-                        self.backward_relays.put(tensor)
-
-            elif b"MODEL" == data[:5]:
+            elif b"SUBMODULE" == data[:5]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 #
                 if self.training and not self.model:
@@ -136,7 +144,7 @@ class Worker(SmartNode):
                     self.training = True
                     self.debug_print(f"Loaded submodule!")
 
-            elif b"DMODEL" == data[:6]:
+            elif b"MODEL" == data[:6]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.training and not self.model:
                     # Load in model
@@ -156,7 +164,11 @@ class Worker(SmartNode):
         listener = threading.Thread(target=self.listen, daemon=True)
         listener.start()
 
-        # # Thread for handling incoming tensors from connected nodes
+        # Thread for periodic worker statistics updates
+        stats_updater = threading.Thread(target=self.update_worker_stats, daemon=True)
+        stats_updater.start()
+
+        # # Thread for handling incoming tensors from connected nodes (just an idea)
         # data_stream = threading.Thread(target=self.stream_data, daemo=True)
         # data_stream.start()
 
@@ -173,15 +185,15 @@ class Worker(SmartNode):
             # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
 
             self.reconnect_nodes()
-            time.sleep(0.01)
+            time.sleep(3)
 
         print("Node stopping...")
-        for node in self.all_nodes:
+        for node in self.connections:
             node.stop()
 
         time.sleep(1)
 
-        for node in self.all_nodes:
+        for node in self.connections:
             node.join()
 
         self.sock.settimeout(None)
@@ -240,27 +252,6 @@ class Worker(SmartNode):
         if self.training:
             proof["output"] = handle_output(self.model(dummy_input)).sum()
 
-    def send_tensor(self, tensor, node: Connection):
-        # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
-        tensor_bytes = b"TENSOR" + pickle.dumps(tensor)
-        self.debug_print(f"worker: sending {round(tensor_bytes.__sizeof__() / 1e9, 3)} GB")
-        self.send_to_node(node, tensor_bytes)
-
-    def send_forward(self, node: Connection, args):
-        pickled_data = b"FORWARD" + pickle.dumps(args)
-        self.send_to_node(node, pickled_data)
-
-    def send_backward(self, node: Connection, args):
-        pickled_data = b"BACKWARD" + pickle.dumps(args)
-        self.send_to_node(node, pickled_data)
-
-    def send_module(self, module: nn.Module, node: Connection, prefix: bytes = b""):
-        module_bytes = pickle.dumps(module)
-        module_bytes = prefix + b"MODEL" + module_bytes
-        print("SENDING MODULE")
-        self.send_to_node(node, module_bytes)
-        time.sleep(1)
-
     """Key Methods to Implement"""
     def distribute_model(self, model: nn.Module):
         # Retrieve model names and associated offloaded workers. Contact candidate workers
@@ -311,10 +302,15 @@ class Worker(SmartNode):
 
                 return nodes, graph
 
-        worker_nodes = self.request_workers()
+        # Get list of workers and request them be put in a "stand-by" state for the particular request
+        # Before we call this method we must:
+        #   confirm connecting users via SC if the user is the master
+        #   If the worker is the master, residual workers can confirm sub-master via SC seed nodes
+        #   if we are in the validator state
+        worker_nodes = self.worker_nodes
+
         nodes, graph = recurse_model(model, worker_nodes)
-
-
+        return nodes, graph
 
     # def request_worker(self, nodes, module_memory: int, module_type: int):
     #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough memory
@@ -340,26 +336,12 @@ class Worker(SmartNode):
     #     self.training = True
     #     self.distribute_model(model)  # Add master vs worker functionality
 
-    def get_jobs(self):
-        pass
-        # Confirm job details with smart contract, receive initial details from a node?
-
-    def broadcast_statistics(self):
-        memory = str(get_gpu_memory())
-
-        if self.training:
-            pass
-            # Incorporate proofs of training, will be moved to proof_of_learning.py
-            # proof1 = self.proof_of_model()
-            # proof2 = self.proof_of_optimization()
-            # proof3 = self.proof_of_output()
-
-        self.send_to_nodes(memory.encode())
-
-    def request_workers(self):
-        worker_nodes = []
-        for i in range(5):  # range(len(self.all_nodes)):
-            worker_nodes.append({"id": str(uuid.uuid4()), "memory": 0.5e9})
-            # "connection": self.all_nodes[i], "latency_matrix": self.all_nodes[i].latency
-
-        return worker_nodes
+    # When a worker receives REQUEST from another worker, it must respond with its current state
+    # def broa(self):
+    #     worker_nodes = []
+    #
+    #     for i in range(5):  # range(len(self.connections)):
+    #         worker_nodes.append({"id": str(uuid.uuid4()), "memory": 0.5e9})
+    #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
+    #
+    #     return worker_nodes

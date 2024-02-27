@@ -1,9 +1,6 @@
-from src.auth.rsa import generate_rsa_key_pair, load_public_key, authenticate_public_key, \
-    get_public_key_bytes, load_private_key, get_private_key_bytes, get_public_key_obj
 from src.p2p.connection import Connection
+from src.cryptography.rsa import *
 
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
 from typing import List
 import threading
 import base64
@@ -28,11 +25,12 @@ class Node(threading.Thread):
         self.debug = debug
         self.max_connections = max_connections
         self.callback = callback
+        self.rsa_pub_key = get_rsa_pub_key(True)
 
         # Node & Connection parameters
         # self.inbound = []
         # self.outbound = []
-        self.all_nodes = []
+        self.connections = []
         self.reconnect = []
 
         self.terminate_flag = threading.Event()
@@ -43,7 +41,7 @@ class Node(threading.Thread):
         # self.sock = ssl.wrap_socket(self.sock)
 
     # @property
-    # def all_nodes(self):
+    # def connections(self):
     #     return self.inbound + self.outbound
 
     def debug_print(self, message):
@@ -61,12 +59,12 @@ class Node(threading.Thread):
 
     def send_to_nodes(self, data: bytes, exclude: List[Connection] = None,
                       compression: bool = False) -> None:
-        for n in self.all_nodes:
+        for n in self.connections:
             if exclude is None or n not in exclude:
                 self.send_to_node(n, data, compression)
 
     def send_to_node(self, n: Connection, data: bytes, compression: bool = False) -> None:
-        if n in self.all_nodes:
+        if n in self.connections:
             n.send(data, compression=compression)
         else:
             self.debug_print("send_to_node: node not found!")
@@ -77,7 +75,7 @@ class Node(threading.Thread):
                 "connect_with_node: cannot connect with yourself!")
             return False
 
-        for node in self.all_nodes:
+        for node in self.connections:
             if node.host == host and node.port == port:
                 self.debug_print(
                     f"connect_with_node: already connected with node: {node.id}")
@@ -97,10 +95,10 @@ class Node(threading.Thread):
             start_time = time.time()
 
             # ID exchange
-            sock.send(self.get_rsa_pub_key(b=True))
+            sock.send(self.rsa_pub_key)
             verification = sock.recv(4096)
             latency = time.time() - start_time
-            proof = self.decrypt(verification)
+            proof = decrypt(verification)
             sock.send(proof)
 
             # # Check if id is a valid rsa public key
@@ -126,7 +124,7 @@ class Node(threading.Thread):
             thread_client.start()
             thread_client.latency = latency
 
-            self.all_nodes.append(thread_client)
+            self.connections.append(thread_client)
             # self.outbound.append(thread_client)
 
             # If reconnection to this host is required, add to the list
@@ -144,7 +142,7 @@ class Node(threading.Thread):
             return False
 
     def disconnect_with_node(self, node: Connection) -> None:
-        if node in self.all_nodes:
+        if node in self.connections:
             node.stop()
             self.debug_print(f"node disconnected.")
         else:
@@ -164,7 +162,7 @@ class Node(threading.Thread):
             self.debug_print(
                 f"reconnect_nodes: Checking node {node_to_check['host']}:{node_to_check['port']}")
 
-            for node in self.all_nodes:
+            for node in self.connections:
                 if node.host == node_to_check["host"] and node.port == node_to_check["port"]:
                     found_node = True
                     node_to_check["trials"] = 0  # Reset the trials
@@ -183,65 +181,10 @@ class Node(threading.Thread):
                 self.reconnect.remove(node_to_check)
 
     def handle_message(self, node: Connection, data):
-        self.debug_print(f"handle_message from {node.host}:{node.port}")
-        self.debug_print(f"{data}")
-
-        # Handle ping requests
-        if data == b"PING":
-            self.send_to_node(node, b"PONG")
+        self.debug_print(f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB")
 
         if self.callback is not None:
             self.callback(data, node)
-
-    def get_rsa_pub_key(self, b=False):
-        generate_rsa_key_pair()
-        public_key = load_public_key()
-
-        if b is True:
-            return get_public_key_bytes(public_key)
-        else:
-            return public_key
-
-    def get_rsa_priv_key(self, b=False):
-        generate_rsa_key_pair()
-        private_key = load_private_key()
-
-        if b is True:
-            return get_private_key_bytes(private_key)
-        else:
-            return private_key
-
-    def encrypt(self, data, pub_key: bytes = None):
-        # Encrypt the data using RSA-OAEP
-        if pub_key is None:
-            pub_key = self.get_rsa_pub_key()
-        else:
-            pub_key = get_public_key_obj(pub_key)
-
-        encrypted_data = pub_key.encrypt(
-            data,
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-
-        return base64.b64encode(encrypted_data)
-
-    def decrypt(self, data):
-        private_key = self.get_rsa_priv_key()
-
-        decrypted_data = private_key.decrypt(
-            base64.b64decode(data),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None
-            )
-        )
-
-        return decrypted_data
 
     # def measure_latency(self, node: Connection):
     #     start_time = time.time()

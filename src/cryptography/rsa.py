@@ -1,6 +1,7 @@
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
+import base64
 import os
 
 
@@ -92,3 +93,57 @@ def get_public_key_obj(public_key_bytes):
 
 def get_private_key_obj(private_key_bytes):
     return serialization.load_pem_private_key(private_key_bytes, backend=default_backend(), password=None)
+
+
+def get_rsa_pub_key(b=False):
+    generate_rsa_key_pair()
+    public_key = load_public_key()
+
+    if b is True:
+        return get_public_key_bytes(public_key)
+    else:
+        return public_key
+
+
+def get_rsa_priv_key(b=False):
+    generate_rsa_key_pair()
+    private_key = load_private_key()
+
+    if b is True:
+        return get_private_key_bytes(private_key)
+    else:
+        return private_key
+
+
+def encrypt(data, pub_key: bytes = None):
+    # Encrypt the data using RSA-OAEP
+    if pub_key is None:
+        pub_key = get_rsa_pub_key()
+    else:
+        pub_key = get_public_key_obj(pub_key)
+
+    encrypted_data = pub_key.encrypt(
+        data,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+
+    return base64.b64encode(encrypted_data)
+
+
+def decrypt(data):
+    private_key = get_rsa_priv_key()
+
+    decrypted_data = private_key.decrypt(
+        base64.b64decode(data),
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+
+    return decrypted_data
