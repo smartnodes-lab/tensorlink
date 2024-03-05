@@ -1,97 +1,57 @@
-from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory
+from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory, access_module
+from src.roles.worker import Worker
+from src.p2p.connection import Connection
 
 import torch.nn as nn
 import torch.optim as optim
-import torch
+import threading
 import inspect
+import pickle
+import torch
+import queue
 import time
 import ast
 import os
 
 
-def get_gpu_memory():
-    # Check how much available memory we can allocate to the node
-    memory = 0
-
-    if torch.cuda.is_available():
-        devices = list(range(torch.cuda.device_count()))
-        memory += torch.cuda.memory
-
-        for device in devices:
-            torch.cuda.set_device(device)
-            memory_stats = torch.cuda.memory_stats(device)
-            device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
-            memory += device_memory
-    else:
-        # CPU should be able to handle 1 GB (temporary fix)
-        memory += 0.5e9
-
-    return memory
+MAX_WAIT_TIME = 3
 
 
-class Colours:
-    RED = '\033[91m'
-    GREEN = '\033[92m'
-    YELLOW = '\033[93m'
-    PURPLE = '\033[95m'
-    BLUE = '\033[94m'
-    RESET = '\033[0m'
+class Trainer:
+    def __init__(self):
+        pass
 
+    def run_training(self):
+        pass
 
-class DistributedModule(nn.Module):
-    """
-    TODO:
-        - Create method for node selection and peers to include in job
-    """
-    def __init__(self, master_node, worker_node):
-        super().__init__()
-        self.master_node = master_node
-        self.worker_node = worker_node
-        # self.event = threading.Event()
-
-    def forward(self, *args, **kwargs):
-        # Relay forward pass to next node
-        self.master_node.send_forward(self.worker_node, (args, kwargs))
-
-        # Store the tensor (will be used for backward pass)
-        self.master_node.intermediates[-1].append(handle_output(args))
-
-        time.sleep(1)  # Must find an efficient way to wait for worker response (placeholder is to sleep)
-
-        if not self.master_node.forward_relays.empty():
-            # Grab returned tensor
-            output = self.master_node.forward_relays.get()
-
-            # Store intermediates and connection for backwards pass
-            self.master_node.intermediates.append([self.worker_node, handle_output(output)])
-
-            return output
+    def average_gradients(self):
+        pass
 
 
 class DistributedModel(nn.Module):
-    def __init__(self, master_node, model, nodes=None):
+    """
+    DistributedModel:
+        Is able to host offloaded submodules along with local operations. Can be spawned
+        by a Worker or a User. Host is referred to as the 'master' node.
+    """
+    def __init__(self, model: nn.Module, master_node: Worker):
         super(DistributedModel, self).__init__()
-        # self.master_node = master_node
 
         self.master_node = master_node
         self.model = model
-        self.nodes = nodes
-        self.graph = []
-        self.available_memory = get_gpu_memory()
 
-        self.create_distributed_model(self.model)
+        self.spawn_workers = []
 
     def backward(self, loss):
+        # Get the oldest epoch intermediates from storage
+        while self.master_node.intermediates[0].empty() is False:
+            vals = self.master_node.intermediates[0].get()
 
-        while len(self.master_node.intermediates) > 0:
-            vals = self.master_node.intermediates.pop(-1)
-
-            # Len vals 3 means connection info is present
-            if len(vals) == 3:
+            if len(vals) == 3:  # Len == 3 means connection info is present TODO: better context creation
                 connection, assoc_input, assoc_output = vals
                 assoc_output.backward(loss, retain_graph=True)
                 loss = assoc_input.grad
-                self.master_node.send_backward(connection, loss)
+                self.async_send_backward(connection, loss)
 
                 time.sleep(0.5)
 
@@ -126,168 +86,264 @@ class DistributedModel(nn.Module):
             else:
                 raise "Expect vals to be of length 1, 2 or 3."
 
-        # # Iterate through children in backward pass
-        # for device, submodule in reversed(self.graph):
-        #     if device is None:
-        #         assoc_output = self.master_node.assoc_outputs.get()
-        #         assoc_output.backward(loss, retain_graph=True)
-        #         loss = self.master_node.assoc_intermediates.get().grad
-        #     else:
-        #         self.master_node.send_backward(self.nodes, loss)
-        #
-        #         time.sleep(1)  # Must find an efficient way to wait for worker response (placeholder is to sleep)
-        #
-        #         if self.master_node.loss_relays.not_empty:
-        #             loss = self.master_node.loss_relays.get()
+    def distribute_model(self):
+        # Retrieve model names and assign workers to offload. Contact candidate workers
+        # and ensure they are ready to receive the model / train
+        distributed_module_ids = []
 
-    def create_distributed_model(self, model):
-        """
-        Distribute model to available connected nodes, assign modules based on memory requirements & latency.
-        Replace distributed modules with shell objects in master's instantiation to preserve tensor-flow
-        """
+        def recurse_model(module, nodes, candidate_node=None, mod_id=None):
+            # Get module information
+            if mod_id is None:
+                mod_id = []
 
-        # Grab model source code
-        source_code = inspect.getsource(type(model))
-        parsed_code = ast.parse(source_code)
-        children = dict(model.named_children())
+            module_memory = estimate_memory(module)
+            module_children = list(module.named_children())
+            module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
 
-        candidate_node = self.nodes[0]
-        candidate_node_memory = candidate_node["memory"]
+            # See if we can handle the input first
+            if module_memory < self.master_node.available_memory:
+                self.master_node.available_memory -= module_memory
+                return nodes, f"MASTER"
 
-        submodule_counter = []
+            elif module_memory < max(nodes, key=lambda x: x["memory"])["memory"]:
+                candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
+                nodes[candidate_node]["memory"] -= module_memory
+                distributed_module_ids.append(mod_id)
+                self.wrap_module(mod_id, nodes[candidate_node]["connection"])
+                return nodes, f"{nodes[candidate_node]['id']}"
 
-        for node in ast.walk(parsed_code):
-            # Identify init method of model
-            if isinstance(node, ast.FunctionDef) and node.name == "__init__":
-                for sub_node in node.body:
-                    if isinstance(sub_node, ast.Assign):
-                        for target in sub_node.targets:
-                            # Find modules in init method that match the name of the named_children
-                            if (
-                                    isinstance(target, ast.Attribute)
-                                    and isinstance(target.value, ast.Name)
-                                    and target.attr in children.keys()
-                            ):
-                                # Get the original module + required memory
-                                original_module = getattr(model, target.attr)
-                                module_memory = estimate_memory(original_module)  # Must improve estimation (accommodate batch sizes etc)
+            # We cannot handle the module on the master node, there are now three options:
+            # assume intermediate DistributedModel on master if graph is empty (or user wants to maximize his compute
+            # contribution before offloading?)
+            # attempt to offload module on best candidate
+            # attempt intermediate DistributedModel on best candidate
+            # elif not distributed_graph: # Commented out for the same reason as the multi-masternode stuff below...
+            # For now, we are just attempting candidate node offload and then defaulting to User masternode distribution
+            elif isinstance(module, nn.ModuleList):
+                graph = []
 
-                                # Accommodate on our device if we can
-                                if module_memory < self.available_memory:
-                                    self.available_memory -= module_memory
-                                    self.graph.append((None, target.attr))
+                for i, layer in enumerate(module):
+                    sub_mod_id = mod_id + [i]
 
-                                # If submodule is a large module list, distribute the contents in a leaf-like structure
-                                elif isinstance(original_module, nn.ModuleList):
-                                    for name, submodule in original_module.named_children():
-                                        submodule_memory = estimate_memory(submodule)
-                                        if submodule_memory < self.available_memory:
-                                            self.graph.append((None, name))
-                                            self.available_memory -= submodule_memory
-                                        elif submodule_memory < candidate_node_memory:
-                                            print(f"distributing {target.attr}")
-                                            self.master_node.send_module(submodule, candidate_node["connection"])
-                                            candidate_node_memory -= submodule_memory
-                                        else:
-                                            self.nodes = self.nodes[:candidate_node["id"]] + self.nodes[
-                                                                                             candidate_node["id"] + 1:]
-                                            candidate_node = max(self.nodes, key=lambda x: x["memory"])
+                    # if layer_memory < self.master_node.available_memory:
+                    #     self.master_node.available_memory -= layer_memory
+                    # elif layer_memory < nodes[candidate_node]["memory"]:
+                        # self.wrap_module(sub_mod_id, nodes[candidate_node]["connection"])
 
-                                # Distribute otherwise
-                                else:
-                                    wrapped_module = DistributedModule(self.master_node, candidate_node["connection"])
+                    nodes, subgraph = recurse_model(layer, nodes, candidate_node, sub_mod_id)
+                    graph.append(subgraph)
+                return nodes, graph
 
-                                    # Try offloading entire model to worker
-                                    if module_memory < candidate_node_memory:
-                                        print(f"distributing {target.attr}")
-                                        # Wrapping module custom nn.Module that will handle forward and backward passes
-                                        # between nodes
-                                        self.master_node.send_module(original_module, candidate_node["connection"])
-                                        candidate_node_memory -= module_memory
-
-                                    # Assign worker as local master node otherwise
-                                    else:
-                                        print(f"distributing dist_{target.attr}")
-                                        self.master_node.send_module(original_module, candidate_node["connection"], b"D")
-
-                                        self.nodes = self.nodes[:candidate_node["id"]] + self.nodes[candidate_node["id"] + 1:]
-
-                                        candidate_node = max(self.nodes, key=lambda x: x["memory"])
-
-                                    self.graph.append((candidate_node["connection"], target.attr))
-                                    setattr(self.model, target.attr, wrapped_module)
-
-
-# Test simulation of the distribution process
-def print_distribute_model(module, nodes=None, candidate_node=None, indent=0):
-    if nodes is None:
-        # Test set of nodes, real set will be obtained from either the worker's list of nodes,
-        # some form of network propagation, or the smart contract.768uy
-        nodes = [
-            {"id": 0, "memory": 1e9, "connection": 0, "latency_matrix": [], "colour": Colours.GREEN},
-            {"id": 1, "memory": 1e9, "connection": 0, "latency_matrix": [], "colour": Colours.RED},
-            {"id": 2, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.YELLOW},
-            {"id": 3, "memory": 0.2e9, "connection": 0, "latency_matrix": [], "colour": Colours.BLUE},
-            {"id": 4, "memory": 0.5e9, "connection": 0, "latency_matrix": [], "colour": Colours.PURPLE}
-        ]
-
-    # While we initialize the model candidate worker nodes should be put on standby to receive submodules
-
-    # Estimate memory requirements for the model
-    module_memory = estimate_memory(module)
-    module_children = list(module.named_children())
-    module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
-    prefix = "  " * indent
-
-    if candidate_node is None:
-        candidate_node = max(nodes, key=lambda x: x["memory"])
-
-    # See if we can handle module on current node
-    if module_memory < candidate_node["memory"]:
-        print(candidate_node["colour"] + prefix + f"Loaded: {module_name} on worker: {candidate_node['id']}")
-        nodes[candidate_node['id']]["memory"] -= module_memory
-        return nodes
-
-    # Workflow for non-modularized modules (ie can't be distributed linearly) [currently just handles for modulelist]
-    elif any(isinstance(module_children[i][1], nn.ModuleList) for i in range(len(module_children))):
-        # Update candidate node to the best worker to handle the majority of work
-        candidate_node = max(nodes, key=lambda x: x["memory"])
-        print(candidate_node["colour"] + prefix + f"Loaded Skeleton Module: {module_name} on worker: {candidate_node['id']}")
-        print(prefix + f"Distributing Leafs: {module_children[0][0]}")
-
-        # Must dish out submodules in a leaf-like manner not, filling up the master (current) node first
-        # The workflow below can be condensed into some sort of recursive call
-        for _, parent_submodule in module_children:
-            parent_submodule_memory = estimate_memory(parent_submodule)
-
-            # See if parent submodule can be loaded on current node
-            if parent_submodule_memory < candidate_node["memory"]:
-                nodes = print_distribute_model(parent_submodule, nodes, candidate_node, indent=indent+1)
-            # Else it has to be split up,
             else:
-                # See if we can distribute parent module submodules
-                for name, submodule in parent_submodule.named_children():
-                    submodule_memory = estimate_memory(submodule)
-                    # Fill up parent if we can (pass candidate node)
-                    if submodule_memory < candidate_node["memory"]:
-                        nodes = print_distribute_model(submodule, nodes, candidate_node, indent=indent+1)
-                    # Distribute otherwise
-                    else:
-                        nodes = print_distribute_model(submodule, nodes, indent=indent+1)
+                # Spawn secondary DistributedModel on master (subgraph)
+                graph_name = f"DistributedModel:{module_name}:MASTER"
+                graph = {graph_name: {}}
 
-    # Module is too large but IS modularizable
-    else:
-        print(candidate_node["colour"] + prefix + f"Distributing {module_name} Modules...")
+                for i, (name, submodule) in enumerate(module_children):
+                    if len(graph[graph_name]) > 0:
+                        candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
 
-        # Send submodule
-        for name, submodule in module_children:
-            nodes = print_distribute_model(submodule, nodes, candidate_node, indent=indent+1)
+                    # Handle submodule
+                    nodes, subgraph = recurse_model(submodule, nodes, candidate_node, mod_id + [i])
+                    graph[graph_name][f"DistributedSubModule:{name}"] = subgraph
 
-            # Fill workers up with submodules before switching to the next
-            # candidate_node = max(nodes, key=lambda x: x["memory"])
+                return nodes, graph
 
-    # TODO:
-    #  Priority: check for lowest latency x high memory node to offload first submodule to.
-    #  Later: if submodule is too big we can call the distribute model again.
-    #  Tail recursion / some output to carry current candidate node. Avoid sending tensor to master if we
-    #    handle the next submodule and there isn't any intermediate computations between children.
+        # Get list of workers and request them be put in a "stand-by" state for the particular request
+        # Before we call this method we must:
+        #   confirm connecting users via SC if the user is the master
+        #   If the worker is the master, residual workers can confirm sub-master via SC seed nodes
+        #   if we are in the validator state
+
+        worker_nodes = list(self.master_node.nodes.values())
+        nodes, graph = recurse_model(self.model, worker_nodes)
+
+        for thread in self.spawn_workers:
+            thread.join()
+
+        return nodes, graph
+
+    # def offload_module(self, parent_module, child_module, connection):
+    #     # Wait for some sort of signal from worker to know that it has taken
+    #     start_time = time.time()
+    #
+    #     while True:
+    #         if time.time() - start_time > MAX_WAIT_TIME:
+    #             # Select another worker if current worker takes too long
+    #             connection = max(self.master_node.nodes, key=lambda x: x["memory"])
+    #         elif self.master_node
+
+    def wrap_module(self, module_id: list, worker: Connection):
+        child_module = access_module(self.model, module_id)
+        parent_module = access_module(self.model, module_id[:-1]) if len(module_id) > 1 else self.model
+
+        offloaded_module = OffloadedModule(self.master_node, worker)
+
+        if isinstance(parent_module, nn.ModuleList):
+            parent_module[module_id[-1]] = offloaded_module
+        else:
+            child_name = list(parent_module.named_children())[module_id[-1]][0]
+            setattr(parent_module, child_name, offloaded_module)
+
+        # Spawn a worker thread for the offloaded module
+        offloaded_module.spawn_worker(child_module, module_id)
+
+        # spawn_worker = threading.Thread(target=offloaded_module.spawn_worker, args=(child_module, module_id))
+        # spawn_worker.start()
+        # self.spawn_workers.append(spawn_worker)
+
+        # source_code = inspect.getsource(type(parent_module))
+        # parsed_code = ast.parse(source_code)
+        #
+        # for node in ast.walk(parsed_code):
+        #     if isinstance(node, ast.FunctionDef) and node.name == "__init__":
+        #         for sub_node in node.body:
+        #             if isinstance(sub_node, ast.Assign):
+        #                 for target in sub_node.targets:
+        #                     if (
+        #                             isinstance(target, ast.Attribute)
+        #                             and isinstance(target.value, ast.Name)
+        #                             and target.attr == child_module
+        #                     ):
+        #                         wrapped_module = OffloadedModule(self.master_node, worker)
+        #                         setattr(parent_module, target.attr, wrapped_module)
+
+
+class OffloadedModule(nn.Module):
+    """
+    OffloadedModule:
+        A module wrapper that handles offloading on the master node without disrupting normal
+        pytorch model flow.
+    """
+    def __init__(self, master_node: Worker, worker_node: Connection):
+        super(OffloadedModule, self).__init__()
+
+        self.master_node = master_node
+        self.worker_node = worker_node
+
+        self.module_id = None
+
+
+    def spawn_worker(self, module: nn.Module, module_id: list):
+        # # Initialize a threading Timer to monitor the loading process
+        # timer = threading.Timer(MAX_WAIT_TIME, self.handle_timeout)
+        # timer.start()
+
+        # try:
+        # Send the module to the worker node
+        self.master_node.distributed_graph[str(module_id)] = None
+
+        self.module_id = str(module_id)
+        module.id = self.module_id
+
+        self.master_node.send_module(module, self.worker_node)
+
+        # Wait for the worker node to confirm module loading
+        while self.master_node.distributed_graph[self.module_id] is None:
+            time.sleep(0.01)
+
+        #     # Module loaded successfully
+        # except TimeoutError:
+        #     # Timeout occurred, handle it
+        #     self.handle_timeout()
+        #
+        # finally:
+        #     # Stop the timer as loading completed (or failed)
+        #     timer.cancel()
+
+    def handle_timeout(self):
+        # Timeout occurred, switch to another worker
+        new_worker_node = self.master_node.select_candidate_worker()
+        if new_worker_node:
+            self.worker_node = new_worker_node["connection"]
+        else:
+            # No available workers found, handle the situation accordingly
+            pass
+
+    # def forward(self, *args, **kwargs):
+    #     # Relay forward pass to next node
+    #     start_time = time.time()
+    #     self.master_node.send_forward(self.worker_node, (args, kwargs), self.module_id.encode())
+    #     n_queued = self.master_node..qsize()
+    #
+    #     while self.master_node.forward_relays.qsize() <= n_queued:
+    #         if time.time() - start_time >= MAX_WAIT_TIME:
+    #             # Logic here to request another worker take his place
+    #             pass
+    #
+    #     # Grab returned tensor
+    #     output = self.master_node.forward_relays.get()
+    #
+    #     # Store intermediates and connection for backwards pass
+    #     self.master_node.intermediates.append([self.worker_node, handle_output(output)])
+    #
+    #     return output
+
+    # async def async_send_forward(self, node: Connection, args, context: bytes = b""):
+    #     pickled_data = b"FORWARD" + context + pickle.dumps(args)
+    #
+    #     self.send_to_node(node, pickled_data)
+    #
+    # async def async_send_backward(self, node: Connection, args, context: bytes = b""):
+    #     pickled_data = b"BACKWARD" + context + pickle.dumps(args)
+    #     self.send_to_node(node, pickled_data)
+
+
+# class DistributedSubModule(nn.Module):
+#     """
+#     DistributedSubModule:
+#         An offloaded submodule assigned by the master node and run on a worker.
+#     """
+#     def __init__(self, module: nn.Module, module_id: bytes, worker: Worker, offloaded: Connection):
+#         super(DistributedSubModule, self).__init__()
+#
+#         self.module = module
+#         self.module_id = module_id
+#
+#         self.worker = worker
+#         self.offloaded = offloaded
+#
+#         self.forward_relays = queue.Queue()
+#         self.backward_relays = queue.Queue()
+#         self.intermediates = queue.Queue()
+#
+#         self.optimizer = None
+#         self.loss = None
+#
+#     def forward(self):
+#         if self.forward_relays.empty() is False:
+#             # Grab queued forward pass and unpack values if any
+#             prev_forward = self.forward_relays.get()
+#             if isinstance(prev_forward, tuple):
+#                 args, kwargs = prev_forward
+#             else:
+#                 args = prev_forward
+#                 kwargs = {}
+#
+#             # Clear tensor of any previous info, set up for custom backward pass
+#             _input = handle_output(args).clone().detach().requires_grad_()  # Move the detaching to the end so we don't
+#             _output = self.module(_input, **kwargs)                         # send the useless data over p2p
+#
+#             # Store output and input tensor for backward pass
+#             self.intermediates.put([_input, handle_output(_output)])
+#
+#             # Relay forward pass to the next node
+#             self.worker.send_forward(self.offloaded, args, self.module_id)
+#
+#     def backward(self):
+#         # Complete any outstanding back propagations
+#         if self.backward_relays.empty() is False:
+#             # Grab backwards pass from incoming node and our associated input/output from forward pass
+#             loss_relay = self.backward_relays.get()
+#             assoc_input, assoc_output = self.intermediates.get()
+#
+#             # Continue backwards pass on our section of model
+#             assoc_output.backward(loss_relay, retain_graph=True)  # Do we need this?
+#
+#             self.optimizer.zero_grad()
+#             self.optimizer.step()
+#
+#             # Pass along backwards pass to next node
+#             dvalues = assoc_input.grad
+#
+#             self.worker.send_backward(self.offloaded, dvalues, self.module_id)

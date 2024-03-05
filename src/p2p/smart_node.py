@@ -12,7 +12,7 @@ import time
 import os
 
 
-METADATA = "./src/smartnodes.json"
+METADATA = "./src/assets/smartnodes.json"
 CONTRACT = "5D37KYdd3Ptd8CfjKxtN3rGqU6oZQQeiGfTLfF2VGrTQJfyN"
 
 

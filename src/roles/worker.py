@@ -1,52 +1,22 @@
-from src.ml.torch_node import TorchNode
+from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
-from src.ml.model_analyzer import estimate_memory, handle_output
-from src.ml.distributed import DistributedModel
+from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
 
 import torch.nn as nn
 import threading
-import random
 import pickle
-import torch
 import queue
+import torch
 import time
-import uuid
 import os
-
-
-COLOURS = ['\033[91m', '\033[92m', '\033[93m', '\033[95m', '\033[94m']
-RESET = '\033[0m'
-
-
-class DistributedModule(nn.Module):
-    def __init__(self, master_node, worker_node: Connection):
-        super().__init__()
-        self.master_node = master_node
-        self.worker_node = worker_node
-        # self.event = threading.Event()
-
-    def forward(self, *args, **kwargs):
-        self.master_node.send_forward(self.worker_node, (args, kwargs))
-
-        # Must somehow wait for the response output from the worker
-        time.sleep(3)
-
-        if self.master_node.forward_relays.not_empty:
-            return self.master_node.forward_relays.get()
-
-    def backward(self, *args, **kwargs):
-
-        # Must somehow get the response output from the worker
-        self.master_node.send_tensor((args, kwargs), self.worker_node)
 
 
 class Worker(TorchNode):
     """
     Todo:
-        - confirm workers public key with smart contract
         - convert pickling to json for security (?)
         - process other jobs/batches while waiting for worker response (?)
-        - link workers to database for complete offloading
+        - link workers to database or download training data for complete offloading
         - different subclasses of Worker for memory requirements to designate memory-specific
             tasks, ie distributing a model too large to handle on a single computer / user
         - function that detaches the huggingface wrapped outputs tensor without modifying the rest
@@ -59,14 +29,11 @@ class Worker(TorchNode):
         # Model training parameters
         self.training = False
         self.master = False
+        self.graph = {}
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
-        self.forward_relays = queue.Queue()
-        self.backward_relays = queue.Queue()
-        self.intermediates = []
-
-        self.modules = []
+        self.modules = {}
         self.optimizer = None
         self.loss = None
 
@@ -95,8 +62,11 @@ class Worker(TorchNode):
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.master or (self.training and self.modules):
-                    pickled = pickle.loads(data[7:])
-                    self.forward_relays.put(pickled)
+                    id = data.split(b"[", maxsplit=1)[-1]
+                    id, rest = id.split(b"]", maxsplit=1)
+                    pickled = pickle.loads(rest)
+
+                    self.modules[id].put(pickled)
 
             elif b"BACKWARD" == data[:8]:
                 self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
@@ -113,6 +83,7 @@ class Worker(TorchNode):
 
                 pickled = pickle.loads(data[8:])
                 node_id, stats = pickled
+                stats["connection"] = node
                 self.nodes[node_id] = stats
 
             # elif b"PoL" == data[:3]:
@@ -134,26 +105,26 @@ class Worker(TorchNode):
             #         elif node in self.outbound:
             #             self.backward_relays.put(tensor)
 
-            elif b"SUBMODULE" == data[:5]:
+            elif b"MODULE" == data[:6]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                #
-                if self.training and not self.model:
+                if self.training:
                     # Load in model
-                    pickled = pickle.loads(data[5:])
-                    self.model = pickled
-                    self.training = True
-                    self.debug_print(f"Loaded submodule!")
+                    module = pickle.loads(data[6:])
 
-            elif b"MODEL" == data[:6]:
-                self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.training and not self.model:
-                    # Load in model
-                    pickled = pickle.loads(data[6:])
+                    module.forward_queues = queue.Queue()
+                    module.backward_queues = queue.Queue()
+                    module.intermediates = queue.LifoQueue()
+
                     # self.request_statistics()
-                    time.sleep(0.5)
-                    self.model = DistributedModel(self, pickled, self.peer_stats)
-                    self.training = True
+                    self.modules[module.id] = module
+
                     self.debug_print(f"Loaded distributed module!")
+                    self.send_to_node(node, b"LOADED" + module.id.encode())
+
+            elif b"LOADED" == data[:6]:
+                self.debug_print(f"Successfully offloaded submodule to worker.")
+                pickled = data[6:].decode()
+                self.distributed_graph[str(pickled)] = node
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
@@ -167,6 +138,9 @@ class Worker(TorchNode):
         # Thread for periodic worker statistics updates
         stats_updater = threading.Thread(target=self.update_worker_stats, daemon=True)
         stats_updater.start()
+
+        # time.sleep(5)
+        # self.updater_flag.set()
 
         # # Thread for handling incoming tensors from connected nodes (just an idea)
         # data_stream = threading.Thread(target=self.stream_data, daemo=True)
@@ -200,46 +174,50 @@ class Worker(TorchNode):
         self.sock.close()
         print("Node stopped")
 
+    def load_distributed_module(self, module: nn.Module, graph: dict = None):
+        pass
+
     def train_loop(self):
-        # Complete any outstanding back propagations
-        if self.backward_relays.empty() is False:
-            next_node = self.outbound[0]  # Placeholder for the connecting node
-
-            # Grab backwards pass from forward node and our associated input/output from forward pass
-            loss_relay = self.backward_relays.get()
-            assoc_input, assoc_output = self.intermediates.pop(-1)
-
-            # Continue backwards pass on our section of model
-            assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
-
-            # self.optimizer.zero_grad()
-            # self.optimizer.step()
-
-            dvalues = assoc_input.grad
-
-            # Pass along backwards pass to next node
-            self.send_backward(next_node, dvalues)
+        # # Complete any outstanding back propagations
+        # if self.backward_relays.() is False:
+        #     next_node = list(self.nodes.values())[0]  # Placeholder for the connecting node
+        #
+        #     # Grab backwards pass from forward node and our associated input/output from forward pass
+        #     loss_relay = self.backward_relays.get()
+        #     assoc_input, assoc_output = self.intermediates.pop(-1)
+        #
+        #     # Continue backwards pass on our section of model
+        #     assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
+        #
+        #     # self.optimizer.zero_grad()
+        #     # self.optimizer.step()
+        #
+        #     dvalues = assoc_input.grad
+        #
+        #     # Pass along backwards pass to next node
+        #     self.send_backward(next_node, dvalues)
 
         # Complete any forward pass
-        if self.forward_relays.empty() is False:
-            next_node = self.inbound[0]  # Placeholder for the appropriate node
-            prev_forward = self.forward_relays.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
+        for module_id, module in self.modules.items():
+            if module.forward_relays.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
+                next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
+                prev_forward = module.forward_relays.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
 
-            if isinstance(prev_forward, tuple):
-                args, kwargs = prev_forward
-            else:
-                args = prev_forward
-                kwargs = {}
+                if isinstance(prev_forward, tuple):
+                    args, kwargs = prev_forward
+                else:
+                    args = prev_forward
+                    kwargs = {}
 
-            # Clear tensor of any previous info, set up for custom backward pass
-            inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
-            out = self.model(inp, **kwargs)
+                # Clear tensor of any previous info, set up for custom backward pass
+                inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
+                out = module(inp, **kwargs)
 
-            # Store output and input tensor for backward pass
-            self.intermediates.append([inp, handle_output(out)])
+                # Store output and input tensor for backward pass
+                module.intermediates.put([inp, handle_output(out)])
 
-            # Relay forward pass to the next node
-            self.send_forward(next_node, out)
+                # Relay forward pass to the next node
+                self.send_forward(next_node, out)
 
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {
@@ -253,65 +231,6 @@ class Worker(TorchNode):
             proof["output"] = handle_output(self.model(dummy_input)).sum()
 
     """Key Methods to Implement"""
-    def distribute_model(self, model: nn.Module):
-        # Retrieve model names and associated offloaded workers. Contact candidate workers
-        # and ensure they are ready to receive the model / train
-        def recurse_model(module, nodes, candidate_node=None):
-            # Get module information
-            module_memory = estimate_memory(module)
-            module_children = list(module.named_children())
-            module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
-
-            # See if we can handle the input first
-            if module_memory < self.available_memory:
-                self.available_memory -= module_memory
-                return nodes, f"MASTER"
-
-            elif module_memory < max(nodes, key=lambda x: x["memory"])["memory"]:
-                candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
-                nodes[candidate_node]["memory"] -= module_memory
-                return nodes, f"{nodes[candidate_node]['id']}"
-
-            # We cannot handle the module on the master node, there are now three options:
-            # assume intermediate DistributedModel on master if graph is empty (or user wants to maximize his compute
-            # contribution before offloading?)
-            # attempt to offload module on best candidate
-            # attempt intermediate DistributedModel on best candidate
-            # elif not distributed_graph: # Commented out for the same reason as the multi-masternode stuff below...
-            # For now, we are just attempting candidate node offload and then defaulting to User masternode distribution
-            elif isinstance(module, nn.ModuleList):
-                graph = []
-                for layer in module:
-                    nodes, subgraph = recurse_model(layer, nodes, candidate_node)
-                    graph.append(subgraph)
-                return nodes, graph
-
-            else:
-                # Spawn secondary DistributedModel on master (subgraph)
-                graph_name = f"DistributedModel:{module_name}:MASTER"
-                graph = {graph_name: {}}
-
-                for name, submodule in module_children:
-                    if len(graph[graph_name]) > 0:
-                        candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
-
-                    # Handle submodule
-                    nodes, subgraph = recurse_model(submodule, nodes, candidate_node)
-
-                    graph[graph_name][f"DistributedSubModule:{name}"] = subgraph
-
-                return nodes, graph
-
-        # Get list of workers and request them be put in a "stand-by" state for the particular request
-        # Before we call this method we must:
-        #   confirm connecting users via SC if the user is the master
-        #   If the worker is the master, residual workers can confirm sub-master via SC seed nodes
-        #   if we are in the validator state
-        worker_nodes = self.worker_nodes
-
-        nodes, graph = recurse_model(model, worker_nodes)
-        return nodes, graph
-
     # def request_worker(self, nodes, module_memory: int, module_type: int):
     #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough memory
     #     if module_type == 0:
