@@ -22,7 +22,7 @@ def get_gpu_memory():
             memory += device_memory
     else:
         # CPU should be able to handle 1 GB (temporary fix)
-        memory += 1.2e9
+        memory += 1.5e9
 
     return memory
 

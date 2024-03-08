@@ -18,8 +18,8 @@ MAX_WAIT_TIME = 3
 
 
 class Trainer:
-    def __init__(self):
-        pass
+    def __init__(self, worker):
+        self.worker = worker
 
     def run_training(self):
         pass
@@ -39,24 +39,36 @@ class DistributedModel(nn.Module):
 
         self.master_node = master_node
         self.model = model
-
+        self.model.forward_queues = queue.Queue()
+        self.model.backward_queues = queue.Queue()
+        self.model.intermediates = queue.LifoQueue()  # Queue to hold intermediates, must be converted into dictionary
+                                                      # of queues if we wish to perform multiple epochs concurrently
+        self.master_node.modules["Master"] = self.model
         self.spawn_workers = []
 
+    def forward(self, *args, **kwargs):
+        if len(args) == 1:
+            args = args[0]
+
+        self.model.intermediates.put(args)
+        x = self.model(args)
+        return x
+
     def backward(self, loss):
-        # Get the oldest epoch intermediates from storage
-        while self.master_node.intermediates[0].empty() is False:
-            vals = self.master_node.intermediates[0].get()
+
+        # Get the oldest epoch intermediates from storage via dict key lookup (todo)
+        while self.model.intermediates.empty() is False:
+            vals = self.model.intermediates.get()
 
             if len(vals) == 3:  # Len == 3 means connection info is present TODO: better context creation
                 connection, assoc_input, assoc_output = vals
                 assoc_output.backward(loss, retain_graph=True)
                 loss = assoc_input.grad
-                self.async_send_backward(connection, loss)
+                self.master_node.send_backward(connection, loss)
 
-                time.sleep(0.5)
+                if self.model.backward_relays.not_empty:
+                    loss = self.model.backward_relays.get()
 
-                if self.master_node.backward_relays.not_empty:
-                    loss = self.master_node.backward_relays.get()
             # Len vals 2 means backwards pass of last or first submodule
             elif len(vals) == 2:
                 val1, val2 = vals
@@ -190,23 +202,7 @@ class DistributedModel(nn.Module):
 
         # spawn_worker = threading.Thread(target=offloaded_module.spawn_worker, args=(child_module, module_id))
         # spawn_worker.start()
-        # self.spawn_workers.append(spawn_worker)
-
-        # source_code = inspect.getsource(type(parent_module))
-        # parsed_code = ast.parse(source_code)
-        #
-        # for node in ast.walk(parsed_code):
-        #     if isinstance(node, ast.FunctionDef) and node.name == "__init__":
-        #         for sub_node in node.body:
-        #             if isinstance(sub_node, ast.Assign):
-        #                 for target in sub_node.targets:
-        #                     if (
-        #                             isinstance(target, ast.Attribute)
-        #                             and isinstance(target.value, ast.Name)
-        #                             and target.attr == child_module
-        #                     ):
-        #                         wrapped_module = OffloadedModule(self.master_node, worker)
-        #                         setattr(parent_module, target.attr, wrapped_module)
+        # self.spawn_workers.append(spawn_worker)4
 
 
 class OffloadedModule(nn.Module):
@@ -223,7 +219,6 @@ class OffloadedModule(nn.Module):
 
         self.module_id = None
 
-
     def spawn_worker(self, module: nn.Module, module_id: list):
         # # Initialize a threading Timer to monitor the loading process
         # timer = threading.Timer(MAX_WAIT_TIME, self.handle_timeout)
@@ -231,10 +226,10 @@ class OffloadedModule(nn.Module):
 
         # try:
         # Send the module to the worker node
-        self.master_node.distributed_graph[str(module_id)] = None
-
-        self.module_id = str(module_id)
+        self.module_id = str(module_id).encode()
         module.id = self.module_id
+
+        self.master_node.distributed_graph[self.module_id] = None
 
         self.master_node.send_module(module, self.worker_node)
 
@@ -260,24 +255,24 @@ class OffloadedModule(nn.Module):
             # No available workers found, handle the situation accordingly
             pass
 
-    # def forward(self, *args, **kwargs):
-    #     # Relay forward pass to next node
-    #     start_time = time.time()
-    #     self.master_node.send_forward(self.worker_node, (args, kwargs), self.module_id.encode())
-    #     n_queued = self.master_node..qsize()
-    #
-    #     while self.master_node.forward_relays.qsize() <= n_queued:
-    #         if time.time() - start_time >= MAX_WAIT_TIME:
-    #             # Logic here to request another worker take his place
-    #             pass
-    #
-    #     # Grab returned tensor
-    #     output = self.master_node.forward_relays.get()
-    #
-    #     # Store intermediates and connection for backwards pass
-    #     self.master_node.intermediates.append([self.worker_node, handle_output(output)])
-    #
-    #     return output
+    def forward(self, *args, **kwargs):
+        # Relay forward pass to next node
+        start_time = time.time()
+        n_queued = self.master_node.modules["Master"].forward_queues.qsize()  # forward_queues[self.module_id].qsize() TODO, indexing by module id
+        self.master_node.send_forward(self.worker_node, (args, kwargs), self.module_id)
+
+        while self.master_node.modules["Master"].forward_queues.qsize() <= n_queued:
+            if time.time() - start_time >= MAX_WAIT_TIME:
+                # Logic here to request another worker take his place
+                pass
+
+        # Grab returned tensor
+        output = self.master_node.modules["Master"].forward_queues.get()
+
+        # Store intermediates and connection for backwards pass
+        self.master_node.modules["Master"].intermediates.put([self.worker_node, handle_output(output)])
+
+        return output
 
     # async def async_send_forward(self, node: Connection, args, context: bytes = b""):
     #     pickled_data = b"FORWARD" + context + pickle.dumps(args)

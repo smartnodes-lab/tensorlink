@@ -42,7 +42,7 @@ class Worker(TorchNode):
         Handle incoming tensors from connected nodes and new job requests
 
         Todo:
-            - ensure correct nodes sending data
+d            - ensure correct nodes sending data
             - potentially move/forward method directly to Connection to save data via identifying data
                 type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
         """
@@ -61,18 +61,25 @@ class Worker(TorchNode):
 
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.master or (self.training and self.modules):
-                    id = data.split(b"[", maxsplit=1)[-1]
-                    id, rest = id.split(b"]", maxsplit=1)
+                if self.master:
+                    _, _, rest = data[7:].partition(b"]")
                     pickled = pickle.loads(rest)
+                    self.modules["Master"].forward_queues.put(pickled)
 
-                    self.modules[id].put(pickled)
+                    # pickled = pickle.loads(data[7:])
+                    # self.modules["Master"].forward_queues.put(pickled)
+
+                elif self.training and len(self.modules) > 0:
+                    id, delim, rest = data[7:].partition(b"]")
+                    id += delim
+                    pickled = pickle.loads(rest)
+                    self.modules[id].forward_queues.put(pickled)
 
             elif b"BACKWARD" == data[:8]:
                 self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.master or (self.training and self.modules):
                     pickled = pickle.loads(data[8:])
-                    self.backward_relays.put(pickled)
+                    # self.backward_relays.put(pickled)
 
             elif b"REQUEST" == data[:7]:
                 self.debug_print(f"RECEIVED STATS REQUEST")
@@ -119,12 +126,12 @@ class Worker(TorchNode):
                     self.modules[module.id] = module
 
                     self.debug_print(f"Loaded distributed module!")
-                    self.send_to_node(node, b"LOADED" + module.id.encode())
+                    self.send_to_node(node, b"LOADED" + module.id)
 
             elif b"LOADED" == data[:6]:
                 self.debug_print(f"Successfully offloaded submodule to worker.")
-                pickled = data[6:].decode()
-                self.distributed_graph[str(pickled)] = node
+                pickled = data[6:]
+                self.distributed_graph[pickled] = node
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
@@ -196,28 +203,29 @@ class Worker(TorchNode):
         #
         #     # Pass along backwards pass to next node
         #     self.send_backward(next_node, dvalues)
+        if self.training:
+            # Complete any forward pass
+            for module_id, module in self.modules.items():
+                if module.forward_queues.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
+                    next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
+                    prev_forward = module.forward_queues.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
 
-        # Complete any forward pass
-        for module_id, module in self.modules.items():
-            if module.forward_relays.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
-                next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
-                prev_forward = module.forward_relays.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
+                    if isinstance(prev_forward, tuple):
+                        args, kwargs = prev_forward
+                    else:
+                        args = prev_forward
+                        kwargs = {}
 
-                if isinstance(prev_forward, tuple):
-                    args, kwargs = prev_forward
-                else:
-                    args = prev_forward
-                    kwargs = {}
+                    # Clear tensor of any previous info, set up for custom backward pass
+                    inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
+                    out = module(inp, **kwargs)
 
-                # Clear tensor of any previous info, set up for custom backward pass
-                inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
-                out = module(inp, **kwargs)
+                    # Store output and input tensor for backward pass
+                    module.intermediates.put([inp, handle_output(out)])
 
-                # Store output and input tensor for backward pass
-                module.intermediates.put([inp, handle_output(out)])
-
-                # Relay forward pass to the next node
-                self.send_forward(next_node, out)
+                    # Relay forward pass to the next node'
+                    self.send_forward(next_node["connection"], out, module_id)
+                    print("Done intermediate forward, sending back...")
 
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {

@@ -20,7 +20,6 @@ if __name__ == "__main__":
                      debug=True)
 
     worker1.master = True  # We must omit this
-    worker1.training = True
     worker2.training = True
     worker3.training = True
 
@@ -42,7 +41,7 @@ if __name__ == "__main__":
     time.sleep(3)
     nodes, graph = d_model.distribute_model()
 
-    # d_model.model(dummy_input)
+    d_model(dummy_input)
 
     with open("distributed_graph.json", "w") as f:
         json.dump(graph, f, indent=4)
