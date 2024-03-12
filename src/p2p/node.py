@@ -51,7 +51,7 @@ class Node(threading.Thread):
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind((self.host, self.port))
-        self.sock.settimeout(10.0)
+        self.sock.settimeout(5.0)
         self.sock.listen(1)
 
     def create_connection(self, connection: socket.socket, id: str, host: str, port: int) -> Connection:

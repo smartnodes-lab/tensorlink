@@ -29,7 +29,6 @@ class Worker(TorchNode):
         # Model training parameters
         self.training = False
         self.master = False
-        self.graph = {}
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
@@ -77,9 +76,15 @@ d            - ensure correct nodes sending data
 
             elif b"BACKWARD" == data[:8]:
                 self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.master or (self.training and self.modules):
-                    pickled = pickle.loads(data[8:])
-                    # self.backward_relays.put(pickled)
+
+                if self.master:
+                    tensor = pickle.loads(data[8:])
+                    self.modules["Master"].backward_queues.put(tensor)
+                elif self.training and self.modules:
+                    module_id, delim, rest = data[8:].partition(b"]")
+                    module_id += delim
+                    tensor = pickle.loads(rest)
+                    self.modules[module_id].backward_queues.put(tensor)
 
             elif b"REQUEST" == data[:7]:
                 self.debug_print(f"RECEIVED STATS REQUEST")
@@ -185,27 +190,28 @@ d            - ensure correct nodes sending data
         pass
 
     def train_loop(self):
-        # # Complete any outstanding back propagations
-        # if self.backward_relays.() is False:
-        #     next_node = list(self.nodes.values())[0]  # Placeholder for the connecting node
-        #
-        #     # Grab backwards pass from forward node and our associated input/output from forward pass
-        #     loss_relay = self.backward_relays.get()
-        #     assoc_input, assoc_output = self.intermediates.pop(-1)
-        #
-        #     # Continue backwards pass on our section of model
-        #     assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
-        #
-        #     # self.optimizer.zero_grad()
-        #     # self.optimizer.step()
-        #
-        #     dvalues = assoc_input.grad
-        #
-        #     # Pass along backwards pass to next node
-        #     self.send_backward(next_node, dvalues)
         if self.training:
-            # Complete any forward pass
+            # Complete outstanding forward and backward passes
             for module_id, module in self.modules.items():
+                # Complete any outstanding back propagations
+                if module.backward_queues.empty() is False:
+                    next_node = list(self.nodes.values())[0]  # Placeholder for the connecting node
+
+                    # Grab backwards pass from forward node and our associated input/output from forward pass
+                    loss_relay = module.backward_queues.get()
+                    assoc_input, assoc_output = self.modules[module_id].intermediates.get()
+
+                    # Continue backwards pass on our section of model
+                    assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
+
+                    # self.optimizer.zero_grad()
+                    # self.optimizer.step()
+
+                    dvalues = assoc_input.grad
+
+                    # Pass along backwards pass to next node
+                    self.send_backward(next_node["connection"], dvalues)
+
                 if module.forward_queues.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
                     next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
                     prev_forward = module.forward_queues.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
@@ -264,7 +270,7 @@ d            - ensure correct nodes sending data
     #     self.distribute_model(model)  # Add master vs worker functionality
 
     # When a worker receives REQUEST from another worker, it must respond with its current state
-    # def broa(self):
+    # def broadcast_statistics(self):
     #     worker_nodes = []
     #
     #     for i in range(5):  # range(len(self.connections)):

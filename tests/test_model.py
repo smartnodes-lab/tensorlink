@@ -3,11 +3,15 @@ import torch.nn as nn
 import torch
 
 
-model = BertModel.from_pretrained("bert-base-uncased")
+# model = BertModel.from_pretrained("bert-base-uncased")
 
-layer1 = nn.Linear(10, 100)
-layer2 = nn.Linear(100, 10)
-op1 = torch.optim.Adam(layer1.parameters())
+model = nn.Sequential(
+    nn.Linear(10, 100),
+    nn.Linear(100, 100),
+    nn.Linear(100, 10)
+)
+
+op1 = torch.optim.Adam(layer.parameters())
 op2 = torch.optim.Adam(layer2.parameters())
 
 input_vec = torch.zeros((1, 10)).clone().detach()

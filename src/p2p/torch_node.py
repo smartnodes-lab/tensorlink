@@ -51,7 +51,6 @@ class TorchNode(SmartNode):
 
     def send_statistics_request(self, worker_node):
         message = b"REQUEST"
-        print("request sent")
         self.send_to_node(worker_node, message)
 
     def broadcast_statistics(self, callee, additional_context: dict = None):

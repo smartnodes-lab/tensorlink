@@ -41,7 +41,7 @@ class DistributedModel(nn.Module):
         self.model = model
         self.model.forward_queues = queue.Queue()
         self.model.backward_queues = queue.Queue()
-        self.model.intermediates = queue.LifoQueue()  # Queue to hold intermediates, must be converted into dictionary
+        self.model.intermediates = [[]]  # Queue to hold intermediates, must be converted into dictionary
                                                       # of queues if we wish to perform multiple epochs concurrently
         self.master_node.modules["Master"] = self.model
         self.spawn_workers = []
@@ -50,53 +50,62 @@ class DistributedModel(nn.Module):
         if len(args) == 1:
             args = args[0]
 
-        self.model.intermediates.put(args)
         x = self.model(args)
         return x
 
     def backward(self, loss):
 
         # Get the oldest epoch intermediates from storage via dict key lookup (todo)
-        while self.model.intermediates.empty() is False:
-            vals = self.model.intermediates.get()
+        while len(self.model.intermediates) > 0:
+            vals = self.model.intermediates.pop(-1)
 
             if len(vals) == 3:  # Len == 3 means connection info is present TODO: better context creation
-                connection, assoc_input, assoc_output = vals
+                assoc_input, assoc_output, module_id = vals
                 assoc_output.backward(loss, retain_graph=True)
                 loss = assoc_input.grad
-                self.master_node.send_backward(connection, loss)
+                connection = self.master_node.distributed_graph[module_id]
+
+                self.master_node.send_backward(connection, loss, context=module_id)
 
                 if self.model.backward_relays.not_empty:
                     loss = self.model.backward_relays.get()
 
-            # Len vals 2 means backwards pass of last or first submodule
+            # Len vals 2 means backwards pass of last submodule
             elif len(vals) == 2:
                 val1, val2 = vals
 
-                # Pass of the first submodule / section
+                # Pass of the first submodule / section contains tensor in the first position
                 if isinstance(val1, torch.Tensor):
-                    assoc_input, assoc_output = vals
-                    assoc_output.backward(loss, retain_graph=True)
-                    time.sleep(0.5)
-                    print("BACKWARD DONE!")
+                    assoc_output, _ = vals
+                    loss = assoc_output.backward(loss, retain_graph=True)
                 # Pass of the last section
                 else:
-                    connection, assoc_input = vals
+                    module_id, assoc_input = vals
+                    connection = self.master_node.distributed_graph[module_id]
 
                     # If there are remaining computations between output and last submodule
+                    n_queued = self.model.backward_queues.qsize()
+                    start_time = time.time()
+
                     if loss.grad_fn is not None:
                         loss.backward()
-                        self.master_node.send_backward(connection, assoc_input.grad)
+                        self.master_node.send_backward(connection, assoc_input.grad, context=module_id)
                     else:
-                        self.master_node.send_backward(connection, loss)
+                        self.master_node.send_backward(connection, loss, context=module_id)
 
-                    time.sleep(0.5)
+                    while not self.model.backward_queues.qsize() <= n_queued:
+                        if time.time() - start_time >= MAX_WAIT_TIME:
+                            # Logic here to request another worker take his place
+                            pass
 
-                    if not self.master_node.backward_relays.empty():
-                        loss = self.master_node.backward_relays.get()
+                    loss = self.model.backward_queues.get()
 
+            elif len(vals) == 1:
+                assoc_input = vals[0]
+                if isinstance(assoc_input, torch.Tensor):
+                    assoc_input.backward(loss)
             else:
-                raise "Expect vals to be of length 1, 2 or 3."
+                raise "Expect vals to be of length 2 or 3."
 
     def distribute_model(self):
         # Retrieve model names and assign workers to offload. Contact candidate workers
@@ -256,10 +265,14 @@ class OffloadedModule(nn.Module):
             pass
 
     def forward(self, *args, **kwargs):
-        # Relay forward pass to next node
         start_time = time.time()
         n_queued = self.master_node.modules["Master"].forward_queues.qsize()  # forward_queues[self.module_id].qsize() TODO, indexing by module id
-        self.master_node.send_forward(self.worker_node, (args, kwargs), self.module_id)
+
+        # Store the intermediate tensor for backwards pass
+        self.master_node.modules["Master"].intermediates[-1].extend([handle_output(args), self.module_id])
+
+        # Relay forward pass to next node
+        self.master_node.send_forward(self.worker_node, (args, kwargs), context=self.module_id)
 
         while self.master_node.modules["Master"].forward_queues.qsize() <= n_queued:
             if time.time() - start_time >= MAX_WAIT_TIME:
@@ -269,8 +282,10 @@ class OffloadedModule(nn.Module):
         # Grab returned tensor
         output = self.master_node.modules["Master"].forward_queues.get()
 
+        inter_storage = [self.module_id, handle_output(output)]  # Store associated output
+
         # Store intermediates and connection for backwards pass
-        self.master_node.modules["Master"].intermediates.put([self.worker_node, handle_output(output)])
+        self.master_node.modules["Master"].intermediates.append(inter_storage)
 
         return output
 

@@ -51,7 +51,6 @@ class SmartNode(Node):
             verification of connecting user
         """
         connected_node_id = connection.recv(4096)
-        print(connected_node_id)
 
         # Generate random number to confirm with incoming node
         randn = str(random.random())
