@@ -3,6 +3,7 @@ from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
 
 import torch.nn as nn
+import torch.optim as optim
 import threading
 import pickle
 import queue
@@ -33,7 +34,7 @@ class Worker(TorchNode):
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
         self.modules = {}
-        self.optimizer = None
+        self.optimizers = {}
         self.loss = None
 
     def stream_data(self, data: bytes, node: Connection):
@@ -129,6 +130,7 @@ d            - ensure correct nodes sending data
 
                     # self.request_statistics()
                     self.modules[module.id] = module
+                    self.optimizers[module.id] = optim.Adam(module.parameters())
 
                     self.debug_print(f"Loaded distributed module!")
                     self.send_to_node(node, b"LOADED" + module.id)
@@ -211,6 +213,9 @@ d            - ensure correct nodes sending data
 
                     # Pass along backwards pass to next node
                     self.send_backward(next_node["connection"], dvalues)
+
+                    self.optimizers[module_id].zero_grad()
+                    self.optimizers[module_id].step()
 
                 if module.forward_queues.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
                     next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node

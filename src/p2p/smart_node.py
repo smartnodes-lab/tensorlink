@@ -90,13 +90,13 @@ class SmartNode(Node):
             else:
                 self.debug_print("node: connection refused, invalid ID proof!")
                 connection.close()
-            #
+
             #     else:
             #         self.debug_print("User not listed on contract.")
             #
             # except SubstrateRequestException as e:
             #     self.debug_print(f"Failed to verify user public key: {e}")
-            #
+
         else:
             self.debug_print("node: connection refused, invalid ID proof!")
             connection.close()
