@@ -54,8 +54,8 @@ class Node(threading.Thread):
         self.sock.settimeout(5.0)
         self.sock.listen(1)
 
-    def create_connection(self, connection: socket.socket, id: str, host: str, port: int) -> Connection:
-        return Connection(self, connection, id, host, port)
+    def create_connection(self, connection: socket.socket, id: str, host: str, port: int, parent_port: int = None) -> Connection:
+        return Connection(self, connection, id, host, port, parent_port)
 
     def send_to_nodes(self, data: bytes, exclude: List[Connection] = None,
                       compression: bool = False) -> None:
@@ -76,7 +76,7 @@ class Node(threading.Thread):
             return False
 
         for node in self.connections:
-            if node.host == host and node.port == port:
+            if node.host == host and node.port == port or node.parent_port == port:
                 self.debug_print(
                     f"connect_with_node: already connected with node: {node.id}")
                 return True
@@ -99,7 +99,8 @@ class Node(threading.Thread):
             verification = sock.recv(4096)
             latency = time.time() - start_time
             proof = decrypt(verification)
-            sock.send(proof)
+            proof, new_port = proof.split(b",")
+            sock.send(proof + b"," + f"{self.port}".encode())
 
             # # Check if id is a valid rsa public key
             # if authenticate_public_key(node_id) is False:
@@ -120,7 +121,7 @@ class Node(threading.Thread):
             #     return True
 
             # Form connection
-            thread_client = self.create_connection(sock, "test-ID", host, port)
+            thread_client = self.create_connection(sock, "test-ID", host, int(new_port), port)
             thread_client.start()
             thread_client.latency = latency
 

@@ -54,7 +54,8 @@ class SmartNode(Node):
 
         # Generate random number to confirm with incoming node
         randn = str(random.random())
-        message = randn
+        port = random.randint(5000, 65000)
+        message = f"{randn},{port}"
 
         # Authenticate incoming node's id is valid key
         if authenticate_public_key(connected_node_id) is True:
@@ -78,14 +79,24 @@ class SmartNode(Node):
             # Await response
             response = connection.recv(4096)
             latency = time.time() - start_time
+            response, parent_port = response.split(b",")
 
             if response.decode() == randn:
                 thread_client = self.create_connection(connection, connected_node_id,
-                                                       client_address[0], client_address[1])
+                                                       client_address[0], client_address[1], int(parent_port))
                 thread_client.start()
 
                 thread_client.latency = latency
-                self.connections.append(thread_client)
+
+                for node in self.connections:
+                    if node.host == client_address[0] and node.port == port or node.parent_port == port:
+                        self.debug_print(
+                            f"connect_with_node: already connected with node: {node.id}")
+                        thread_client.stop()
+                        break
+
+                if not thread_client.terminate_flag.is_set():
+                    self.connections.append(thread_client)
 
             else:
                 self.debug_print("node: connection refused, invalid ID proof!")

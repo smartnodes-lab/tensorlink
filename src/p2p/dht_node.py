@@ -20,7 +20,7 @@ class DHTNode(SmartNode):
 
         self.updater_flag = threading.Event()
 
-    def get_key(self, key):
+    def query_routing_table(self, key):
         """
         Get the node responsible for a given key.
         """
@@ -99,9 +99,30 @@ class DHTNode(SmartNode):
                 key = pickle.loads(data[6:])
                 self.delete(key)
 
-            elif b"REQUEST" == data[:7]:
+            elif b"REQUESTS" == data:
                 self.debug_print(f"RECEIVED STATS REQUEST")
-                self.broadcast_statistics(node)
+                self.handle_statistics_request(node)
+
+            elif b"REQUESTP" == data:
+                self.debug_print(f"RECEIVED PEER REQUEST")
+                self.handle_peer_request(node)
+
+            elif b"RESPONSES" == data[:9]:
+                self.debug_print(f"RECEIVED NODE STATS")
+
+                pickled = pickle.loads(data[9:])
+                node_id, stats = pickled
+                stats["connection"] = node
+                self.nodes[node_id] = stats
+
+            elif b"RESPONSEP" == data[:9]:
+                self.debug_print(f"RECEIVED PEERS")
+
+                pickled = pickle.loads(data[9:])
+                # node_id, peer_ids = pickled
+
+                for host, port in pickled:
+                    self.connect_with_node(host, port)
 
             # Add more data types and their handling logic as needed
 
@@ -125,7 +146,7 @@ class DHTNode(SmartNode):
         """
         Store a key-value pair in the DHT.
         """
-        node = self.get_key(key)
+        node = self.query_routing_table(key)
         self.routing_table[key] = value
         # Replicate the data to the next closest nodes
         for i in range(1, self.replication_factor):
@@ -158,7 +179,7 @@ class DHTNode(SmartNode):
         if key in self.routing_table:
             return self.routing_table[key]
         else:
-            node = self.get_key(key)
+            node = self.query_routing_table(key)
             return node.retrieve(key)
 
     def delete(self, key):
@@ -171,7 +192,7 @@ class DHTNode(SmartNode):
         else:
             self.debug_print(f"Key '{key}' not found in DHT.")
 
-    def broadcast_statistics(self, callee, additional_context: dict = None):
+    def handle_statistics_request(self, callee, additional_context: dict = None):
         # memory = self.available_memory
         memory = 1e9
 
@@ -186,20 +207,37 @@ class DHTNode(SmartNode):
         stats_bytes = b"RESPONSE" + stats_bytes
         self.send_to_node(callee, stats_bytes)
 
+    def handle_peer_request(self, requesting_node):
+        """
+        Handle requests from other nodes to provide a list of neighboring peers.
+        """
+        peers = [(node.host, node.parent_port) for node in self.connections]
+        message = b"RESPONSEP" + pickle.dumps(peers)
+        self.send_to_node(requesting_node, message)
+
     # Iterate connected nodes and request their current state
     def update_worker_stats(self):
         while not self.updater_flag.is_set():
 
             for node in self.connections:
                 # Beforehand, check the last time the worker has updated (self.prune_workers?)
-                self.send_statistics_request(node)
-                time.sleep(0.1)
+                # self.request_statistics(node)
+                self.request_peers()
+                time.sleep(1)
 
             # if self.nodes:
             #     self.updater_flag.set()
 
-            time.sleep(5)
+            time.sleep(10)
 
-    def send_statistics_request(self, worker_node):
-        message = b"REQUEST"
+    def request_statistics(self, worker_node):
+        message = b"REQUESTS"
         self.send_to_node(worker_node, message)
+
+    def request_peers(self):
+        """
+        Request neighboring nodes to send their peers.
+        """
+        for node in self.connections:
+            message = b"REQUESTP"
+            self.send_to_node(node, message)

@@ -16,11 +16,12 @@ class Connection(threading.Thread):
         Send message size before to prepare accordingly.
         Switch between saving bytes to loading directly based on packet size.
     """
-    def __init__(self, main_node, sock: socket.socket, id: str, host: str, port: int):
+    def __init__(self, main_node, sock: socket.socket, id: str, host: str, port: int, parent_port: int = None):
         super(Connection, self).__init__()
 
         self.host = host
         self.port = port
+        self.parent_port = parent_port
         self.main_node = main_node
         self.sock = sock
         self.terminate_flag = threading.Event()
