@@ -1,5 +1,5 @@
 from src.p2p.connection import Connection
-from src.p2p.smart_node import SmartNode
+from src.p2p.smart_node import SmartDHTNode
 from src.ml.model_analyzer import get_gpu_memory
 
 import torch.nn as nn
@@ -9,7 +9,7 @@ import pickle
 import time
 
 
-class TorchNode(SmartNode):
+class TorchNode(SmartDHTNode):
     def __init__(self, host: str, port: int, wallet_address: str, debug: bool = False, max_connections: int = 0,
                  callback=None):
         super(TorchNode, self).__init__(

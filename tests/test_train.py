@@ -131,7 +131,7 @@ if __name__ == "__main__":
     # worker3.start()
 
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
-    worker1.connect_with_node(ip, port + 1)
+    worker1.connect_dht_node(ip, port + 1)
     # worker1.connect_with_node(ip, port + 2)
 
     # Bert Dummy Run first

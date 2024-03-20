@@ -16,7 +16,7 @@ class Connection(threading.Thread):
         Send message size before to prepare accordingly.
         Switch between saving bytes to loading directly based on packet size.
     """
-    def __init__(self, main_node, sock: socket.socket, id: str, host: str, port: int, parent_port: int = None):
+    def __init__(self, main_node, sock: socket.socket, host: str, port: int, node_id: str, parent_port: int = None):
         super(Connection, self).__init__()
 
         self.host = host
@@ -26,7 +26,7 @@ class Connection(threading.Thread):
         self.sock = sock
         self.terminate_flag = threading.Event()
 
-        self.id = id
+        self.node_id = node_id
         self.sock.settimeout(60)
         self.latency = 0
         self.chunk_size = 131_072
