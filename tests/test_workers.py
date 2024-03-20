@@ -30,25 +30,24 @@ if __name__ == "__main__":
     # worker3.start()
 
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
-    worker1.connect_with_node(ip, port + 1)
-    # worker1.connect_with_node(ip, port + 2)
+    worker1.connect_dht_node(ip, port + 1)
+    # worker1.connect_dht_node(ip, port + 2)
 
-    dummy_input = torch.zeros((1, 160), dtype=torch.long)
+    dummy_input = torch.zeros((1, 1), dtype=torch.long)
     model = BertModel.from_pretrained("bert-base-uncased")
     # model = Wav2Vec2BertModel.from_pretrained("facebook/w2v-bert-2.0")
 
-    time.sleep(3)
+    time.sleep(10)
     d_model = DistributedModel(model, worker1)
-    time.sleep(3)
 
-    nodes, graph = d_model.distribute_model()
-
-    with open("distributed_graph.json", "w") as f:
-        json.dump(graph, f, indent=4)
+    # with open("distributed_graph.json", "w") as f:
+    #     json.dump(graph, f, indent=4)
 
     output = d_model(dummy_input)
     loss = output[0].sum()
     d_model.backward(loss)
+    d_model.optimizer.zero_grad()
+    d_model.optimizer.step()
 
     worker1.stop()
     worker2.stop()

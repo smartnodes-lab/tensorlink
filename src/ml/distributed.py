@@ -44,13 +44,24 @@ class DistributedModel(nn.Module):
         self.model.intermediates = [[]]  # Queue to hold intermediates, must be converted into dictionary
                                                       # of queues if we wish to perform multiple epochs concurrently
         self.master_node.modules["Master"] = self.model
+
+        nodes, graph = self.distribute_model()
         self.spawn_workers = []
 
     def forward(self, *args, **kwargs):
         if len(args) == 1:
             args = args[0]
 
-        x = self.model(args)
+        # Temporary fix for clearing non-training forward pass
+        self.model.forward_queues = queue.Queue()
+        self.model.backward_queues = queue.Queue()
+        self.model.intermediates = [[]]
+
+        x = self.model(args, **kwargs)
+
+        if self.training:
+            x.loss = x.loss.backward = self.backward
+
         return x
 
     def backward(self, loss):
@@ -179,8 +190,8 @@ class DistributedModel(nn.Module):
         worker_nodes = list(self.master_node.nodes.values())
         nodes, graph = recurse_model(self.model, worker_nodes)
 
-        for thread in self.spawn_workers:
-            thread.join()
+        # for thread in self.spawn_workers:
+        #     thread.join()
 
         return nodes, graph
 
@@ -200,6 +211,18 @@ class DistributedModel(nn.Module):
 
         offloaded_module = OffloadedModule(self.master_node, worker)
 
+        # Remove offloaded module from main model optimizer
+        child_params = set(child_module.parameters())  # Using set for efficient membership check
+        current_params = {name: param for name, param in self.named_parameters()}
+
+        # Remove the parameters of the child_module from the current parameters
+        for name, param in list(current_params.items()):
+            if param in child_params:
+                del self.state_dict()[name]
+
+        # Load the updated parameters into the model
+        # self.load_state_dict(current_params)
+
         if isinstance(parent_module, nn.ModuleList):
             parent_module[module_id[-1]] = offloaded_module
         else:
@@ -211,7 +234,7 @@ class DistributedModel(nn.Module):
 
         # spawn_worker = threading.Thread(target=offloaded_module.spawn_worker, args=(child_module, module_id))
         # spawn_worker.start()
-        # self.spawn_workers.append(spawn_worker)4
+        # self.spawn_workers.append(spawn_worker)
 
 
 class OffloadedModule(nn.Module):

@@ -3,10 +3,12 @@ from src.roles.worker import Worker
 from src.ml.distributed import DistributedModel
 import torch
 import json
+import copy
 import time
 from torch.utils.data import DataLoader, TensorDataset
 from transformers import BertForSequenceClassification, BertTokenizer, TrainingArguments, Trainer
 from datasets import Dataset
+
 
 def prepare_dummy_data(choice):
     texts = ["This is a positive sentence.", "This is a negative sentence."]
@@ -32,8 +34,7 @@ def prepare_dummy_data(choice):
         return tokenized_texts
 
 
-def simple_train(model):
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
+def simple_train(model, optimizer):
     loss_fn = torch.nn.CrossEntropyLoss()
 
     dataloader = prepare_dummy_data(1)
@@ -48,8 +49,24 @@ def simple_train(model):
         optimizer.step()
         print(loss.item())
 
-def hf_train(model):
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
+
+def d_simple_train(model, optimizer):
+    loss_fn = torch.nn.CrossEntropyLoss()
+
+    dataloader = prepare_dummy_data(1)
+
+    # simple training loop
+    for batch in dataloader:
+        optimizer.zero_grad()
+        input_ids, attention_mask, label = batch
+        outputs = model(input_ids, attention_mask=attention_mask, labels=label)
+        loss = outputs.loss
+        model.backward(loss)
+        optimizer.step()
+        print(loss.item())
+
+
+def hf_train(model, optimizer):
     optimizer.zero_grad()
     loss_fn = torch.nn.CrossEntropyLoss()
 
@@ -79,6 +96,7 @@ def hf_train(model):
 
     trainer.train()
 
+
 def fp_check(model):
     tokenized_texts = prepare_dummy_data(3)
     input_ids = tokenized_texts['input_ids'][0].unsqueeze(0)  # Add batch dimension
@@ -89,7 +107,6 @@ def fp_check(model):
         outputs = model(input_ids, attention_mask=attention_mask)
 
     print(outputs.logits)
-
 
 
 if __name__ == "__main__":
@@ -106,33 +123,32 @@ if __name__ == "__main__":
 
     worker1.master = True  # We must omit this
     worker2.training = True
-    worker3.training = True
+    # worker3.training = True
 
     # Open ports and begin the run loop
     worker1.start()
     worker2.start()
-    worker3.start()
+    # worker3.start()
 
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
-    worker1.connect_with_node(ip, port + 1)
-    worker1.connect_with_node(ip, port + 2)
+    worker1.connect_dht_node(ip, port + 1)
+    # worker1.connect_with_node(ip, port + 2)
 
     # Bert Dummy Run first
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
+    time.sleep(15)
+    d_model = DistributedModel(copy.deepcopy(model), worker1)
+    d_optimizer = torch.optim.Adam(d_model.parameters(), lr=1e-5)
+
     fp_check(model)
-    simple_train(model)
-    hf_train(model)
+    simple_train(model, optimizer)
+    # hf_train(model, optimizer)
 
     # Distributed Model Bert Run
-    time.sleep(3)
-    d_model = DistributedModel(model, worker1)
-    time.sleep(3)
-    nodes, graph = d_model.distribute_model()
-
     fp_check(d_model)
-    simple_train(d_model)
-    hf_train(d_model)
-
+    simple_train(d_model, d_optimizer)
+    # hf_train(d_model, d_optimizer)
 
     # with open("distributed_graph.json", "w") as f:
     #     json.dump(graph, f, indent=4)
