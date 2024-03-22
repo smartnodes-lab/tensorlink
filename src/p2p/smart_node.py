@@ -30,24 +30,24 @@ def calculate_xor(key_hash, node_id):
     """
     Calculate the XOR distance between a key and a node ID.
     """
-    return key_hash ^ node_id
+    return key_hash ^ int(node_id, 16)
 
 
 class Bucket:
-    def __init__(self, max_nodes):
-        self.nodes = []
-        self.max_nodes = max_nodes
+    def __init__(self, max_values):
+        self.values = []
+        self.max_values = max_values
 
     def is_full(self):
-        return len(self.nodes) >= self.max_nodes
+        return len(self.values) >= self.max_values
 
-    def add_node(self, node):
+    def add_node(self, value):
         if not self.is_full():
-            self.nodes.append(node)
+            self.values.append(value)
 
-    def remove_node(self, node):
-        if node in self.nodes:
-            self.nodes.remove(node)
+    def remove_node(self, value):
+        if value in self.values:
+            self.values.remove(value)
 
 
 class SmartDHTNode(Node):
@@ -88,6 +88,71 @@ class SmartDHTNode(Node):
         # self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
         self.key_hash = hashlib.sha256(bytes(random.randint(0, 10000))).hexdigest()
         self.updater_flag = threading.Event()
+
+    def stream_data(self, data: bytes, node):
+        """
+        Handle incoming data streams from connected nodes and process requests.
+        """
+        try:
+
+            # The case where we load via downloaded pickle file (potential security threat)
+            if b"DONE STREAM" == data[:11]:
+                file_name = f"streamed_data_{node.host}_{node.port}"
+
+                with open(file_name, "rb") as f:
+                    streamed_bytes = f.read()
+
+                self.stream_data(streamed_bytes, node)
+
+                os.remove(file_name)
+
+            elif b"STORE" == data[:5]:
+                # Store the key-value pair in the DHT
+                key, value = pickle.loads(data[5:])
+                self.store_key_value_pair(key, value)
+
+            elif b"RETRIEVE" == data[:8]:
+                # Retrieve the value associated with the key from the DHT
+                key = pickle.loads(data[8:])
+                value = self.retrieve(key)
+                # Send the value back to the requesting node
+                self.send_to_node(node, pickle.dumps(value))
+
+            elif b"DELETE" == data[:6]:
+                # Delete the key-value pair from the DHT
+                key = pickle.loads(data[6:])
+                self.delete(key)
+
+            elif b"REQUESTS" == data:
+                self.debug_print(f"RECEIVED STATS REQUEST")
+                self.handle_statistics_request(node)
+
+            elif b"REQUESTP" == data:
+                self.debug_print(f"RECEIVED PEER REQUEST")
+                self.handle_peer_request(node)
+
+            elif b"RESPONSES" == data[:9]:
+                self.debug_print(f"RECEIVED NODE STATS")
+
+                pickled = pickle.loads(data[9:])
+                node_id, stats = pickled
+                stats["connection"] = node
+                self.nodes[node_id] = stats
+
+            elif b"RESPONSEP" == data[:9]:
+                self.debug_print(f"RECEIVED PEERS")
+
+                pickled = pickle.loads(data[9:])
+                # node_id, peer_ids = pickled
+
+                for host, port in pickled:
+                    if self.connect_with_node(host, port, our_node_id=self.key_hash):
+                        new_peer = next((node for node in self.connections if node.host == host and node.port == port), None)
+
+            # Add more data types and their handling logic as needed
+
+        except Exception as e:
+            self.debug_print(f"Error handling stream data: {e}")
 
     def handshake(self, connection, client_address):
         """
@@ -210,70 +275,13 @@ class SmartDHTNode(Node):
         self.sock.close()
         print("Node stopped")
 
-    def stream_data(self, data: bytes, node):
+    def bootstrap(self, seeds=None):
         """
-        Handle incoming data streams from connected nodes and process requests.
+        Connect to initial set of validator nodes on the network. Select random set
+         of validators or workers from the smart contract if seeds=None.
         """
-        try:
-
-            # The case where we load via downloaded pickle file (potential security threat)
-            if b"DONE STREAM" == data[:11]:
-                file_name = f"streamed_data_{node.host}_{node.port}"
-
-                with open(file_name, "rb") as f:
-                    streamed_bytes = f.read()
-
-                self.stream_data(streamed_bytes, node)
-
-                os.remove(file_name)
-
-            elif b"STORE" == data[:5]:
-                # Store the key-value pair in the DHT
-                key, value = pickle.loads(data[5:])
-                self.store_key_value_pair(key, value)
-
-            elif b"RETRIEVE" == data[:8]:
-                # Retrieve the value associated with the key from the DHT
-                key = pickle.loads(data[8:])
-                value = self.retrieve(key)
-                # Send the value back to the requesting node
-                self.send_to_node(node, pickle.dumps(value))
-
-            elif b"DELETE" == data[:6]:
-                # Delete the key-value pair from the DHT
-                key = pickle.loads(data[6:])
-                self.delete(key)
-
-            elif b"REQUESTS" == data:
-                self.debug_print(f"RECEIVED STATS REQUEST")
-                self.handle_statistics_request(node)
-
-            elif b"REQUESTP" == data:
-                self.debug_print(f"RECEIVED PEER REQUEST")
-                self.handle_peer_request(node)
-
-            elif b"RESPONSES" == data[:9]:
-                self.debug_print(f"RECEIVED NODE STATS")
-
-                pickled = pickle.loads(data[9:])
-                node_id, stats = pickled
-                stats["connection"] = node
-                self.nodes[node_id] = stats
-
-            elif b"RESPONSEP" == data[:9]:
-                self.debug_print(f"RECEIVED PEERS")
-
-                pickled = pickle.loads(data[9:])
-                # node_id, peer_ids = pickled
-
-                for host, port in pickled:
-                    if self.connect_with_node(host, port, our_node_id=self.key_hash):
-                        new_peer = next((node for node in self.connections if node.host == host and node.port == port), None)
-
-            # Add more data types and their handling logic as needed
-
-        except Exception as e:
-            self.debug_print(f"Error handling stream data: {e}")
+        if seeds is None:
+            self.c
 
     # def get_jobs(self):
     #     # Confirm job details with smart contract, receive initial details from a node?
@@ -310,11 +318,10 @@ class SmartDHTNode(Node):
         bucket_index = hash_integer % len(self.buckets)
         return bucket_index
 
-    def query_routing_table(self, key):
+    def query_routing_table(self, key_hash):
         """
         Get the node responsible for, or closest to a given key.
         """
-        key_hash = hash_key(key)
         closest_node = None
         closest_distance = float("inf")
         for node in self.connections:
@@ -346,11 +353,14 @@ class SmartDHTNode(Node):
         bucket = self.buckets[bucket_index]
 
         if not bucket.is_full():
-            bucket.add_node(value)
             self.routing_table[key] = value
+            bucket.add_node(self.routing_table[key])
         else:
             # Pass along to another node (x replication factor)
-            pass
+            target_node = self.query_routing_table(hash_key(key))
+
+            for _ in range(self.replication_factor):
+                pass
 
         # # Replicate the data to the next closest nodes
         # for i in range(self.replication_factor):
@@ -359,7 +369,7 @@ class SmartDHTNode(Node):
         #         next_node.store(key, value)
 
     def forward_to_other_node(self, key, value):
-        target_node = self.query_routing_table(key)
+        target_node = self.query_routing_table(hash_key(key))
         pickled = pickle.dumps((key, value))
         self.send_to_node(target_node, b"STORE" + pickled)
 

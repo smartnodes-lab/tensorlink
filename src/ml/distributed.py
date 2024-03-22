@@ -60,7 +60,7 @@ class DistributedModel(nn.Module):
         x = self.model(args, **kwargs)
 
         if self.training:
-            x.loss = x.loss.backward = self.backward
+            x.loss.backward = self.backward
 
         return x
 

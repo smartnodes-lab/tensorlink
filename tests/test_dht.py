@@ -7,8 +7,8 @@ if __name__ == "__main__":
     port = 5026
 
     # Spawn 3 workers on their own ports + threads
-    worker1 = SmartDHTNode(host=ip, port=port, debug=True, public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh")
-    worker2 = SmartDHTNode(host=ip, port=port + 1, debug=True, public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh")
+    worker1 = SmartDHTNode(host=ip, port=port, debug=False, public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh")
+    worker2 = SmartDHTNode(host=ip, port=port + 1, debug=False, public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh")
     worker3 = SmartDHTNode(host=ip, port=port + 2, debug=False, public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh")
 
     worker1.start()
