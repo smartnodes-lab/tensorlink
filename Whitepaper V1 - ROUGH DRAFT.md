@@ -1,10 +1,10 @@
-#Introduction
+# Introduction
 
 The prevalence of large language models across various sectors has fueled an unprecedented demand for computational power. However, current methods of model deployment, such as cloud hosting or supercomputer rentals, prove prohibitively expensive and raise concerns regarding data privacy. Furthermore, the proliferation of larger model architectures, exemplified by modern models like GPT-4 with billions of parameters, compounds accessibility issues. The sheer scale of these models demands substantial memory and computational resources for training, rendering them out of reach for many due to cost constraints. TensorLink seeks to address these issues by offering an affordable and decentralized solution accessible to researchers and users alike. 
 
 
 
-##Decentralized Solution for Neural Network Scaling
+## Decentralized Solution for Neural Network Scaling
 
 TensorLink introduces a decentralized system designed to scale neural network training and inference efficiently and with the option of data obfuscation. Leveraging a network of peers, our system collectively hosts larger models, employing advanced data and model parallelism techniques to optimize training processes. By incentivizing individuals to contribute their idle compute power, we aim to build a distributed network capable of rivaling supercomputers. This approach not only democratizes access to computational resources but also offers a promising alternative to cryptocurrency mining. 
 
@@ -16,7 +16,7 @@ Additionally, TensorLink will provide specialized workflows tailored for privacy
 
 
 
-#P2P Architecture
+# P2P Architecture
 
 Validators serve as the backbone of TensorLink’s peer-to-peer architecture, maintaining a custom distributed hash table for node connectivity, job storage, and querying. Validators help bootstrap Trainers and Worker nodes, manage active jobs by storing key training info and conducting proof of learning (PoL) checks on Workers. At the end of a job, validators aggregate information and perform multisig updates to a smart contract, adjusting worker reputation metrics, storing job proofs, and rewarding workers and validators with a native token distribution. Workers, specialized validator nodes, standby to accept distributed models or submodules from current training or inference jobs, are able to communicate with overseeing validators, and conduct inter-worker proof of learning/proof of model 
 
@@ -24,30 +24,30 @@ Trainers initiate job requests by bootstrapping to the network, distributing the
 
 
 
-#Distributed Models
+# Distributed Models
 
 ##Pipeline Parallelism:
 Pipeline parallelism is a technique used in distributed computing to overcome latency issues in neural network training. In this approach, instead of waiting for the entire batch of data to complete forward and backward passes through the model before proceeding to the next batch, the process is divided into multiple stages or "pipelines." Each pipeline handles a different stage of computation, such as forward propagation, backward propagation, and weight updates. By overlapping these stages and processing multiple batches simultaneously, pipeline parallelism effectively reduces the overall training time.
 
-##Interleaving Mini-batches & Jobs:
+## Interleaving Mini-batches & Jobs:
 To further optimize the training process and mitigate latency, TensorLink employs interleaving of multiple forward mini-batches in a model parallel fashion. This involves breaking down the data into smaller mini-batches and interleaving them across multiple pipelines. By distributing these mini-batches across different pipelines and processing them concurrently, we maximize hardware utilization and minimize idle time, thereby accelerating the training process.
 
-##Unique Model Parsing and Distribution:
+## Unique Model Parsing and Distribution:
 What sets TensorLink apart is our unique approach to model parsing and distribution. Trainers have the flexibility to maintain their custom model structures while ensuring data privacy through obfuscation of offloaded models and input data. By assigning specific submodules to workers, only a fraction of the entire model is distributed, and input data remains hidden from previous computations. This decentralized approach allows heavy computations to be offloaded while retaining control over sensitive information, as the original model resides securely on the Trainer's computer.
 
-##Privacy Options:
+## Privacy Options:
 For users concerned about data privacy, TensorLink offers the option to obfuscate model and input data during distribution. Alternatively, if privacy is not a concern, users can provide the entire model and data to a validator. Validators oversee the entire training process, simplifying the workflow for users who prioritize efficiency over privacy concerns.
 
 
 
-#Proof of Learning
+# Proof of Learning
 
 In the TensorLink ecosystem, the concept of Proof of Learning (PoL) plays a pivotal role in ensuring the integrity and reliability of distributed learning systems. Worker nodes are integral to this process, storing essential data related to model updates, input-output tensors, and gradients. Validator nodes, on the other hand, periodically request this data throughout the training process to verify the validity of various components, thereby enhancing transparency and accountability. 
 
 Inexpensive checks between workers operating on the same subsection of the model are conducted efficiently, as modules are already loaded, allowing for quick verification of proof of model, input/output, gradient updates, and other parameters. Collateralized validators play a crucial role in performing more thorough and resource-intensive checks on individual workers or potentially the entire pipeline, ensuring robustness and reliability in the learning process.
 
 
-##Key Components of Proof of Learning:
+## Key Components of Proof of Learning:
 
 Gradients Validation: Validator nodes meticulously compare the gradients stored by each worker node, ensuring consistency and correctness. Discrepancies in gradients may signal errors in the backpropagation process or differences in local datasets, prompting further investigation and correction.
 
@@ -55,7 +55,7 @@ Forward Pass Validation: Validator nodes rigorously compare the output tensors g
 
 Cross-Validation: Validator nodes leverage the data from one worker node as input to another worker node to independently validate the predictions made by each node. This cross-validation process helps identify any discrepancies or errors in the training process across different nodes, ensuring consistency and accuracy.
 
-#Tokenomics
+# Tokenomics
 
 TensorLink's token ecosystem, powered by SmartNodes token (SNO), serves as the cornerstone of incentivizing and sustaining network participation while fostering the growth and development of the decentralized learning ecosystem.
 
