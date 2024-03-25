@@ -71,7 +71,7 @@ def hf_train(model, optimizer):
     loss_fn = torch.nn.CrossEntropyLoss()
 
     training_args = TrainingArguments(
-        output_dir='./results',          
+        output_dir='../../../Desktop/Projects/tensorlink-lab/tensorlink/tests/results',
         num_train_epochs=1,
         per_device_train_batch_size=1,
         logging_steps=1,

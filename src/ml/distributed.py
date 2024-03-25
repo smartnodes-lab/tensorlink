@@ -5,16 +5,13 @@ from src.p2p.connection import Connection
 import torch.nn as nn
 import torch.optim as optim
 import threading
-import inspect
-import pickle
 import torch
 import queue
 import time
-import ast
 import os
 
-
 MAX_WAIT_TIME = 3
+THREAD_STORAGE = threading.local()
 
 
 class Trainer:
@@ -34,15 +31,25 @@ class DistributedModel(nn.Module):
         Is able to host offloaded submodules along with local operations. Can be spawned
         by a Worker or a User. Host is referred to as the 'master' node.
     """
-    def __init__(self, model: nn.Module, master_node: Worker):
+
+    def __init__(self, model: nn.Module, master_node: Worker, batch_size: int, micro_batch_size: int):
         super(DistributedModel, self).__init__()
 
         self.master_node = master_node
         self.model = model
-        self.model.forward_queues = queue.Queue()
-        self.model.backward_queues = queue.Queue()
+
+        assert batch_size % micro_batch_size == 0, "Micro-batch must be divisible by batch."
+
+        self.batch_size = batch_size
+        self.micro_batch_size = micro_batch_size
+
+        self.model.n_batch = 0
+        self.model.n_micro_batch = 0
+
+        self.model.forward_queues = {}
+        self.model.backward_queues = {}
         self.model.intermediates = [[]]  # Queue to hold intermediates, must be converted into dictionary
-                                                      # of queues if we wish to perform multiple epochs concurrently
+        # of queues if we wish to perform multiple epochs concurrently
         self.master_node.modules["Master"] = self.model
 
         nodes, graph = self.distribute_model()
@@ -53,18 +60,46 @@ class DistributedModel(nn.Module):
             args = args[0]
 
         # Temporary fix for clearing non-training forward pass
-        self.model.forward_queues = queue.Queue()
-        self.model.backward_queues = queue.Queue()
-        self.model.intermediates = [[]]
+        n_micro_batches = self.batch_size // self.micro_batch_size
 
-        x = self.model(args, **kwargs)
+        self.model.forward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
+        self.model.backward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
+        self.model.outputs = {}
+        self.model.intermediates = {m: [[]] for m in range(n_micro_batches)}
 
-        if self.training:
-            x.loss.backward = self.backward
+        # Spawn separate threads for each micro batch for pipeline parallelism
+        threads = []
+        for micro in range(n_micro_batches):
+            t = threading.Thread(target=self.perform_micro_forward, args=(micro, args, *kwargs))
+            t.start()
+            threads.append(t)
+            time.sleep(0.1)
 
-        return x
+        for t in threads:
+            t.join()
+
+        return self.model.outputs.values()
+
+        # if self.training:
+        #     x.loss.backward = self.backward
+        #
+        # return x
 
     def backward(self, loss):
+        n_micro_batches = self.batch_size // self.micro_batch_size
+
+        threads = []
+        for micro in range(n_micro_batches):
+            t = threading.Thread(target=self.perform_micro_backward, args=(micro, loss))
+            t.start()
+            threads.append(t)
+            time.sleep(0.1)
+
+        for t in threads:
+            t.join()
+
+    def perform_micro_backward(self, micro, loss):
+        THREAD_STORAGE.micro = micro
 
         # Get the oldest epoch intermediates from storage via dict key lookup (todo)
         while len(self.model.intermediates) > 0:
@@ -118,6 +153,11 @@ class DistributedModel(nn.Module):
             else:
                 raise "Expect vals to be of length 2 or 3."
 
+    def perform_micro_forward(self, micro, args, **kwargs):
+        THREAD_STORAGE.micro = micro
+        x = self.model(args, **kwargs)
+        self.model.outputs[micro] = x
+
     def distribute_model(self):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
@@ -160,7 +200,7 @@ class DistributedModel(nn.Module):
                     # if layer_memory < self.master_node.available_memory:
                     #     self.master_node.available_memory -= layer_memory
                     # elif layer_memory < nodes[candidate_node]["memory"]:
-                        # self.wrap_module(sub_mod_id, nodes[candidate_node]["connection"])
+                    # self.wrap_module(sub_mod_id, nodes[candidate_node]["connection"])
 
                     nodes, subgraph = recurse_model(layer, nodes, candidate_node, sub_mod_id)
                     graph.append(subgraph)
@@ -243,6 +283,7 @@ class OffloadedModule(nn.Module):
         A module wrapper that handles offloading on the master node without disrupting normal
         pytorch model flow.
     """
+
     def __init__(self, master_node: Worker, worker_node: Connection):
         super(OffloadedModule, self).__init__()
 
@@ -289,26 +330,31 @@ class OffloadedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         start_time = time.time()
-        n_queued = self.master_node.modules["Master"].forward_queues.qsize()  # forward_queues[self.module_id].qsize() TODO, indexing by module id
+        n_iter = self.master_node.modules["Master"].n_batch
+        n_micro = getattr(THREAD_STORAGE, 'micro', None)
+        n_queued = self.master_node.modules["Master"].forward_queues[n_micro].qsize()
+
+        tag = [n_iter, n_micro, self.module_id]
 
         # Store the intermediate tensor for backwards pass
-        self.master_node.modules["Master"].intermediates[-1].extend([handle_output(args), self.module_id])
+        self.master_node.modules["Master"].intermediates[n_micro][-1].extend([handle_output(args), self.module_id])
 
         # Relay forward pass to next node
-        self.master_node.send_forward(self.worker_node, (args, kwargs), context=self.module_id)
+        self.master_node.send_forward(self.worker_node, (args, kwargs), context=tag)
 
-        while self.master_node.modules["Master"].forward_queues.qsize() <= n_queued:
+        # Wait for response, change to appending waiting thread to list in master
+        while self.master_node.modules["Master"].forward_queues[n_micro].qsize() <= n_queued:
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
                 pass
 
         # Grab returned tensor
-        output = self.master_node.modules["Master"].forward_queues.get()
+        _, output = self.master_node.modules["Master"].forward_queues[n_micro].get()
 
         inter_storage = [self.module_id, handle_output(output)]  # Store associated output
 
         # Store intermediates and connection for backwards pass
-        self.master_node.modules["Master"].intermediates.append(inter_storage)
+        self.master_node.modules["Master"].intermediates[n_micro].append(inter_storage)
 
         return output
 
@@ -320,7 +366,6 @@ class OffloadedModule(nn.Module):
     # async def async_send_backward(self, node: Connection, args, context: bytes = b""):
     #     pickled_data = b"BACKWARD" + context + pickle.dumps(args)
     #     self.send_to_node(node, pickled_data)
-
 
 # class DistributedSubModule(nn.Module):
 #     """
