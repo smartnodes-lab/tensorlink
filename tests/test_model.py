@@ -1,40 +1,57 @@
-from transformers import BertModel
-import torch.nn as nn
+from src.cryptography.rsa import get_rsa_pub_key
+from src.roles.worker import Worker
+from src.ml.model_analyzer import estimate_memory
+from src.ml.distributed import DistributedModel
+from transformers import Wav2Vec2BertModel, BertModel
+import torch.optim as optim
 import torch
+import json
+import time
 
 
-# model = BertModel.from_pretrained("bert-base-uncased")
+ip = "127.0.0.1"
+port = 5026
 
-model = nn.Sequential(
-    nn.Linear(10, 100),
-    nn.Linear(100, 100),
-    nn.Linear(100, 10)
-)
+mini_batch_size = 4
+micro_batch_size = 2
 
-op1 = torch.optim.Adam(layer.parameters())
-op2 = torch.optim.Adam(layer2.parameters())
 
-input_vec = torch.zeros((1, 10)).clone().detach()
+if __name__ == "__main__":
+    # Spawn 3 workers on their own ports + threads
+    worker1 = Worker(host=ip, port=port, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+                     debug=True)
+    worker2 = Worker(host=ip, port=port + 1, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+                     debug=False)
+    # worker3 = Worker(host=ip, port=port + 2, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+    #                  debug=True)
 
-output1 = layer1(input_vec)
-output1.retain_grad()
+    worker1.master = True  # We must omit this
+    worker2.training = True
+    # worker3.training = True
 
-intermediate1 = output1.clone().detach().requires_grad_()
+    # Open ports and begin the run loop
+    worker1.start()
+    worker2.start()
+    # worker3.start()
 
-output2 = layer2(intermediate1)
-output2.retain_grad()
+    # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
+    worker1.connect_dht_node(ip, port + 1)
+    # worker1.connect_dht_node(ip, port + 2)
 
-pre_updated = layer2.weight
+    dummy_input = torch.zeros((4, 16), dtype=torch.long)
+    model = BertModel.from_pretrained("bert-base-uncased")
+    # model = Wav2Vec2BertModel.from_pretrained("facebook/w2v-bert-2.0")
 
-loss2 = output2.sum()
-loss2.backward()
-op2.step()
-op2.zero_grad()
+    time.sleep(5)
 
-post_updated = layer2.weight
+    d_model = DistributedModel(model, worker1, mini_batch_size, micro_batch_size)
+    d_optimizer = optim.Adam(d_model.parameters(), lr=1e-5)
+    output = d_model(dummy_input)
 
-print(torch.allclose(pre_updated, pre_updated))
+    losses = [output[o][0].sum() for o in range(mini_batch_size//micro_batch_size)]
+    d_model.backward(losses)
+    d_optimizer.zero_grad()
+    d_optimizer.step()
 
-output1.backward(intermediate1.grad)
-op1.zero_grad()
-op1.step()
+    worker1.stop()
+    worker2.stop()

@@ -62,30 +62,23 @@ d            - ensure correct nodes sending data
             elif b"FORWARD" == data[:7]:
                 self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
                 if self.master:
-                    _, _, rest = data[7:].partition(b"]")
-                    pickled = pickle.loads(rest)
-                    self.modules["Master"].forward_queues.put(pickled)
-
-                    # pickled = pickle.loads(data[7:])
-                    # self.modules["Master"].forward_queues.put(pickled)
+                    [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
+                    self.modules["Master"].forward_queues[n_micro].put(([n_iter, n_micro, module_id], tensor))
 
                 elif self.training and len(self.modules) > 0:
-                    id, delim, rest = data[7:].partition(b"]")
-                    id += delim
-                    pickled = pickle.loads(rest)
-                    self.modules[id].forward_queues.put(pickled)
+                    (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
+                    self.modules[module_id].forward_queues.put(([n_iter, n_micro], tensor))
 
             elif b"BACKWARD" == data[:8]:
                 self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
 
                 if self.master:
-                    tensor = pickle.loads(data[8:])
-                    self.modules["Master"].backward_queues.put(tensor)
+                    [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
+                    self.modules["Master"].backward_queues[n_micro].put(([n_iter, n_micro, module_id], tensor))
+
                 elif self.training and self.modules:
-                    module_id, delim, rest = data[8:].partition(b"]")
-                    module_id += delim
-                    tensor = pickle.loads(rest)
-                    self.modules[module_id].backward_queues.put(tensor)
+                    (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
+                    self.modules[module_id].backward_queues.put(([n_iter, n_micro], tensor))
 
             elif b"REQUEST" == data[:7]:
                 self.debug_print(f"RECEIVED STATS REQUEST")
@@ -120,13 +113,15 @@ d            - ensure correct nodes sending data
 
             elif b"MODULE" == data[:6]:
                 self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                # Must confirm the model with a job on SC
                 if self.training:
                     # Load in model
                     module = pickle.loads(data[6:])
 
                     module.forward_queues = queue.Queue()
                     module.backward_queues = queue.Queue()
-                    module.intermediates = queue.LifoQueue()
+                    module.intermediates = {}
+                    # module.intermediates = queue.LifoQueue()
 
                     # self.request_statistics()
                     self.modules[module.id] = module
@@ -200,43 +195,45 @@ d            - ensure correct nodes sending data
                     next_node = list(self.nodes.values())[0]  # Placeholder for the connecting node
 
                     # Grab backwards pass from forward node and our associated input/output from forward pass
-                    loss_relay = module.backward_queues.get()
-                    assoc_input, assoc_output = self.modules[module_id].intermediates.get()
+                    tag, loss_relay = module.backward_queues.get()
+                    inter_tag = tuple(tag)
+                    assoc_input, assoc_output = module.intermediates[inter_tag]
 
                     # Continue backwards pass on our section of model
                     assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
-
-                    # self.optimizer.zero_grad()
-                    # self.optimizer.step()
-
                     dvalues = assoc_input.grad
 
-                    # Pass along backwards pass to next node
-                    self.send_backward(next_node["connection"], dvalues)
+                    tag.append(module_id)
 
+                    # Pass along backwards pass to next node
+                    self.send_backward(next_node["connection"], dvalues, tag)
                     self.optimizers[module_id].zero_grad()
                     self.optimizers[module_id].step()
 
-                if module.forward_queues.empty() is False:  # Convert this to checking only the keys of modules of active jobs not just checking them all (unless all of them must be active to be in the dict...)
+                if module.forward_queues.empty() is False:
                     next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
-                    prev_forward = module.forward_queues.get()  # Grab queued forward pass unpack values (eg. mask, stride...)
 
-                    if isinstance(prev_forward, tuple):
-                        args, kwargs = prev_forward
+                    tag, tensor = module.forward_queues.get()
+
+                    # Unpack queued forward pass unpack values (eg. mask, stride...)
+                    if isinstance(tensor, tuple):
+                        args, kwargs = tensor
                     else:
-                        args = prev_forward
+                        args = tensor
                         kwargs = {}
 
                     # Clear tensor of any previous info, set up for custom backward pass
                     inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
                     out = module(inp, **kwargs)
 
-                    # Store output and input tensor for backward pass
-                    module.intermediates.put([inp, handle_output(out)])
+                    inter_tag = tuple(tag)
+                    tag.append(module_id)
 
-                    # Relay forward pass to the next node'
-                    self.send_forward(next_node["connection"], out, module_id)
-                    print("Done intermediate forward, sending back...")
+                    # Store output and input tensor for backward pass
+                    module.intermediates[inter_tag] = [inp, handle_output(out)]
+
+                    # Relay forward pass to the next node
+                    self.send_forward(next_node["connection"], out, tag)
 
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {

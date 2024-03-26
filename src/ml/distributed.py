@@ -1,7 +1,10 @@
+
 from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory, access_module
 from src.roles.worker import Worker
 from src.p2p.connection import Connection
 
+from torch.nn import Parameter
+from typing import Iterator
 import torch.nn as nn
 import torch.optim as optim
 import threading
@@ -44,7 +47,6 @@ class DistributedModel(nn.Module):
         self.micro_batch_size = micro_batch_size
 
         self.model.n_batch = 0
-        self.model.n_micro_batch = 0
 
         self.model.forward_queues = {}
         self.model.backward_queues = {}
@@ -59,9 +61,12 @@ class DistributedModel(nn.Module):
         if len(args) == 1:
             args = args[0]
 
-        # Temporary fix for clearing non-training forward pass
         n_micro_batches = self.batch_size // self.micro_batch_size
 
+        # Split the input tensor into micro-batches
+        micro_batches = torch.chunk(args, n_micro_batches)
+
+        # Create queues for forward and backward passes
         self.model.forward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
         self.model.backward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
         self.model.outputs = {}
@@ -69,16 +74,16 @@ class DistributedModel(nn.Module):
 
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
-        for micro in range(n_micro_batches):
-            t = threading.Thread(target=self.perform_micro_forward, args=(micro, args, *kwargs))
+        for micro, batch in enumerate(micro_batches):
+            t = threading.Thread(target=self.perform_micro_forward, args=(micro, batch, *kwargs))
             t.start()
             threads.append(t)
-            time.sleep(0.1)
+            time.sleep(0.5)
 
         for t in threads:
             t.join()
 
-        return self.model.outputs.values()
+        return self.model.outputs
 
         # if self.training:
         #     x.loss.backward = self.backward
@@ -90,28 +95,34 @@ class DistributedModel(nn.Module):
 
         threads = []
         for micro in range(n_micro_batches):
-            t = threading.Thread(target=self.perform_micro_backward, args=(micro, loss))
+            t = threading.Thread(target=self.perform_micro_backward, args=(micro, loss[micro]))
             t.start()
             threads.append(t)
-            time.sleep(0.1)
+            time.sleep(0.5)
 
         for t in threads:
             t.join()
+
+    # def parameters(self, recurse: bool = True):
+    #     super().parameters()
+    #     self.master_node.send_to_node("REQ")
 
     def perform_micro_backward(self, micro, loss):
         THREAD_STORAGE.micro = micro
 
         # Get the oldest epoch intermediates from storage via dict key lookup (todo)
-        while len(self.model.intermediates) > 0:
-            vals = self.model.intermediates.pop(-1)
+        while len(self.model.intermediates[micro]) > 0:
+            vals = self.model.intermediates[micro].pop(-1)
 
             if len(vals) == 3:  # Len == 3 means connection info is present TODO: better context creation
                 assoc_input, assoc_output, module_id = vals
+                tag = [self.model.n_batch, micro, module_id]
+
                 assoc_output.backward(loss, retain_graph=True)
                 loss = assoc_input.grad
                 connection = self.master_node.distributed_graph[module_id]
 
-                self.master_node.send_backward(connection, loss, context=module_id)
+                self.master_node.send_backward(connection, loss, context=tag)
 
                 if self.model.backward_relays.not_empty:
                     loss = self.model.backward_relays.get()
@@ -127,24 +138,26 @@ class DistributedModel(nn.Module):
                 # Pass of the last section
                 else:
                     module_id, assoc_input = vals
+                    tag = [self.model.n_batch, micro, module_id]
+
                     connection = self.master_node.distributed_graph[module_id]
 
                     # If there are remaining computations between output and last submodule
-                    n_queued = self.model.backward_queues.qsize()
                     start_time = time.time()
+                    n_queued = self.model.backward_queues[micro].qsize()
 
                     if loss.grad_fn is not None:
                         loss.backward()
-                        self.master_node.send_backward(connection, assoc_input.grad, context=module_id)
+                        self.master_node.send_backward(connection, assoc_input.grad, context=tag)
                     else:
-                        self.master_node.send_backward(connection, loss, context=module_id)
+                        self.master_node.send_backward(connection, loss, context=tag)
 
-                    while not self.model.backward_queues.qsize() <= n_queued:
+                    while not self.model.backward_queues[micro].qsize() <= n_queued:
                         if time.time() - start_time >= MAX_WAIT_TIME:
                             # Logic here to request another worker take his place
                             pass
 
-                    loss = self.model.backward_queues.get()
+                    loss = self.model.backward_queues[micro].get()[-1]
 
             elif len(vals) == 1:
                 assoc_input = vals[0]

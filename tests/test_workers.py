@@ -17,8 +17,8 @@ if __name__ == "__main__":
                      debug=True)
     worker2 = Worker(host=ip, port=port + 1, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
                      debug=True)
-    worker3 = Worker(host=ip, port=port + 2, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-                     debug=True)
+    # worker3 = Worker(host=ip, port=port + 2, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
+    #                  debug=True)
 
     worker1.master = True  # We must omit this
     worker2.training = True
@@ -32,22 +32,6 @@ if __name__ == "__main__":
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
     worker1.connect_dht_node(ip, port + 1)
     # worker1.connect_dht_node(ip, port + 2)
-
-    dummy_input = torch.zeros((1, 1), dtype=torch.long)
-    model = BertModel.from_pretrained("bert-base-uncased")
-    # model = Wav2Vec2BertModel.from_pretrained("facebook/w2v-bert-2.0")
-
-    time.sleep(10)
-    d_model = DistributedModel(model, worker1)
-
-    # with open("distributed_graph.json", "w") as f:
-    #     json.dump(graph, f, indent=4)
-
-    output = d_model(dummy_input)
-    loss = output[0].sum()
-    d_model.backward(loss)
-    d_model.optimizer.zero_grad()
-    d_model.optimizer.step()
 
     worker1.stop()
     worker2.stop()
