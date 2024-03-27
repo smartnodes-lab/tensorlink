@@ -133,13 +133,12 @@ if __name__ == "__main__":
 
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
     worker1.connect_dht_node(ip, port + 1)
-    # worker1.connect_with_node(ip, port + 2)
 
     config = {"encoder": worker1.key_hash}
 
     # Bert Dummy Run first
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
     time.sleep(15)
     # d_model = DistributedModel(copy.deepcopy(model), worker1, config=config)
     d_model = DistributedModel(copy.deepcopy(model), worker1)
