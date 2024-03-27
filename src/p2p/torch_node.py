@@ -32,12 +32,16 @@ class TorchNode(SmartDHTNode):
         self.debug_print(f"worker: sending {round(tensor_bytes.__sizeof__() / 1e9, 3)} GB")
         self.send_to_node(node, tensor_bytes)
 
-    def send_forward(self, node: Connection, args, context: bytes = b""):
-        pickled_data = b"FORWARD" + context + pickle.dumps(args)
+    def send_forward(self, node: Connection, args, context):
+        pickled_data = b"FORWARD" + pickle.dumps((context, args))
         self.send_to_node(node, pickled_data)
 
-    def send_backward(self, node: Connection, args, context: bytes = b""):
-        pickled_data = b"BACKWARD" + context + pickle.dumps(args)
+    def send_backward(self, node: Connection, args, context):
+        pickled_data = b"BACKWARD" + pickle.dumps((context, args))
+        self.send_to_node(node, pickled_data)
+
+    def send_parameters(self, node: Connection, parameters, module_id):
+        pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
         self.send_to_node(node, pickled_data)
 
     def send_module(self, module: nn.Module, node: Connection, prefix: bytes = b""):
@@ -84,6 +88,3 @@ class TorchNode(SmartDHTNode):
     def select_candidate_worker(self):
         candidate_node = max(self.nodes.values(), key=lambda x: x["memory"])
         return candidate_node
-
-    # Potential separate streaming for universal data transmission
-    # def torch_stream(self):

@@ -99,6 +99,7 @@ def access_module(model: nn.Module, module_id: list):
 
     return module
 
+  
 def find_module(module: nn.Module, target_name: str, ids: list = []):
     if not list(module.named_children()):
         return
@@ -111,5 +112,3 @@ def find_module(module: nn.Module, target_name: str, ids: list = []):
         res = find_module(values, target_name, new_ids)
         if res:
             return res
-        
-
