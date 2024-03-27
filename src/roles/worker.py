@@ -35,6 +35,7 @@ class Worker(TorchNode):
         # Should be switched to some other data structure that relates to specific epochs
         self.modules = {}
         self.optimizers = {}
+        self.parameters = {}
         self.loss = None
 
     def stream_data(self, data: bytes, node: Connection):
@@ -79,6 +80,17 @@ d            - ensure correct nodes sending data
                 elif self.training and self.modules:
                     (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
                     self.modules[module_id].backward_queues.put(([n_iter, n_micro], tensor))
+
+            elif b"PARAMSREQ" == data[:9]:
+                self.debug_print(f"RECEIVED PARAMS REQUEST")
+                if self.training:
+                    module_id = data[9:]
+                    self.send_parameters(node, self.modules[module_id].parameters(), module_id)
+
+            elif b"PARAMETERS" == data[:10]:
+                self.debug_print(f"RECEIVED PARAMS REQUEST")
+                module_id, parameters = pickle.loads(data[10:])
+                self.parameters[module_id] = parameters
 
             elif b"REQUEST" == data[:7]:
                 self.debug_print(f"RECEIVED STATS REQUEST")

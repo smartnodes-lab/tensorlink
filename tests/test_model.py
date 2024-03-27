@@ -45,13 +45,15 @@ if __name__ == "__main__":
     time.sleep(5)
 
     d_model = DistributedModel(model, worker1, mini_batch_size, micro_batch_size)
-    d_optimizer = optim.Adam(d_model.parameters(), lr=1e-5)
-    output = d_model(dummy_input)
-
-    losses = [output[o][0].sum() for o in range(mini_batch_size//micro_batch_size)]
-    d_model.backward(losses)
-    d_optimizer.zero_grad()
-    d_optimizer.step()
+    params = d_model.parameters()
+    print(1)
+    # d_optimizer = optim.Adam(d_model.parameters(), lr=1e-5)
+    # output = d_model(dummy_input)
+    #
+    # losses = [output[o][0].sum() for o in range(mini_batch_size//micro_batch_size)]
+    # d_model.backward(losses)
+    # d_optimizer.zero_grad()
+    # d_optimizer.step()
 
     worker1.stop()
     worker2.stop()

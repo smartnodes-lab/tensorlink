@@ -99,4 +99,3 @@ def access_module(model: nn.Module, module_id: list):
             module = getattr(module, child_name)
 
     return module
-

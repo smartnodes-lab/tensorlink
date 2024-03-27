@@ -1,5 +1,5 @@
 
-from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory, access_module
+from src.ml.model_analyzer import *
 from src.roles.worker import Worker
 from src.p2p.connection import Connection
 
@@ -7,14 +7,28 @@ from torch.nn import Parameter
 from typing import Iterator
 import torch.nn as nn
 import torch.optim as optim
+from types import GeneratorType
 import threading
 import torch
 import queue
 import time
-import os
+
 
 MAX_WAIT_TIME = 3
 THREAD_STORAGE = threading.local()
+
+
+def contains_offloaded(module: nn.Module):
+    if not list(module.named_children()):
+        return False
+    children = list(module.children())
+    exists = False
+    for child in children:
+        # check if insntance offloadedsubmodule
+        if isinstance(child, OffloadedModule):
+            return True
+        exists = exists or contains_offloaded(child)
+    return exists
 
 
 class Trainer:
@@ -103,9 +117,41 @@ class DistributedModel(nn.Module):
         for t in threads:
             t.join()
 
-    # def parameters(self, recurse: bool = True):
-    #     super().parameters()
-    #     self.master_node.send_to_node("REQ")
+    def parameters(self, recurse: bool = True):
+        parameters = []
+        parameter_requests = []
+
+        def recurse_parameters(module):
+            for children in module.children():
+                if isinstance(children, OffloadedModule):
+                    self.master_node.send_to_node(children.worker_node, b"PARAMSREQ" + children.module_id)
+                    t = threading.Thread(target=self.wait_for_parameters, args=(children.module_id,))
+                    t.start()
+                    parameter_requests.append(t)
+                    parameters.append(children.module_id)
+                elif contains_offloaded(children):
+                    recurse_parameters(children)
+                else:
+                    parameters.append(children.parameters())
+
+        recurse_parameters(self.model)
+
+        for req in parameter_requests:
+            req.join()
+
+        for i in range(len(parameters)):
+            if isinstance(parameters[i], GeneratorType):
+                pass
+            else:
+                params = self.master_node.parameters[parameters[i]]
+                parameters[i] = params
+
+        return parameters
+
+    def wait_for_parameters(self, module_id: bytes):
+        while module_id not in self.master_node.parameters.keys():
+            # if timeout > time.time() - start_time
+            pass
 
     def perform_micro_backward(self, micro, loss):
         THREAD_STORAGE.micro = micro

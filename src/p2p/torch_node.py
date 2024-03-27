@@ -40,6 +40,10 @@ class TorchNode(SmartDHTNode):
         pickled_data = b"BACKWARD" + pickle.dumps((context, args))
         self.send_to_node(node, pickled_data)
 
+    def send_parameters(self, node: Connection, parameters, module_id):
+        pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
+        self.send_to_node(node, pickled_data)
+
     def send_module(self, module: nn.Module, node: Connection, prefix: bytes = b""):
         module.parent = self.key_hash
         module_bytes = pickle.dumps(module)
