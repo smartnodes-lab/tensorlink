@@ -6,7 +6,7 @@ import json
 import copy
 import time
 from torch.utils.data import DataLoader, TensorDataset
-from transformers import BertForSequenceClassification, BertTokenizer, TrainingArguments, Trainer
+from transformers import BertForSequenceClassification, BertTokenizer, TrainingArguments, Trainer, set_seed
 from datasets import Dataset
 
 
@@ -112,6 +112,7 @@ def fp_check(model):
 if __name__ == "__main__":
     ip = "127.0.0.1"
     port = 5026
+    set_seed(0)
 
     # Spawn 3 workers on their own ports + threads
     worker1 = Worker(host=ip, port=port, wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
@@ -133,12 +134,22 @@ if __name__ == "__main__":
     # Hard code workers connecting to the master node, ideally this will be done via smart contract or DHT
     worker1.connect_dht_node(ip, port + 1)
 
+    config = {"encoder": worker1.key_hash}
+
     # Bert Dummy Run first
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased", num_labels=2)
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)  # Define optimizer here
     time.sleep(15)
+    # d_model = DistributedModel(copy.deepcopy(model), worker1, config=config)
     d_model = DistributedModel(copy.deepcopy(model), worker1)
+
     d_optimizer = torch.optim.Adam(d_model.parameters(), lr=1e-5)
+
+    param_change = not torch.allclose(list(model.parameters())[0], list(d_model.model.parameters())[0])
+    print("WEIGHT UPDATE CHECK:", param_change)
+
+    # test this:
+    # torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0) # not sure if this would work with distributed    
 
     # fp_check(model)
     # simple_train(model, optimizer)
@@ -146,7 +157,10 @@ if __name__ == "__main__":
 
     # Distributed Model Bert Run
     fp_check(d_model)
-    simple_train(d_model, d_optimizer)
+    d_simple_train(d_model, d_optimizer)
+    param_change = not torch.allclose(list(model.parameters())[0], list(d_model.model.parameters())[0])
+    print('*'*100)
+    print("WEIGHT UPDATE CHECK:", param_change)
     # hf_train(d_model, d_optimizer)
 
     # with open("distributed_graph.json", "w") as f:
