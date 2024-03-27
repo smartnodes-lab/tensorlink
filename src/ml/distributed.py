@@ -1,4 +1,4 @@
-from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory, access_module
+from src.ml.model_analyzer import handle_output, get_first_layer, estimate_memory, access_module, find_module
 from src.roles.worker import Worker
 from src.p2p.connection import Connection
 
@@ -34,7 +34,7 @@ class DistributedModel(nn.Module):
         Is able to host offloaded submodules along with local operations. Can be spawned
         by a Worker or a User. Host is referred to as the 'master' node.
     """
-    def __init__(self, model: nn.Module, master_node: Worker):
+    def __init__(self, model: nn.Module, master_node: Worker, config=None, device=None):
         super(DistributedModel, self).__init__()
 
         self.master_node = master_node
@@ -45,7 +45,10 @@ class DistributedModel(nn.Module):
                                                       # of queues if we wish to perform multiple epochs concurrently
         self.master_node.modules["Master"] = self.model
 
-        nodes, graph = self.distribute_model()
+        self.graph = self.distribute_model(config) 
+        self.device = device if device else "cuda" if torch.cuda.is_available() else "cpu"
+        print(self.graph)
+        
         self.spawn_workers = []
 
     def forward(self, *args, **kwargs):
@@ -58,9 +61,6 @@ class DistributedModel(nn.Module):
         self.model.intermediates = [[]]
 
         x = self.model(args, **kwargs)
-
-        if self.training:
-            x.loss.backward = self.backward
 
         return x
 
@@ -118,31 +118,66 @@ class DistributedModel(nn.Module):
             else:
                 raise "Expect vals to be of length 2 or 3."
 
-    def distribute_model(self):
+    def get_node_most_memory(self):
+        # gets node with most memory, returns key and memory
+        key = max(self.master_node.nodes, key=lambda x: self.master_node.nodes[x]['memory'])
+        return key, self.master_node.nodes[key]['memory']
+        
+    def parameters(self, recurse=True):
+        parameters = []
+        for module in list(self.model.children()):
+            if contains_offloaded(module):
+                pass
+            else:
+                parameters.append(module.parameters())
+
+    def update_parameters(self, parameters):
+        pass
+
+    def distribute_model(self, config=None):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
         distributed_module_ids = []
 
-        def recurse_model(module, nodes, candidate_node=None, mod_id=None):
+        if config:
+
+            for mod_name, worker_id in config.items():
+                node = self.master_node.nodes[worker_id]
+                target = find_module(self.model, mod_name)
+                assert target is not None, f"Module {mod_name} not found in model."
+                module, mod_ids = target # unpacking the tuple
+                module_memory = estimate_memory(module)
+                node['memory'] -= module_memory
+                self.wrap_module(mod_ids, node["connection"])
+                return 0,0
+
+        def recurse_model(module, mod_id=[]):
             # Get module information
-            if mod_id is None:
-                mod_id = []
 
             module_memory = estimate_memory(module)
             module_children = list(module.named_children())
-            module_name = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
+            module_type = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
 
             # See if we can handle the input first
             if module_memory < self.master_node.available_memory:
                 self.master_node.available_memory -= module_memory
-                return nodes, f"MASTER"
+                return [{
+                    "id": "MASTER",
+                    "type": module_type,
+                    "module_id": mod_id,
+                }]
 
-            elif module_memory < max(nodes, key=lambda x: x["memory"])["memory"]:
-                candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
-                nodes[candidate_node]["memory"] -= module_memory
+            elif module_memory < self.get_node_most_memory()[1]:
+                worker_key = self.get_node_most_memory()[0]
+                self.master_node.nodes[worker_key]['memory'] -= module_memory
                 distributed_module_ids.append(mod_id)
-                self.wrap_module(mod_id, nodes[candidate_node]["connection"])
-                return nodes, f"{nodes[candidate_node]['id']}"
+                self.wrap_module(mod_id, self.master_node.nodes[worker_key]["connection"])
+                return [{
+                    "id": worker_key,
+                    "type": module_type,
+                    "module_id": mod_id,
+                }]
+
 
             # We cannot handle the module on the master node, there are now three options:
             # assume intermediate DistributedModel on master if graph is empty (or user wants to maximize his compute
@@ -151,35 +186,19 @@ class DistributedModel(nn.Module):
             # attempt intermediate DistributedModel on best candidate
             # elif not distributed_graph: # Commented out for the same reason as the multi-masternode stuff below...
             # For now, we are just attempting candidate node offload and then defaulting to User masternode distribution
-            elif isinstance(module, nn.ModuleList):
-                graph = []
-
-                for i, layer in enumerate(module):
-                    sub_mod_id = mod_id + [i]
-
-                    # if layer_memory < self.master_node.available_memory:
-                    #     self.master_node.available_memory -= layer_memory
-                    # elif layer_memory < nodes[candidate_node]["memory"]:
-                        # self.wrap_module(sub_mod_id, nodes[candidate_node]["connection"])
-
-                    nodes, subgraph = recurse_model(layer, nodes, candidate_node, sub_mod_id)
-                    graph.append(subgraph)
-                return nodes, graph
 
             else:
                 # Spawn secondary DistributedModel on master (subgraph)
-                graph_name = f"DistributedModel:{module_name}:MASTER"
-                graph = {graph_name: {}}
+                graph = []
 
                 for i, (name, submodule) in enumerate(module_children):
-                    if len(graph[graph_name]) > 0:
-                        candidate_node = max(enumerate(nodes), key=lambda x: x[1]["memory"])[0]
+                    sub_mod_id = mod_id + [i]
 
                     # Handle submodule
-                    nodes, subgraph = recurse_model(submodule, nodes, candidate_node, mod_id + [i])
-                    graph[graph_name][f"DistributedSubModule:{name}"] = subgraph
+                    subgraph = recurse_model(submodule, sub_mod_id)
+                    graph.extend(subgraph)
 
-                return nodes, graph
+                return graph
 
         # Get list of workers and request them be put in a "stand-by" state for the particular request
         # Before we call this method we must:
@@ -187,13 +206,12 @@ class DistributedModel(nn.Module):
         #   If the worker is the master, residual workers can confirm sub-master via SC seed nodes
         #   if we are in the validator state
 
-        worker_nodes = list(self.master_node.nodes.values())
-        nodes, graph = recurse_model(self.model, worker_nodes)
+        graph = recurse_model(self.model)
 
         # for thread in self.spawn_workers:
         #     thread.join()
 
-        return nodes, graph
+        return graph
 
     # def offload_module(self, parent_module, child_module, connection):
     #     # Wait for some sort of signal from worker to know that it has taken
@@ -321,6 +339,11 @@ class OffloadedModule(nn.Module):
     #     pickled_data = b"BACKWARD" + context + pickle.dumps(args)
     #     self.send_to_node(node, pickled_data)
 
+class DistributedParameterList():
+    def __init__(self, distributed_model: DistributedModel):
+        self.distributed_model = distributed_model
+        self.parameters = []
+        
 
 # class DistributedSubModule(nn.Module):
 #     """
