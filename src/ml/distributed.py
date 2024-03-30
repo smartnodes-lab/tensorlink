@@ -1,3 +1,5 @@
+from torch.nn.modules.module import T
+
 from src.ml.model_analyzer import *
 from src.roles.worker import Worker
 from src.p2p.connection import Connection
@@ -11,7 +13,6 @@ import threading
 import torch
 import queue
 import time
-
 
 MAX_WAIT_TIME = 3
 THREAD_STORAGE = threading.local()
@@ -48,13 +49,23 @@ class DistributedModel(nn.Module):
         by a Worker or a User. Host is referred to as the 'master' node.
     """
 
-    def __init__(self, model: nn.Module, master_node: Worker, batch_size: int, micro_batch_size: int, config=None, device=None):
+    def __init__(
+        self,
+        model: nn.Module,
+        master_node: Worker,
+        batch_size: int,
+        micro_batch_size: int,
+        config=None,
+        device=None,
+    ):
         super(DistributedModel, self).__init__()
 
         self.master_node = master_node
         self.model = model
 
-        assert batch_size % micro_batch_size == 0, "Micro-batch must be divisible by batch."
+        assert (
+            batch_size % micro_batch_size == 0
+        ), "Micro-batch must be divisible by batch."
 
         self.batch_size = batch_size
         self.micro_batch_size = micro_batch_size
@@ -63,17 +74,26 @@ class DistributedModel(nn.Module):
 
         self.model.forward_queues = {}
         self.model.backward_queues = {}
-        self.model.intermediates = [[]]  # Queue to hold intermediates, must be converted into dictionary
+        self.model.intermediates = [
+            []
+        ]  # Queue to hold intermediates, must be converted into dictionary
         # of queues if we wish to perform multiple epochs concurrently
         self.master_node.modules["Master"] = self.model
 
-        self.graph = self.distribute_model(config) 
-        self.device = device if device else "cuda" if torch.cuda.is_available() else "cpu"
+        self.graph = self.distribute_model(config)
+        self.device = (
+            device if device else "cuda" if torch.cuda.is_available() else "cpu"
+        )
         print(self.graph)
-        
+
         self.spawn_workers = []
 
     def forward(self, *args, **kwargs):
+        """
+        Performs the forward pass through the model.
+        - Splits input into micro-batches and runs them in parallel.
+        - TODO Creates multiple parallel streams of workers for model parallel acceleration
+        """
         if len(args) == 1:
             args = args[0]
 
@@ -91,7 +111,9 @@ class DistributedModel(nn.Module):
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
         for micro, batch in enumerate(micro_batches):
-            t = threading.Thread(target=self.perform_micro_forward, args=(micro, batch, *kwargs))
+            t = threading.Thread(
+                target=self.perform_micro_forward, args=(micro, batch), kwargs=kwargs
+            )
             t.start()
             threads.append(t)
             time.sleep(0.5)
@@ -102,11 +124,19 @@ class DistributedModel(nn.Module):
         return self.model.outputs
 
     def backward(self, loss):
+        """
+        Performs the backward pass through the model.
+        - Splits input into micro-batches and runs them in parallel.
+        - TODO Creates multiple parallel streams of workers for model parallel acceleration
+        - TODO halt worker parameter updates until final micro-batch
+        """
         n_micro_batches = self.batch_size // self.micro_batch_size
 
         threads = []
         for micro in range(n_micro_batches):
-            t = threading.Thread(target=self.perform_micro_backward, args=(micro, loss[micro]))
+            t = threading.Thread(
+                target=self.perform_micro_backward, args=(micro, loss[micro])
+            )
             t.start()
             threads.append(t)
             time.sleep(0.5)
@@ -114,50 +144,17 @@ class DistributedModel(nn.Module):
         for t in threads:
             t.join()
 
-    def parameters(self, recurse: bool = True):
-        parameters = []
-        parameter_requests = []
-
-        def recurse_parameters(module):
-            for children in module.children():
-                if isinstance(children, OffloadedModule):
-                    self.master_node.send_to_node(children.worker_node, b"PARAMSREQ" + children.module_id)
-                    t = threading.Thread(target=self.wait_for_parameters, args=(children.module_id,))
-                    t.start()
-                    parameter_requests.append(t)
-                    parameters.append(children.module_id)
-                elif contains_offloaded(children):
-                    recurse_parameters(children)
-                else:
-                    parameters.append(children.parameters())
-
-        recurse_parameters(self.model)
-
-        for req in parameter_requests:
-            req.join()
-
-        for i in range(len(parameters)):
-            if isinstance(parameters[i], GeneratorType):
-                pass
-            else:
-                params = self.master_node.parameters[parameters[i]]
-                parameters[i] = params
-
-        return parameters
-
-    def wait_for_parameters(self, module_id: bytes):
-        while module_id not in self.master_node.parameters.keys():
-            # if timeout > time.time() - start_time
-            pass
-
     def perform_micro_backward(self, micro, loss):
+        """"""
         THREAD_STORAGE.micro = micro
 
         # Get the oldest epoch intermediates from storage via dict key lookup (todo)
         while len(self.model.intermediates[micro]) > 0:
             vals = self.model.intermediates[micro].pop(-1)
 
-            if len(vals) == 3:  # Len == 3 means connection info is present TODO: better context creation
+            if (
+                len(vals) == 3
+            ):  # Len == 3 means connection info is present TODO: better context creation
                 assoc_input, assoc_output, module_id = vals
                 tag = [self.model.n_batch, micro, module_id]
 
@@ -191,7 +188,9 @@ class DistributedModel(nn.Module):
 
                     if loss.grad_fn is not None:
                         loss.backward()
-                        self.master_node.send_backward(connection, assoc_input.grad, context=tag)
+                        self.master_node.send_backward(
+                            connection, assoc_input.grad, context=tag
+                        )
                     else:
                         self.master_node.send_backward(connection, loss, context=tag)
 
@@ -209,18 +208,112 @@ class DistributedModel(nn.Module):
             else:
                 raise "Expect vals to be of length 2 or 3."
 
-    def perform_micro_forward(self, micro, args, **kwargs):
+    def perform_micro_forward(self, micro, *args, **kwargs):
         THREAD_STORAGE.micro = micro
-        x = self.model(args, **kwargs)
+        x = self.model(*args, **kwargs)
         self.model.outputs[micro] = x
 
-    def distribute_model(self):
+    def train(self, mode: bool = True):
+        """
+        Sets the training mode for the model and sends requests to offloaded modules to update their training state.
+        """
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        self.training = mode
+        threads = []
+
+        def recurse_modules(module):
+            for children in module.children():
+                if isinstance(children, OffloadedModule):
+                    self.master_node.send_update_train_request(
+                        children.worker_node, mode, children.module_id
+                    )
+                    t = threading.Thread(
+                        target=self.wait_for_state_update,
+                        args=(children.module_id, "train"),
+                    )
+                    t.start()
+                    threads.append(t)
+                elif contains_offloaded(children):
+                    recurse_modules(children)
+
+        recurse_modules(self.model)
+
+        for thread in threads:
+            thread.join()
+
+    def eval(self):
+        self.train(False)
+
+    def parameters(self, recurse: bool = True, distributed: bool = False):
+        """
+        Collects parameters from all modules (including offloaded) asynchronously and returns them.
+        """
+        if distributed:
+            parameters = []
+            parameter_requests = []
+
+            def recurse_parameters(module):
+                for children in module.children():
+                    if isinstance(children, OffloadedModule):
+                        self.master_node.send_parameters_req(
+                            children.worker_node, children.module_id
+                        )
+                        t = threading.Thread(
+                            target=self.wait_for_parameters, args=(children.module_id,)
+                        )
+                        t.start()
+                        parameter_requests.append(t)
+                        parameters.append(children.module_id)
+                    elif contains_offloaded(children):
+                        recurse_parameters(children)
+                    else:
+                        parameters.append(children.parameters())
+
+            recurse_parameters(self.model)
+
+            for req in parameter_requests:
+                req.join()
+
+            for i in range(len(parameters)):
+                if isinstance(parameters[i], GeneratorType):
+                    pass
+                else:
+                    params = self.master_node.parameters[parameters[i]]
+                    parameters[i] = params
+
+        else:
+            parameters = self.model.parameters()
+
+        return parameters
+
+    def wait_for_parameters(self, module_id: bytes):
+        """
+        Waits until parameters have been received from the specified offloaded module
+        """
+        while module_id not in self.master_node.parameters.keys():
+            # if timeout > time.time() - start_time
+            pass
+
+    def wait_for_state_update(self, module_id, state):
+        """
+        Waits until a state update has been confirmed from the specified offloaded module
+        """
+        while module_id not in self.master_node.state_updates.keys():
+            # if timeout > time.time() - start_time
+            pass
+
+        while state not in self.master_node.state_updates[module_id].keys():
+            # if timeout > time.time() - start_time
+            pass
 
     def get_node_most_memory(self):
         # gets node with most memory, returns key and memory
-        key = max(self.master_node.nodes, key=lambda x: self.master_node.nodes[x]['memory'])
-        return key, self.master_node.nodes[key]['memory']
-        
+        key = max(
+            self.master_node.nodes, key=lambda x: self.master_node.nodes[x]["memory"]
+        )
+        return key, self.master_node.nodes[key]["memory"]
+
     def distribute_model(self, config=None):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
@@ -232,11 +325,11 @@ class DistributedModel(nn.Module):
                 node = self.master_node.nodes[worker_id]
                 target = find_module(self.model, mod_name)
                 assert target is not None, f"Module {mod_name} not found in model."
-                module, mod_ids = target # unpacking the tuple
+                module, mod_ids = target  # unpacking the tuple
                 module_memory = estimate_memory(module)
-                node['memory'] -= module_memory
+                node["memory"] -= module_memory
                 self.wrap_module(mod_ids, node["connection"])
-                return 0,0
+                return 0, 0
 
         def recurse_model(module, mod_id=[]):
             # Get module information
@@ -248,22 +341,28 @@ class DistributedModel(nn.Module):
             # See if we can handle the input first
             if module_memory < self.master_node.available_memory:
                 self.master_node.available_memory -= module_memory
-                return [{
-                    "id": "MASTER",
-                    "type": module_type,
-                    "module_id": mod_id,
-                }]
+                return [
+                    {
+                        "id": "MASTER",
+                        "type": module_type,
+                        "module_id": mod_id,
+                    }
+                ]
 
             elif module_memory < self.get_node_most_memory()[1]:
                 worker_key = self.get_node_most_memory()[0]
-                self.master_node.nodes[worker_key]['memory'] -= module_memory
+                self.master_node.nodes[worker_key]["memory"] -= module_memory
                 distributed_module_ids.append(mod_id)
-                self.wrap_module(mod_id, self.master_node.nodes[worker_key]["connection"])
-                return [{
-                    "id": worker_key,
-                    "type": module_type,
-                    "module_id": mod_id,
-                }]
+                self.wrap_module(
+                    mod_id, self.master_node.nodes[worker_key]["connection"]
+                )
+                return [
+                    {
+                        "id": worker_key,
+                        "type": module_type,
+                        "module_id": mod_id,
+                    }
+                ]
 
             # We cannot handle the module on the master node, there are now three options:
             # assume intermediate DistributedModel on master if graph is empty (or user wants to maximize his compute
@@ -298,24 +397,20 @@ class DistributedModel(nn.Module):
 
         return graph
 
-    # def offload_module(self, parent_module, child_module, connection):
-    #     # Wait for some sort of signal from worker to know that it has taken
-    #     start_time = time.time()
-    #
-    #     while True:
-    #         if time.time() - start_time > MAX_WAIT_TIME:
-    #             # Select another worker if current worker takes too long
-    #             connection = max(self.master_node.nodes, key=lambda x: x["memory"])
-    #         elif self.master_node
-
     def wrap_module(self, module_id: list, worker: Connection):
         child_module = access_module(self.model, module_id)
-        parent_module = access_module(self.model, module_id[:-1]) if len(module_id) > 1 else self.model
+        parent_module = (
+            access_module(self.model, module_id[:-1])
+            if len(module_id) > 1
+            else self.model
+        )
 
         offloaded_module = OffloadedModule(self.master_node, worker)
 
         # Remove offloaded module from main model optimizer
-        child_params = set(child_module.parameters())  # Using set for efficient membership check
+        child_params = set(
+            child_module.parameters()
+        )  # Using set for efficient membership check
         current_params = {name: param for name, param in self.named_parameters()}
 
         # Remove the parameters of the child_module from the current parameters
@@ -394,19 +489,24 @@ class OffloadedModule(nn.Module):
     def forward(self, *args, **kwargs):
         start_time = time.time()
         n_iter = self.master_node.modules["Master"].n_batch
-        n_micro = getattr(THREAD_STORAGE, 'micro', None)
+        n_micro = getattr(THREAD_STORAGE, "micro", None)
         n_queued = self.master_node.modules["Master"].forward_queues[n_micro].qsize()
 
         tag = [n_iter, n_micro, self.module_id]
 
         # Store the intermediate tensor for backwards pass
-        self.master_node.modules["Master"].intermediates[n_micro][-1].extend([handle_output(args), self.module_id])
+        self.master_node.modules["Master"].intermediates[n_micro][-1].extend(
+            [handle_output(args), self.module_id]
+        )
 
         # Relay forward pass to next node
         self.master_node.send_forward(self.worker_node, (args, kwargs), context=tag)
 
         # Wait for response, change to appending waiting thread to list in master
-        while self.master_node.modules["Master"].forward_queues[n_micro].qsize() <= n_queued:
+        while (
+            self.master_node.modules["Master"].forward_queues[n_micro].qsize()
+            <= n_queued
+        ):
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
                 pass
@@ -414,18 +514,12 @@ class OffloadedModule(nn.Module):
         # Grab returned tensor
         _, output = self.master_node.modules["Master"].forward_queues[n_micro].get()
 
-        inter_storage = [self.module_id, handle_output(output)]  # Store associated output
+        inter_storage = [
+            self.module_id,
+            handle_output(output),
+        ]  # Store associated output
 
         # Store intermediates and connection for backwards pass
         self.master_node.modules["Master"].intermediates[n_micro].append(inter_storage)
 
         return output
-
-    # async def async_send_forward(self, node: Connection, args, context: bytes = b""):
-    #     pickled_data = b"FORWARD" + context + pickle.dumps(args)
-    #
-    #     self.send_to_node(node, pickled_data)
-    #
-    # async def async_send_backward(self, node: Connection, args, context: bytes = b""):
-    #     pickled_data = b"BACKWARD" + context + pickle.dumps(args)
-    #     self.send_to_node(node, pickled_data)

@@ -1,9 +1,14 @@
-from src.cryptography.rsa import *
 from src.cryptography.substrate import load_substrate_keypair
+from src.cryptography.rsa import *
+from src.p2p.connection import Connection
 from src.p2p.node import Node
 
 from substrateinterface import SubstrateInterface
-from substrateinterface.contracts import ContractCode, ContractInstance, ContractMetadata
+from substrateinterface.contracts import (
+    ContractCode,
+    ContractInstance,
+    ContractMetadata,
+)
 from substrateinterface.exceptions import SubstrateRequestException
 
 import threading
@@ -19,18 +24,21 @@ METADATA = "./src/assets/smartnodes.json"
 CONTRACT = "5D37KYdd3Ptd8CfjKxtN3rGqU6oZQQeiGfTLfF2VGrTQJfyN"
 
 
-def hash_key(key: bytes):
+def hash_key(key: bytes, number=False):
     """
     Hashes the key to determine its position in the keyspace.
     """
-    return int(hashlib.sha256(key).hexdigest(), 16)
+    if number is True:
+        return int(hashlib.sha256(key).hexdigest(), 16)
+    else:
+        return hashlib.sha256(key).hexdigest()
 
 
 def calculate_xor(key_hash, node_id):
     """
     Calculate the XOR distance between a key and a node ID.
     """
-    return key_hash ^ int(node_id, 16)
+    return int(key_hash, 16) ^ int(node_id, 16)
 
 
 class Bucket:
@@ -55,10 +63,21 @@ class SmartDHTNode(Node):
     TODO:
     - confirm workers public key with smart contract ID
     """
-    def __init__(self, host: str, port: int, public_key: str, url: str = "wss://ws.test.azero.dev",
-                 contract: str = CONTRACT, debug: bool = False,
-                 max_connections: int = 0, callback=None):
-        super(SmartDHTNode, self).__init__(host, port, debug, max_connections, self.stream_data)
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        public_key: str,
+        url: str = "wss://ws.test.azero.dev",
+        contract: str = CONTRACT,
+        debug: bool = False,
+        max_connections: int = 0,
+        callback=None,
+    ):
+        super(SmartDHTNode, self).__init__(
+            host, port, debug, max_connections, self.stream_data
+        )
 
         # Smart contract parameters
         self.chain = SubstrateInterface(url=url)
@@ -67,12 +86,14 @@ class SmartDHTNode(Node):
         self.contract = None
 
         # Grab the SmartNode contract
-        contract_info = self.chain.query("Contracts", "ContractInfoOf", [self.contract_address])
+        contract_info = self.chain.query(
+            "Contracts", "ContractInfoOf", [self.contract_address]
+        )
         if contract_info.value:
             self.contract = ContractInstance.create_from_address(
                 substrate=self.chain,
                 contract_address=self.contract_address,
-                metadata_file=METADATA
+                metadata_file=METADATA,
             )
 
         else:
@@ -111,12 +132,21 @@ class SmartDHTNode(Node):
                 key, value = pickle.loads(data[5:])
                 self.store_key_value_pair(key, value)
 
-            elif b"RETRIEVE" == data[:8]:
+            elif b"ROUTEREQ" == data[:8]:
                 # Retrieve the value associated with the key from the DHT
-                key = pickle.loads(data[8:])
-                value = self.retrieve(key)
+                self.debug_print(f"RECEIVED ROUTE REQUEST")
+                key = data[8:]
+                value = self.query_routing_table(key)
+                data = pickle.dumps([key, value])
+                data = b"ROUTEREP" + data
+
                 # Send the value back to the requesting node
-                self.send_to_node(node, pickle.dumps(value))
+                self.send_to_node(node, data)
+
+            elif b"ROUTEREP" == data[:8]:
+                self.debug_print(f"RECEIVED ROUTE RESPONSE")
+                key, value = pickle.loads(data[8:])
+                self.routing_table[key] = value
 
             elif b"DELETE" == data[:6]:
                 # Delete the key-value pair from the DHT
@@ -147,7 +177,14 @@ class SmartDHTNode(Node):
 
                 for host, port in pickled:
                     if self.connect_with_node(host, port, our_node_id=self.key_hash):
-                        new_peer = next((node for node in self.connections if node.host == host and node.port == port), None)
+                        new_peer = next(
+                            (
+                                node
+                                for node in self.connections
+                                if node.host == host and node.port == port
+                            ),
+                            None,
+                        )
 
             # Add more data types and their handling logic as needed
 
@@ -181,9 +218,7 @@ class SmartDHTNode(Node):
             start_time = time.time()
 
             # Encrypt random number with node's key to confirm identity
-            connection.send(
-                encrypt(message.encode(), id_bytes)
-            )
+            connection.send(encrypt(message.encode(), id_bytes))
 
             # Await response
             response = connection.recv(4096)
@@ -191,21 +226,33 @@ class SmartDHTNode(Node):
             response, parent_port, node_id = response.split(b",")
 
             if response.decode() == randn:
-                thread_client = self.create_connection(connection, client_address[0], client_address[1],
-                                                       node_id, int(parent_port))
+                thread_client = self.create_connection(
+                    connection,
+                    client_address[0],
+                    client_address[1],
+                    node_id,
+                    int(parent_port),
+                )
                 thread_client.start()
                 thread_client.latency = latency
 
                 for node in self.connections:
-                    if node.host == client_address[0] and node.port == port or node.parent_port == port:
+                    if (
+                        node.host == client_address[0]
+                        and node.port == port
+                        or node.parent_port == port
+                    ):
                         self.debug_print(
-                            f"connect_with_node: already connected with node: {node.node_id}")
+                            f"connect_with_node: already connected with node: {node.node_id}"
+                        )
                         thread_client.stop()
                         break
 
                 if not thread_client.terminate_flag.is_set():
                     self.inbound.append(thread_client)
-                    self.connect_dht_node(thread_client.host, thread_client.parent_port, connected=True)
+                    self.connect_dht_node(
+                        thread_client.host, thread_client.parent_port, connected=True
+                    )
 
             else:
                 self.debug_print("node: connection refused, invalid ID proof!")
@@ -232,16 +279,20 @@ class SmartDHTNode(Node):
                 connection, client_address = self.sock.accept()
 
                 # Attempt SC-secured connection if we can handle more
-                if self.max_connections == 0 or len(self.connections) < self.max_connections:
+                if (
+                    self.max_connections == 0
+                    or len(self.connections) < self.max_connections
+                ):
                     self.handshake(connection, client_address)
 
                 else:
                     self.debug_print(
-                        "node: Connection refused: Max connections reached!")
+                        "node: Connection refused: Max connections reached!"
+                    )
                     connection.close()
 
             except socket.timeout:
-                self.debug_print('node: Connection timeout!')
+                self.debug_print("node: Connection timeout!")
 
             except Exception as e:
                 print(str(e))
@@ -275,14 +326,14 @@ class SmartDHTNode(Node):
         self.sock.close()
         print("Node stopped")
 
-    def bootstrap(self, seeds=None):
-        """
-        Connect to initial set of validator nodes on the network. Select random set
-         of validators or workers from the smart contract if seeds=None.
-        """
-        if seeds is None:
-            self.c
-
+    # def bootstrap(self, seeds=None):
+    #     """
+    #     Connect to initial set of validator nodes on the network. Select random set
+    #      of validators or workers from the smart contract if seeds=None.
+    #     """
+    #     if seeds is None:
+    #         self.c
+    #
     # def get_jobs(self):
     #     # Confirm job details with smart contract, receive initial details from a node?
     #     # self.chain.query("")
@@ -312,10 +363,12 @@ class SmartDHTNode(Node):
     #         )
     #     pass
 
-    def calculate_bucket_index(self, key):
-        key_hash = hashlib.sha256(str(key).encode()).hexdigest()
-        hash_integer = int(key_hash, 16)
-        bucket_index = hash_integer % len(self.buckets)
+    def calculate_bucket_index(self, key_int):
+        """
+        Find the index of a bucket given the key
+        """
+        bucket_index = key_int % len(self.buckets)
+
         return bucket_index
 
     def query_routing_table(self, key_hash):
@@ -324,15 +377,32 @@ class SmartDHTNode(Node):
         """
         closest_node = None
         closest_distance = float("inf")
-        for node in self.connections:
-            distance = calculate_xor(key_hash, node.node_id)
+
+        # Find nearest node in our local routing table
+        for node_hash, node in self.routing_table.items():
+            distance = calculate_xor(key_hash, node_hash)
             if distance < closest_distance:
-                closest_node = node
+                closest_node = (node_hash, node)
                 closest_distance = distance
 
-        return closest_node
+        # If we could not retrieve the stored value, route to nearest node
+        if isinstance(closest_node[1], Connection):
+            start_time = time.time()
+            self.request_value(key_hash, closest_node[1])
 
-    def connect_dht_node(self, host: str, port: int, reconnect: bool = False, connected=None) -> bool:
+            while key_hash not in self.routing_table.keys():
+                if time.time() - start_time > 5:  # Some arbitrary timeout time for now
+                    return None
+
+        return self.routing_table[key_hash]
+
+    def request_value(self, key: bytes, node: Connection):
+        data = b"ROUTEREQ" + key
+        self.send_to_node(node, data)
+
+    def connect_dht_node(
+        self, host: str, port: int, reconnect: bool = False, connected=None
+    ) -> bool:
         """
         Connect to a DHT node and exchange information to identify its node ID.
         """
@@ -348,25 +418,29 @@ class SmartDHTNode(Node):
 
             self.store_key_value_pair(node.node_id, node)
 
-    def store_key_value_pair(self, key, value):
-        bucket_index = self.calculate_bucket_index(key)
+    def store_key_value_pair(self, key: bytes, value):
+        key_int = int(key, 16)
+        bucket_index = self.calculate_bucket_index(key_int)
         bucket = self.buckets[bucket_index]
 
         if not bucket.is_full():
             self.routing_table[key] = value
             bucket.add_node(self.routing_table[key])
+            return True
+
         else:
             # Pass along to another node (x replication factor)
-            target_node = self.query_routing_table(hash_key(key))
-
-            for _ in range(self.replication_factor):
-                pass
+            target_node = self.query_routing_table(key)
+            self.store_key_value_pair_with_acknowledgment(key, value, target_node)
 
         # # Replicate the data to the next closest nodes
         # for i in range(self.replication_factor):
         #     next_node = self.get_next_node(key, node)
         #     if next_node:
         #         next_node.store(key, value)
+
+    def store_key_value_pair_with_acknowledgment(self, key, value, node):
+        pass
 
     def forward_to_other_node(self, key, value):
         target_node = self.query_routing_table(hash_key(key))
@@ -387,7 +461,10 @@ class SmartDHTNode(Node):
         # memory = self.available_memory
         memory = 1e9
 
-        stats = {"id": self.rsa_pub_key + self.port.to_bytes(4, "big"), "memory": memory}  #, "state": self.state}
+        stats = {
+            "id": self.rsa_pub_key + self.port.to_bytes(4, "big"),
+            "memory": memory,
+        }  # , "state": self.state}
 
         if additional_context is not None:
             for k, v in additional_context.items():

@@ -5,5 +5,8 @@ class User:
     def __init__(self):
         pass
 
-    def create_job(self, model: nn.Module):
+    def request_peers(self):
+        pass
+
+    def request_job(self, model: nn.Module):
         pass

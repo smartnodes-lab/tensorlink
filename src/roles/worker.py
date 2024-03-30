@@ -22,9 +22,22 @@ class Worker(TorchNode):
             tasks, ie distributing a model too large to handle on a single computer / user
         - function that detaches the huggingface wrapped outputs tensor without modifying the rest
     """
-    def __init__(self, host: str, port: int, wallet_address: str, debug: bool = False, max_connections: int = 0):
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        wallet_address: str,
+        debug: bool = False,
+        max_connections: int = 0,
+    ):
         super(Worker, self).__init__(
-            host, port, wallet_address, debug=debug, max_connections=max_connections, callback=self.stream_data
+            host,
+            port,
+            wallet_address,
+            debug=debug,
+            max_connections=max_connections,
+            callback=self.stream_data,
         )
 
         # Model training parameters
@@ -36,116 +49,186 @@ class Worker(TorchNode):
         self.modules = {}
         self.optimizers = {}
         self.parameters = {}
+        self.state_updates = {}
+
         self.loss = None
 
     def stream_data(self, data: bytes, node: Connection):
         """
-        Handle incoming tensors from connected nodes and new job requests
+                Handle incoming tensors from connected nodes and new job requests
 
-        Todo:
-d            - ensure correct nodes sending data
-            - potentially move/forward method directly to Connection to save data via identifying data
-                type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
+                Todo:
+        d            - ensure correct nodes sending data
+                    - potentially move/forward method directly to Connection to save data via identifying data
+                        type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
         """
 
         try:
-            # The case where we load via downloaded pickle file (potential security threat)
-            if b"DONE STREAM" == data[:11]:
-                file_name = f"streamed_data_{node.host}_{node.port}"
 
-                with open(file_name, "rb") as f:
-                    streamed_bytes = f.read()
+            handled = super().stream_data(data, node)
 
-                self.stream_data(streamed_bytes, node)
+            # Try worker-related tags if not found in parent class
+            if not handled:
 
-                os.remove(file_name)
+                # The case where we load via downloaded pickle file (potential security threat? & slow)
+                if b"DONE STREAM" == data[:11]:
+                    file_name = f"streamed_data_{node.host}_{node.port}"
 
-            elif b"FORWARD" == data[:7]:
-                self.debug_print(f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                if self.master:
-                    [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
-                    self.modules["Master"].forward_queues[n_micro].put(([n_iter, n_micro, module_id], tensor))
+                    with open(file_name, "rb") as f:
+                        streamed_bytes = f.read()
 
-                elif self.training and len(self.modules) > 0:
-                    (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
-                    self.modules[module_id].forward_queues.put(([n_iter, n_micro], tensor))
+                    handled = self.stream_data(streamed_bytes, node)
 
-            elif b"BACKWARD" == data[:8]:
-                self.debug_print(f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
+                    os.remove(file_name)
 
-                if self.master:
-                    [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
-                    self.modules["Master"].backward_queues[n_micro].put(([n_iter, n_micro, module_id], tensor))
+                    return handled
 
-                elif self.training and self.modules:
-                    (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
-                    self.modules[module_id].backward_queues.put(([n_iter, n_micro], tensor))
+                # Handle incoming forward pass request
+                elif b"FORWARD" == data[:7]:
+                    self.debug_print(
+                        f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                    )
+                    # Master-specific handling (ie for DistributedModel)
+                    if self.master:
+                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
+                        self.modules["Master"].forward_queues[n_micro].put(
+                            ([n_iter, n_micro, module_id], tensor)
+                        )
 
-            elif b"PARAMSREQ" == data[:9]:
-                self.debug_print(f"RECEIVED PARAMS REQUEST")
-                if self.training:
-                    module_id = data[9:]
-                    self.send_parameters(node, self.modules[module_id].parameters(), module_id)
+                        return True
 
-            elif b"PARAMETERS" == data[:10]:
-                self.debug_print(f"RECEIVED PARAMS REQUEST")
-                module_id, parameters = pickle.loads(data[10:])
-                self.parameters[module_id] = parameters
+                    # Module-specific handling (ie for OffloadedModule / nn.Module)
+                    elif self.training and len(self.modules) > 0:
+                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
+                        self.modules[module_id].forward_queues.put(
+                            ([n_iter, n_micro], tensor)
+                        )
 
-            elif b"REQUEST" == data[:7]:
-                self.debug_print(f"RECEIVED STATS REQUEST")
-                self.broadcast_statistics(node)
+                        return True
 
-            elif b"RESPONSE" == data[:8]:
-                self.debug_print(f"RECEIVED NODE STATS")
+                # Handle incoming backward pass request
+                elif b"BACKWARD" == data[:8]:
+                    self.debug_print(
+                        f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                    )
 
-                pickled = pickle.loads(data[8:])
-                node_id, stats = pickled
-                stats["connection"] = node
-                self.nodes[node_id] = stats
+                    # Master-specific handling (ie for DistributedModel)
+                    if self.master:
+                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
+                        self.modules["Master"].backward_queues[n_micro].put(
+                            ([n_iter, n_micro, module_id], tensor)
+                        )
 
-            # elif b"PoL" == data[:3]:
-            #     self.debug_print(f"RECEIVED PoL REQUEST")
-            #     if self.training and self.model:
-            #         dummy_input = pickle.loads(data[3:])
-            #
-            #         proof_of_learning = self.proof_of_learning(dummy_input)
-            #
-            #         self.send_to_node(node, proof_of_learning)
-            #
-            # elif b"TENSOR" == data[:6]:
-            #     if self.training:
-            #         tensor = pickle.loads(data[6:])
-            #
-            #         # Confirm identity/role of node
-            #         if node in self.inbound:
-            #             self.forward_relays.put(tensor)
-            #         elif node in self.outbound:
-            #             self.backward_relays.put(tensor)
+                        return True
 
-            elif b"MODULE" == data[:6]:
-                self.debug_print(f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB")
-                # Must confirm the model with a job on SC
-                if self.training:
-                    # Load in model
-                    module = pickle.loads(data[6:])
+                    # Module-specific handling (ie for OffloadedModule / nn.Module)
+                    elif self.training and self.modules:
+                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
+                        self.modules[module_id].backward_queues.put(
+                            ([n_iter, n_micro], tensor)
+                        )
 
-                    module.forward_queues = queue.Queue()
-                    module.backward_queues = queue.Queue()
-                    module.intermediates = {}
-                    # module.intermediates = queue.LifoQueue()
+                        return True
 
-                    # self.request_statistics()
-                    self.modules[module.id] = module
-                    self.optimizers[module.id] = optim.Adam(module.parameters())
+                # Handle requests for module parameters
+                elif b"PARAMSREQ" == data[:9]:
+                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+                    if self.training:
+                        # Must ensure requesting node is indeed the master or an overseeing validator
+                        module_id = data[9:]
+                        self.send_parameters(
+                            node, self.modules[module_id].parameters(), module_id
+                        )
 
-                    self.debug_print(f"Loaded distributed module!")
-                    self.send_to_node(node, b"LOADED" + module.id)
+                        return True
 
-            elif b"LOADED" == data[:6]:
-                self.debug_print(f"Successfully offloaded submodule to worker.")
-                pickled = data[6:]
-                self.distributed_graph[pickled] = node
+                # Handle and store responses from a parameters request
+                elif b"PARAMETERS" == data[:10]:
+                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+                    module_id, parameters = pickle.loads(data[10:])
+                    self.parameters[module_id] = parameters
+
+                    return True
+
+                # Handle update .train parameter request
+                elif b"UT-REQ" == data[:6]:
+                    # self.debug_print()
+                    if self.training:
+                        # Must ensure requesting node is the master
+                        mode = False if data[6:7] == b"0" else True
+                        module_id = data[7:]
+                        self.modules[module_id].training = mode
+                        self.send_train_updated(node, mode, module_id)
+
+                        return True
+
+                # Handle update .train parameter change request from master node
+                elif b"TU-REQ" == data[:6]:
+                    if self.master or self.training:
+                        mode = False if data[6:7] == b"0" else True
+                        module_id = data[7:]
+                        if module_id in self.state_updates.keys():
+                            self.state_updates[module_id]["train"] = mode
+                        else:
+                            self.state_updates[module_id] = {"train": mode}
+
+                        return True
+
+                # elif b"PoL" == data[:3]:
+                #     self.debug_print(f"RECEIVED PoL REQUEST")
+                #     if self.training and self.model:
+                #         dummy_input = pickle.loads(data[3:])
+                #
+                #         proof_of_learning = self.proof_of_learning(dummy_input)
+                #
+                #         self.send_to_node(node, proof_of_learning)
+                #
+                # elif b"TENSOR" == data[:6]:
+                #     if self.training:
+                #         tensor = pickle.loads(data[6:])
+                #
+                #         # Confirm identity/role of node
+                #         if node in self.inbound:
+                #             self.forward_relays.put(tensor)
+                #         elif node in self.outbound:
+                #             self.backward_relays.put(tensor)
+
+                # Handle receiving module from master node
+                elif b"MODULE" == data[:6]:
+                    self.debug_print(
+                        f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                    )
+                    # Must confirm the model with a job on SC
+                    if self.training:
+                        # Load in model
+                        module = pickle.loads(data[6:])
+
+                        module.forward_queues = queue.Queue()
+                        module.backward_queues = queue.Queue()
+                        module.intermediates = {}
+                        # module.intermediates = queue.LifoQueue()
+
+                        # self.request_statistics()
+                        self.modules[module.id] = module
+                        self.optimizers[module.id] = optim.Adam(module.parameters())
+
+                        self.debug_print(f"Loaded distributed module!")
+                        self.send_to_node(node, b"LOADED" + module.id)
+
+                        return True
+
+                elif b"LOADED" == data[:6]:
+                    self.debug_print(f"Successfully offloaded submodule to worker.")
+                    pickled = data[6:]
+                    self.distributed_graph[pickled] = node
+
+                    return True
+
+                return False
+
+            else:
+
+                return True
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
@@ -169,7 +252,9 @@ d            - ensure correct nodes sending data
 
         # Main worker loop
         while not self.terminate_flag.is_set():
-            if self.training and self.port != 5026:  # Port included for master testing without master class
+            if (
+                self.training and self.port != 5026
+            ):  # Port included for master testing without master class
                 self.train_loop()
 
             # Include the following steps:
@@ -180,7 +265,7 @@ d            - ensure correct nodes sending data
             # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
 
             self.reconnect_nodes()
-            time.sleep(3)
+            time.sleep(1)
 
         print("Node stopping...")
         for node in self.connections:
@@ -204,7 +289,9 @@ d            - ensure correct nodes sending data
             for module_id, module in self.modules.items():
                 # Complete any outstanding back propagations
                 if module.backward_queues.empty() is False:
-                    next_node = list(self.nodes.values())[0]  # Placeholder for the connecting node
+                    next_node = list(self.nodes.values())[
+                        0
+                    ]  # Placeholder for the connecting node
 
                     # Grab backwards pass from forward node and our associated input/output from forward pass
                     tag, loss_relay = module.backward_queues.get()
@@ -212,7 +299,9 @@ d            - ensure correct nodes sending data
                     assoc_input, assoc_output = module.intermediates[inter_tag]
 
                     # Continue backwards pass on our section of model
-                    assoc_output.backward(loss_relay, retain_graph=True)  # Do we need retain graph?
+                    assoc_output.backward(
+                        loss_relay, retain_graph=True
+                    )  # Do we need retain graph?
                     dvalues = assoc_input.grad
 
                     tag.append(module_id)
@@ -223,7 +312,9 @@ d            - ensure correct nodes sending data
                     self.optimizers[module_id].step()
 
                 if module.forward_queues.empty() is False:
-                    next_node = list(self.nodes.values())[0]  # Placeholder for the appropriate node
+                    next_node = list(self.nodes.values())[
+                        0
+                    ]  # Placeholder for the appropriate node
 
                     tag, tensor = module.forward_queues.get()
 
@@ -235,7 +326,9 @@ d            - ensure correct nodes sending data
                         kwargs = {}
 
                     # Clear tensor of any previous info, set up for custom backward pass
-                    inp = handle_output(args).clone().detach().requires_grad_()  # This should be done on sending node, not receiving
+                    inp = (
+                        handle_output(args).clone().detach().requires_grad_()
+                    )  # This should be done on sending node, not receiving
                     out = module(inp, **kwargs)
 
                     inter_tag = tuple(tag)
