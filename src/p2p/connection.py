@@ -8,15 +8,15 @@ import base64
 
 
 class Connection(threading.Thread):
-    """
-    Connection thread between two nodes that are able to send/stream data from/to
-    the connected node.
-
-    TODO
-        Send message size before to prepare accordingly.
-        Switch between saving bytes to loading directly based on packet size.
-    """
-    def __init__(self, main_node, sock: socket.socket, host: str, port: int, node_id: str, parent_port: int = None):
+    def __init__(
+        self,
+        main_node,
+        sock: socket.socket,
+        host: str,
+        port: int,
+        node_id: str,
+        parent_port: int = None,
+    ):
         super(Connection, self).__init__()
 
         self.host = host
@@ -33,7 +33,7 @@ class Connection(threading.Thread):
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"SALLAM"
-        self.COMPR_CHAR = 0x02.to_bytes(16, 'big')
+        self.COMPR_CHAR = 0x02.to_bytes(16, "big")
 
     def compress(self, data):
         compressed = data
@@ -61,14 +61,14 @@ class Connection(threading.Thread):
                 data = self.compress(data)
                 if data is not None:
                     for i in range(0, len(data), self.chunk_size):
-                        chunk = data[i:i + self.chunk_size]
+                        chunk = data[i : i + self.chunk_size]
                         self.sock.sendall(chunk + self.COMPR_CHAR)
                     self.sock.sendall(self.EOT_CHAR)
             elif len(data) < self.chunk_size:
                 self.sock.sendall(data + self.EOT_CHAR)
             else:
                 for i in range(0, len(data), self.chunk_size):
-                    chunk = data[i:i + self.chunk_size]
+                    chunk = data[i : i + self.chunk_size]
                     self.sock.sendall(chunk)
 
                 self.sock.sendall(self.EOT_CHAR)
@@ -151,3 +151,11 @@ class Connection(threading.Thread):
         end_time = time.time()
         return end_time - start_time
 
+    """
+    Connection thread between two nodes that are able to send/stream data from/to
+    the connected node.
+
+    TODO
+        Send message size before to prepare accordingly.
+        Switch between saving bytes to loading directly based on packet size.
+    """

@@ -88,7 +88,6 @@ def get_first_layer(model: nn.Module):
 
 def access_module(model: nn.Module, module_id: list):
     assert(len(module_id) > 0)
-
     module = model
 
     for idx in module_id:
@@ -100,3 +99,16 @@ def access_module(model: nn.Module, module_id: list):
 
     return module
 
+  
+def find_module(module: nn.Module, target_name: str, ids: list = []):
+    if not list(module.named_children()):
+        return
+    children = list(module.named_children())
+    for i in range(len(children)):
+        name, values = children[i]
+        new_ids = ids + [i]
+        if name == target_name:
+            return values, new_ids
+        res = find_module(values, target_name, new_ids)
+        if res:
+            return res
