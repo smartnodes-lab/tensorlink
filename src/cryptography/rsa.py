@@ -5,58 +5,54 @@ import base64
 import os
 
 
-def generate_rsa_key_pair() -> None:
-    path = "keys"
+def generate_rsa_key_pair(user) -> None:
+    path = f"keys/{user}"
 
     if not os.path.exists(os.path.join(path, "public_key.pem")):
         if not os.path.exists(path):
-            os.mkdir("keys")
+            os.mkdir(path)
 
         # Save private and public rsa keys to files
         with open(os.path.join(path, "private_key.pem"), "wb") as f:
             key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=2048,
-                backend=default_backend()
+                public_exponent=65537, key_size=2048, backend=default_backend()
             )
 
-            f.write(key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
-            ))
+            f.write(
+                key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            )
 
         with open(os.path.join(path, "public_key.pem"), "wb") as f:
-            f.write(key.public_key().public_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
-            ))
+            f.write(
+                key.public_key().public_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                )
+            )
 
 
-def load_public_key():
-    path = "keys/public_key.pem"
+def load_public_key(user):
+    path = f"keys/{user}/public_key.pem"
     with open(path, "rb") as f:
-        return serialization.load_pem_public_key(
-            f.read(),
-            backend=default_backend()
-        )
+        return serialization.load_pem_public_key(f.read(), backend=default_backend())
 
 
-def load_private_key():
-    path = "keys/private_key.pem"
+def load_private_key(user):
+    path = f"keys/{user}/private_key.pem"
     with open(path, "rb") as f:
         return serialization.load_pem_private_key(
-            f.read(),
-            backend=default_backend(),
-            password=None
+            f.read(), backend=default_backend(), password=None
         )
 
 
 def authenticate_public_key(public_key) -> bool:
     try:
         public_key = serialization.load_pem_public_key(
-            public_key,
-            backend=default_backend()
+            public_key, backend=default_backend()
         )
 
         if public_key.public_numbers().e != 65537:
@@ -74,7 +70,7 @@ def authenticate_public_key(public_key) -> bool:
 def get_public_key_bytes(public_key):
     public_key_bytes = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     return public_key_bytes
 
@@ -82,22 +78,26 @@ def get_public_key_bytes(public_key):
 def get_private_key_bytes(private_key):
     private_key_bytes = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
     )
     return private_key_bytes
 
 
 def get_public_key_obj(public_key_bytes):
-    return serialization.load_pem_public_key(public_key_bytes, backend=default_backend())
+    return serialization.load_pem_public_key(
+        public_key_bytes, backend=default_backend()
+    )
 
 
 def get_private_key_obj(private_key_bytes):
-    return serialization.load_pem_private_key(private_key_bytes, backend=default_backend(), password=None)
+    return serialization.load_pem_private_key(
+        private_key_bytes, backend=default_backend(), password=None
+    )
 
 
-def get_rsa_pub_key(b=False):
-    generate_rsa_key_pair()
-    public_key = load_public_key()
+def get_rsa_pub_key(user, b=False):
+    generate_rsa_key_pair(user)
+    public_key = load_public_key(user)
 
     if b is True:
         return get_public_key_bytes(public_key)
@@ -105,9 +105,9 @@ def get_rsa_pub_key(b=False):
         return public_key
 
 
-def get_rsa_priv_key(b=False):
-    generate_rsa_key_pair()
-    private_key = load_private_key()
+def get_rsa_priv_key(user, b=False):
+    generate_rsa_key_pair(user)
+    private_key = load_private_key(user)
 
     if b is True:
         return get_private_key_bytes(private_key)
@@ -115,10 +115,10 @@ def get_rsa_priv_key(b=False):
         return private_key
 
 
-def encrypt(data, pub_key: bytes = None):
+def encrypt(data, user, pub_key: bytes = None):
     # Encrypt the data using RSA-OAEP
     if pub_key is None:
-        pub_key = get_rsa_pub_key()
+        pub_key = get_rsa_pub_key(user)
     else:
         pub_key = get_public_key_obj(pub_key)
 
@@ -127,23 +127,23 @@ def encrypt(data, pub_key: bytes = None):
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
-            label=None
-        )
+            label=None,
+        ),
     )
 
     return base64.b64encode(encrypted_data)
 
 
-def decrypt(data):
-    private_key = get_rsa_priv_key()
+def decrypt(data, user):
+    private_key = get_rsa_priv_key(user)
 
     decrypted_data = private_key.decrypt(
         base64.b64decode(data),
         padding.OAEP(
             mgf=padding.MGF1(algorithm=hashes.SHA256()),
             algorithm=hashes.SHA256(),
-            label=None
-        )
+            label=None,
+        ),
     )
 
     return decrypted_data

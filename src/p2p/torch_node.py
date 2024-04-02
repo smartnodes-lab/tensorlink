@@ -17,7 +17,6 @@ class TorchNode(SmartDHTNode):
         wallet_address: str,
         debug: bool = False,
         max_connections: int = 0,
-        callback=None,
     ):
         super(TorchNode, self).__init__(
             host,
@@ -25,7 +24,6 @@ class TorchNode(SmartDHTNode):
             wallet_address,
             debug=debug,
             max_connections=max_connections,
-            callback=callback,
         )
         # State info
         self.available_memory = get_gpu_memory()
