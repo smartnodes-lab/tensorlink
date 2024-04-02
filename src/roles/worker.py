@@ -37,7 +37,6 @@ class Worker(TorchNode):
             wallet_address,
             debug=debug,
             max_connections=max_connections,
-            callback=self.stream_data,
         )
 
         # Model training parameters

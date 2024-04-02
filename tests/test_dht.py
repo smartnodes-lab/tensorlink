@@ -15,6 +15,7 @@ if __name__ == "__main__":
         debug=True,
         public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
     )
+
     worker2 = SmartDHTNode(
         host=ip,
         port=port + 1,
@@ -37,10 +38,9 @@ if __name__ == "__main__":
 
     time.sleep(12)
     key = hashlib.sha256(b"a").hexdigest().encode()
-    worker2.store_key_value_pair(key, "b")
+    worker2.store_key_value_pair(key, "TEST VALUE")
 
-    worker1.query_routing_table(key)
-
+    print(worker1.query_routing_table(key))
     print([(con.host, con.port) for con in worker1.connections])
     print([(con.host, con.port) for con in worker2.connections])
     # print([(con.host, con.port) for con in worker3.connections])

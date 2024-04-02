@@ -3,13 +3,7 @@ from src.cryptography.rsa import *
 from src.p2p.connection import Connection
 from src.p2p.node import Node
 
-from substrateinterface import SubstrateInterface
-from substrateinterface.contracts import (
-    ContractCode,
-    ContractInstance,
-    ContractMetadata,
-)
-from substrateinterface.exceptions import SubstrateRequestException
+from web3 import Web3
 
 import threading
 import hashlib
@@ -17,11 +11,18 @@ import random
 import socket
 import pickle
 import time
+import json
 import os
 
 
-METADATA = "./src/assets/smartnodes.json"
-CONTRACT = "5D37KYdd3Ptd8CfjKxtN3rGqU6oZQQeiGfTLfF2VGrTQJfyN"
+RPC = "http://127.0.0.1:7545"
+with open("./src/assets/SmartNodes.json", "r") as f:
+    METADATA = json.load(f)
+
+ABI = METADATA["abi"]
+CONTRACT_ADDRESS = "0x03c44D2dD0f8323369d27C708048cb6658Bb5892"
+TEST_ADDRESS = "0x7458d1427aaE6290d6259de772E451b061D4F5f9"
+TEST_KEY = "0x97c66bb65bf5ee56e07c1547d8a8cf86a70412a3052dd42581a86faa61f3ec19"
 
 
 def hash_key(key: bytes, number=False):
@@ -69,35 +70,30 @@ class SmartDHTNode(Node):
         host: str,
         port: int,
         public_key: str,
-        url: str = "wss://ws.test.azero.dev",
-        contract: str = CONTRACT,
+        url: str = RPC,
+        contract: str = CONTRACT_ADDRESS,
         debug: bool = False,
         max_connections: int = 0,
-        callback=None,
     ):
         super(SmartDHTNode, self).__init__(
             host, port, debug, max_connections, self.stream_data
         )
 
         # Smart contract parameters
-        self.chain = SubstrateInterface(url=url)
+        self.chain = Web3(Web3.HTTPProvider(url))
         self.keypair = load_substrate_keypair(public_key, "      ")
-        self.contract_address = contract
+        self.contract_address = Web3.to_checksum_address(contract)
         self.contract = None
+        self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
         # Grab the SmartNode contract
-        contract_info = self.chain.query(
-            "Contracts", "ContractInfoOf", [self.contract_address]
-        )
-        if contract_info.value:
-            self.contract = ContractInstance.create_from_address(
-                substrate=self.chain,
-                contract_address=self.contract_address,
-                metadata_file=METADATA,
+        try:
+            self.contract = self.chain.eth.contract(
+                address=self.contract_address, abi=ABI
             )
 
-        else:
-            self.debug_print("Could not retrieve smart contract.")
+        except Exception as e:
+            self.debug_print(f"Could not retrieve smart contract: {e}")
             self.terminate_flag.set()
 
         # DHT Parameters
@@ -106,8 +102,6 @@ class SmartDHTNode(Node):
         self.routing_table = {}
         self.buckets = [Bucket(self.bucket_size) for _ in range(256)]
 
-        # self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
-        self.key_hash = hashlib.sha256(bytes(random.randint(0, 10000))).hexdigest()
         self.updater_flag = threading.Event()
 
     def stream_data(self, data: bytes, node):
@@ -205,67 +199,65 @@ class SmartDHTNode(Node):
 
         # Authenticate incoming node's id is valid key
         if authenticate_public_key(connected_node_id) is True:
-            # # Further confirmation of user key via smart contract
-            # try:
-            #     verified_public_key = self.contract.read(
-            #         keypair=self.keypair, method="check_worker", args={"pub_key": connected_node_id}
-            #     )
-            #
-            #     is_verified = verified_public_key.contract_result_data.value["Ok"]
-            #
-            #     if is_verified:
-            id_bytes = connected_node_id
-            start_time = time.time()
+            # Further confirmation of user key via smart contract
+            try:
+                verified_public_key = self.contract.functions.validatorIdByHash(
+                    hashlib.sha256(connected_node_id).hexdigest()
+                ).call()
 
-            # Encrypt random number with node's key to confirm identity
-            connection.send(encrypt(message.encode(), id_bytes))
+                if verified_public_key > 0:
+                    id_bytes = connected_node_id
+                    start_time = time.time()
 
-            # Await response
-            response = connection.recv(4096)
-            latency = time.time() - start_time
-            response, parent_port, node_id = response.split(b",")
+                    # Encrypt random number with node's key to confirm identity
+                    connection.send(encrypt(message.encode(), self.port, id_bytes))
 
-            if response.decode() == randn:
-                thread_client = self.create_connection(
-                    connection,
-                    client_address[0],
-                    client_address[1],
-                    node_id,
-                    int(parent_port),
-                )
-                thread_client.start()
-                thread_client.latency = latency
+                    # Await response
+                    response = connection.recv(4096)
+                    latency = time.time() - start_time
+                    response, parent_port, node_id = response.split(b",")
 
-                for node in self.connections:
-                    if (
-                        node.host == client_address[0]
-                        and node.port == port
-                        or node.parent_port == port
-                    ):
-                        self.debug_print(
-                            f"connect_with_node: already connected with node: {node.node_id}"
+                    if response.decode() == randn:
+                        thread_client = self.create_connection(
+                            connection,
+                            client_address[0],
+                            client_address[1],
+                            node_id,
+                            int(parent_port),
                         )
-                        thread_client.stop()
-                        break
+                        thread_client.start()
+                        thread_client.latency = latency
 
-                if not thread_client.terminate_flag.is_set():
-                    self.inbound.append(thread_client)
-                    self.connect_dht_node(
-                        thread_client.host, thread_client.parent_port, connected=True
+                        for node in self.connections:
+                            if (
+                                node.host == client_address[0]
+                                and node.port == port
+                                or node.parent_port == port
+                            ):
+                                self.debug_print(
+                                    f"connect_with_node: already connected with node: {node.node_id}"
+                                )
+                                thread_client.stop()
+                                break
+
+                        if not thread_client.terminate_flag.is_set():
+                            self.inbound.append(thread_client)
+                            self.connect_dht_node(
+                                thread_client.host,
+                                thread_client.parent_port,
+                                connected=True,
+                            )
+                else:
+                    self.debug_print(
+                        f"SmartNode: Connection refused, node not registered!"
                     )
+                    connection.close()
 
-            else:
-                self.debug_print("node: connection refused, invalid ID proof!")
-                connection.close()
-
-            #     else:
-            #         self.debug_print("User not listed on contract.")
-            #
-            # except SubstrateRequestException as e:
-            #     self.debug_print(f"Failed to verify user public key: {e}")
+            except Exception as e:
+                self.debug_print(f"Contract query error: {e}")
 
         else:
-            self.debug_print("node: connection refused, invalid ID proof!")
+            self.debug_print("SmartNode: connection refused, invalid proof!")
             connection.close()
 
     def listen(self):
@@ -387,13 +379,26 @@ class SmartDHTNode(Node):
 
         # If we could not retrieve the stored value, route to nearest node
         if isinstance(closest_node[1], Connection):
-            start_time = time.time()
-            self.request_value(key_hash, closest_node[1])
+            # If the query matches the node id, return node info
+            if closest_node[0] == key_hash:
+                node_info = {
+                    "host": closest_node[1].host,
+                    "port": closest_node[1].parent_port,
+                }
+                return node_info
 
-            while key_hash not in self.routing_table.keys():
-                if time.time() - start_time > 5:  # Some arbitrary timeout time for now
-                    return None
+            # If the query doesn't match node id, route request thru nearest node
+            else:
+                start_time = time.time()
+                self.request_value(key_hash, closest_node[1])
 
+                while key_hash not in self.routing_table.keys():
+                    if (
+                        time.time() - start_time > 5
+                    ):  # Some arbitrary timeout time for now
+                        return None
+
+        # In the case we have the target query value that isn't a node, return the value
         return self.routing_table[key_hash]
 
     def request_value(self, key: bytes, node: Connection):
@@ -433,7 +438,7 @@ class SmartDHTNode(Node):
             target_node = self.query_routing_table(key)
             self.store_key_value_pair_with_acknowledgment(key, value, target_node)
 
-        # # Replicate the data to the next closest nodes
+        # Replicate the data to the next closest nodes
         # for i in range(self.replication_factor):
         #     next_node = self.get_next_node(key, node)
         #     if next_node:
@@ -456,6 +461,31 @@ class SmartDHTNode(Node):
             self.debug_print(f"Key '{key}' deleted from DHT.")
         else:
             self.debug_print(f"Key '{key}' not found in DHT.")
+
+    # def bootstrap(self):
+    #     num_validators = self.contract.functions.getValidatorIdCount().call()
+    #     sample_size = min(num_validators, 10)  # Adjust sample size as needed
+    #
+    #     # Randomly select sample_size validators
+    #     random_sample = random.sample(range(1, num_validators + 1), sample_size)
+    #
+    #     for validatorId in random_sample:
+    #         # Get validator information from smart contract
+    #         _, address, id_hash, reputation, active = (
+    #             self.contract.functions.validators(validatorId).call()
+    #         )
+    #
+    #         connection_info = self.query_routing_table(id_hash)
+    #
+    #         # Connect to the validator's node and exchange information
+    #         connected = self.connect_dht_node(
+    #             validator_info["ip"], validator_info["port"]
+    #         )
+    #         if connected:
+    #             # Store node ID and connection information
+    #             self.store_key_value_pair(
+    #                 validator_info["node_id"], validator_info["connection_info"]
+    #             )
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         # memory = self.available_memory
