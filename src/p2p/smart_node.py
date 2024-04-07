@@ -20,9 +20,7 @@ with open("./src/assets/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
 ABI = METADATA["abi"]
-CONTRACT_ADDRESS = "0x03c44D2dD0f8323369d27C708048cb6658Bb5892"
-TEST_ADDRESS = "0x7458d1427aaE6290d6259de772E451b061D4F5f9"
-TEST_KEY = "0x97c66bb65bf5ee56e07c1547d8a8cf86a70412a3052dd42581a86faa61f3ec19"
+CONTRACT_ADDRESS = "0x576511A2aC20e732122F7a98D9892214F1e0AAF1"
 
 
 def hash_key(key: bytes, number=False):
@@ -43,9 +41,10 @@ def calculate_xor(key_hash, node_id):
 
 
 class Bucket:
-    def __init__(self, max_values):
+    def __init__(self, distance_from_key, max_values):
         self.values = []
-        self.max_values = max_values
+        self.distance_from_key = distance_from_key
+        self.max_values = max_values * (2**distance_from_key)
 
     def is_full(self):
         return len(self.values) >= self.max_values
@@ -74,6 +73,7 @@ class SmartDHTNode(Node):
         contract: str = CONTRACT_ADDRESS,
         debug: bool = False,
         max_connections: int = 0,
+        dht_callback=None,
     ):
         super(SmartDHTNode, self).__init__(
             host, port, debug, max_connections, self.stream_data
@@ -100,7 +100,11 @@ class SmartDHTNode(Node):
         self.replication_factor = 3
         self.bucket_size = 2
         self.routing_table = {}
-        self.buckets = [Bucket(self.bucket_size) for _ in range(256)]
+        self.jobs = []
+        self.workers = []
+        self.validators = []
+        self.buckets = [Bucket(d, self.bucket_size) for d in range(256)]
+        self.dht_callback = dht_callback
 
         self.updater_flag = threading.Event()
 
@@ -147,21 +151,9 @@ class SmartDHTNode(Node):
                 key = pickle.loads(data[6:])
                 self.delete(key)
 
-            elif b"REQUESTS" == data:
-                self.debug_print(f"RECEIVED STATS REQUEST")
-                self.handle_statistics_request(node)
-
             elif b"REQUESTP" == data:
                 self.debug_print(f"RECEIVED PEER REQUEST")
                 self.handle_peer_request(node)
-
-            elif b"RESPONSES" == data[:9]:
-                self.debug_print(f"RECEIVED NODE STATS")
-
-                pickled = pickle.loads(data[9:])
-                node_id, stats = pickled
-                stats["connection"] = node
-                self.nodes[node_id] = stats
 
             elif b"RESPONSEP" == data[:9]:
                 self.debug_print(f"RECEIVED PEERS")
@@ -296,10 +288,6 @@ class SmartDHTNode(Node):
         listener = threading.Thread(target=self.listen, daemon=True)
         listener.start()
 
-        # Thread for periodic worker statistics updates
-        stats_updater = threading.Thread(target=self.update_worker_stats, daemon=True)
-        stats_updater.start()
-
         # Main worker loop
         while not self.terminate_flag.is_set():
             self.reconnect_nodes()
@@ -318,14 +306,6 @@ class SmartDHTNode(Node):
         self.sock.close()
         print("Node stopped")
 
-    # def bootstrap(self, seeds=None):
-    #     """
-    #     Connect to initial set of validator nodes on the network. Select random set
-    #      of validators or workers from the smart contract if seeds=None.
-    #     """
-    #     if seeds is None:
-    #         self.c
-    #
     # def get_jobs(self):
     #     # Confirm job details with smart contract, receive initial details from a node?
     #     # self.chain.query("")
@@ -422,6 +402,9 @@ class SmartDHTNode(Node):
                     break
 
             self.store_key_value_pair(node.node_id, node)
+            return True
+
+        return False
 
     def store_key_value_pair(self, key: bytes, value):
         key_int = int(key, 16)
@@ -431,6 +414,14 @@ class SmartDHTNode(Node):
         if not bucket.is_full():
             self.routing_table[key] = value
             bucket.add_node(self.routing_table[key])
+            if hasattr(value, "role"):
+                if value.role == "worker":
+                    self.workers.append(key)
+                elif value.role == "validator":
+                    self.validators.append(key)
+                elif value.role == "job":
+                    self.jobs.append(key)
+
             return True
 
         else:
@@ -462,48 +453,26 @@ class SmartDHTNode(Node):
         else:
             self.debug_print(f"Key '{key}' not found in DHT.")
 
-    # def bootstrap(self):
-    #     num_validators = self.contract.functions.getValidatorIdCount().call()
-    #     sample_size = min(num_validators, 10)  # Adjust sample size as needed
-    #
-    #     # Randomly select sample_size validators
-    #     random_sample = random.sample(range(1, num_validators + 1), sample_size)
-    #
-    #     for validatorId in random_sample:
-    #         # Get validator information from smart contract
-    #         _, address, id_hash, reputation, active = (
-    #             self.contract.functions.validators(validatorId).call()
-    #         )
-    #
-    #         connection_info = self.query_routing_table(id_hash)
-    #
-    #         # Connect to the validator's node and exchange information
-    #         connected = self.connect_dht_node(
-    #             validator_info["ip"], validator_info["port"]
-    #         )
-    #         if connected:
-    #             # Store node ID and connection information
-    #             self.store_key_value_pair(
-    #                 validator_info["node_id"], validator_info["connection_info"]
-    #             )
+    def bootstrap(self):
+        num_validators = self.contract.functions.getValidatorIdCount().call()
+        sample_size = min(num_validators, 10)  # Adjust sample size as needed
 
-    def handle_statistics_request(self, callee, additional_context: dict = None):
-        # memory = self.available_memory
-        memory = 1e9
+        # Randomly select sample_size validators
+        random_sample = random.sample(range(1, num_validators + 1), sample_size)
 
-        stats = {
-            "id": self.rsa_pub_key + self.port.to_bytes(4, "big"),
-            "memory": memory,
-        }  # , "state": self.state}
+        for validatorId in random_sample:
+            # Get validator information from smart contract
+            _, address, id_hash, reputation, active = (
+                self.contract.functions.validators(validatorId).call()
+            )
 
-        if additional_context is not None:
-            for k, v in additional_context.items():
-                if k not in stats.keys():
-                    stats[k] = v
+            host, port = self.query_routing_table(id_hash)
 
-        stats_bytes = pickle.dumps((self.key_hash, stats))
-        stats_bytes = b"RESPONSE" + stats_bytes
-        self.send_to_node(callee, stats_bytes)
+            # Connect to the validator's node and exchange information
+            connected = self.connect_dht_node(host, port)
+
+            # Check to see if connected, if not we can try another random node
+            # if connected:
 
     def handle_peer_request(self, requesting_node):
         """
@@ -512,30 +481,3 @@ class SmartDHTNode(Node):
         peers = [(node.host, node.parent_port) for node in self.connections]
         message = b"RESPONSEP" + pickle.dumps(peers)
         self.send_to_node(requesting_node, message)
-
-    # Iterate connected nodes and request their current state
-    def update_worker_stats(self):
-        while not self.updater_flag.is_set():
-
-            for node in self.connections:
-                # Beforehand, check the last time the worker has updated (self.prune_workers?)
-                # self.request_statistics(node)
-                self.request_peers()
-                time.sleep(1)
-
-            # if self.nodes:
-            #     self.updater_flag.set()
-
-            time.sleep(10)
-
-    def request_statistics(self, worker_node):
-        message = b"REQUESTS"
-        self.send_to_node(worker_node, message)
-
-    def request_peers(self):
-        """
-        Request neighboring nodes to send their peers.
-        """
-        for node in self.connections:
-            message = b"REQUESTP"
-            self.send_to_node(node, message)

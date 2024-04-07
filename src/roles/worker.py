@@ -1,3 +1,5 @@
+import hashlib
+
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
@@ -38,10 +40,7 @@ class Worker(TorchNode):
             debug=debug,
             max_connections=max_connections,
         )
-
-        # Model training parameters
-        self.training = False
-        self.master = False
+        self.state = 1
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
@@ -98,6 +97,7 @@ class Worker(TorchNode):
 
                     # Module-specific handling (ie for OffloadedModule / nn.Module)
                     elif self.training and len(self.modules) > 0:
+                        print(hashlib.sha256(data).hexdigest())
                         (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
                         self.modules[module_id].forward_queues.put(
                             ([n_iter, n_micro], tensor)
@@ -173,6 +173,21 @@ class Worker(TorchNode):
 
                         return True
 
+                elif b"JOB" == data[:3]:
+                    try:
+                        # Accept job request from validator if we can handle it
+                        module_size = int.from_bytes(data[3:], byteorder="big")
+                        if self.available_memory > module_size:
+                            # Respond to validator that we can accept the job
+                            data = b"ACCEPTJOB"
+                        else:
+                            data = b"DECLINEJOB"
+
+                        self.send_to_node(node, data)
+
+                    except Exception as e:
+                        raise e
+
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
@@ -239,7 +254,7 @@ class Worker(TorchNode):
         listener.start()
 
         # Thread for periodic worker statistics updates
-        stats_updater = threading.Thread(target=self.update_worker_stats, daemon=True)
+        stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
         stats_updater.start()
 
         # time.sleep(5)
@@ -374,13 +389,3 @@ class Worker(TorchNode):
     #     self.optimizer = torch.optim.Adam
     #     self.training = True
     #     self.distribute_model(model)  # Add master vs worker functionality
-
-    # When a worker receives REQUEST from another worker, it must respond with its current state
-    # def broadcast_statistics(self):
-    #     worker_nodes = []
-    #
-    #     for i in range(5):  # range(len(self.connections)):
-    #         worker_nodes.append({"id": str(uuid.uuid4()), "memory": 0.5e9})
-    #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
-    #
-    #     return worker_nodes

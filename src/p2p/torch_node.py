@@ -4,6 +4,7 @@ from src.ml.model_analyzer import get_gpu_memory
 
 import torch.nn as nn
 import threading
+import random
 import hashlib
 import pickle
 import time
@@ -29,8 +30,13 @@ class TorchNode(SmartDHTNode):
         self.available_memory = get_gpu_memory()
         self.state = 0
 
+        # Model training parameters
+        self.training = False
+        self.master = False
+
         # Stores connections and their context
         self.nodes = {}
+        self.node_stats = {}
         self.distributed_graph = {}
         self.updater_flag = threading.Event()
 
@@ -38,23 +44,18 @@ class TorchNode(SmartDHTNode):
 
     def stream_data(self, data: bytes, node: Connection) -> bool:
         try:
-            if b"REQUEST" == data[:7]:
+            if b"REQUESTS" == data[:8]:
                 self.debug_print(f"RECEIVED STATS REQUEST")
-                self.broadcast_statistics(node)
-
+                self.handle_statistics_request(node)
                 return True
 
             elif b"RESPONSE" == data[:8]:
-                self.debug_print(f"RECEIVED NODE STATS")
+                self.debug_print(f"RECEIVED STATS")
+                stats = pickle.loads(data[8:])
+                node_hash = stats["id"]
+                self.node_stats[node_hash] = stats
 
-                pickled = pickle.loads(data[8:])
-                node_id, stats = pickled
-                stats["connection"] = node
-                self.nodes[node_id] = stats
-
-                return True
-
-            return False
+                return False
 
         except Exception as e:
             self.debug_print(f"torch_node->stream_data: {e}")
@@ -70,6 +71,7 @@ class TorchNode(SmartDHTNode):
 
     def send_forward(self, node: Connection, args, context):
         pickled_data = b"FORWARD" + pickle.dumps((context, args))
+        print(hashlib.sha256(pickled_data).hexdigest())
         self.send_to_node(node, pickled_data)
 
     def send_backward(self, node: Connection, args, context):
@@ -104,9 +106,9 @@ class TorchNode(SmartDHTNode):
         self.send_to_node(node, module_bytes)
         time.sleep(1)
 
-    def send_statistics_request(self, worker_node):
-        message = b"REQUEST"
-        self.send_to_node(worker_node, message)
+    def send_statistics_request(self, node):
+        message = b"REQUESTS"
+        self.send_to_node(node, message)
 
     def broadcast_statistics(self, callee, additional_context: dict = None):
         memory = self.available_memory
@@ -140,6 +142,63 @@ class TorchNode(SmartDHTNode):
 
             time.sleep(5)
 
+    # Iterate connected nodes and request their current state
+    def request_worker_stats(self):
+        while not self.updater_flag.is_set():
+
+            for node in self.connections:
+                # if hasattr(node, "")
+                # Beforehand, check the last time the worker has updated (self.prune_workers?)
+                self.send_statistics_request(node)
+                time.sleep(1)
+
+            # if self.nodes:
+            #     self.updater_flag.set()
+
+            time.sleep(5)
+
+    def handle_statistics_request(self, callee, additional_context: dict = None):
+        # memory = self.available_memory
+        memory = 1e9
+
+        stats = {
+            "id": self.key_hash,
+            "memory": memory,
+            "role": self.state,
+            "training": self.training,
+            #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
+        }
+
+        if additional_context is not None:
+            for k, v in additional_context.items():
+                if k not in stats.keys():
+                    stats[k] = v
+
+        stats_bytes = pickle.dumps(stats)
+        stats_bytes = b"RESPONSE" + stats_bytes
+        self.send_to_node(callee, stats_bytes)
+
     def select_candidate_worker(self):
         candidate_node = max(self.nodes.values(), key=lambda x: x["memory"])
         return candidate_node
+
+    def bootstrap(self):
+        num_validators = self.contract.functions.getValidatorIdCount().call()
+        sample_size = min(num_validators, 10)  # Adjust sample size as needed
+
+        # Randomly select sample_size validators
+        random_sample = random.sample(range(1, num_validators + 1), sample_size)
+
+        for validatorId in random_sample:
+            # Get validator information from smart contract
+            _, address, id_hash, reputation, active = (
+                self.contract.functions.validators(validatorId).call()
+            )
+
+            host, port = self.query_routing_table(id_hash)
+
+            # Connect to the validator's node and exchange information
+            connected = self.connect_dht_node(host, port)
+
+            # Check to see if connected, if not we can try another random node
+            # if connected:

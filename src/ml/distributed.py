@@ -14,6 +14,7 @@ import torch
 import queue
 import time
 
+
 MAX_WAIT_TIME = 3
 THREAD_STORAGE = threading.local()
 
