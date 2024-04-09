@@ -15,13 +15,15 @@ class User(TorchNode):
         debug: bool = False,
         max_connections: int = 0,
     ):
-        super(TorchNode, self).__init__(
+        super(User, self).__init__(
             host,
             port,
             wallet_address,
             debug=debug,
             max_connections=max_connections,
         )
+
+        self.role = b"U"
 
     def request_peers(self):
         pass
@@ -42,3 +44,5 @@ class User(TorchNode):
             ],  # Trainer sends list of model memory requirements for each
             # submodule
         }
+
+        self.send_to_node()

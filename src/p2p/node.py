@@ -111,7 +111,7 @@ class Node(threading.Thread):
             start_time = time.time()
 
             # ID exchange
-            sock.send(self.rsa_pub_key)
+            sock.send(self.role + self.rsa_pub_key)
             verification = sock.recv(4096)
             latency = time.time() - start_time
             proof = decrypt(verification, self.port)

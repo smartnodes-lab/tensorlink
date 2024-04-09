@@ -40,7 +40,7 @@ class Worker(TorchNode):
             debug=debug,
             max_connections=max_connections,
         )
-        self.state = 1
+        self.role = b"W"
 
         # For storing forward, backward, and intermediate tensors
         # Should be switched to some other data structure that relates to specific epochs
@@ -176,10 +176,11 @@ class Worker(TorchNode):
                 elif b"JOB" == data[:3]:
                     try:
                         # Accept job request from validator if we can handle it
-                        module_size = int.from_bytes(data[3:], byteorder="big")
+                        module_id, module_size = pickle.loads(data[3:])
+
                         if self.available_memory > module_size:
                             # Respond to validator that we can accept the job
-                            data = b"ACCEPTJOB"
+                            data = b"ACCEPTJOB" + pickle.dumps(module_id)
                         else:
                             data = b"DECLINEJOB"
 

@@ -37,6 +37,7 @@ class TorchNode(SmartDHTNode):
         # Stores connections and their context
         self.nodes = {}
         self.node_stats = {}
+        self.node_requests = {}
         self.distributed_graph = {}
         self.updater_flag = threading.Event()
 
@@ -44,18 +45,27 @@ class TorchNode(SmartDHTNode):
 
     def stream_data(self, data: bytes, node: Connection) -> bool:
         try:
-            if b"REQUESTS" == data[:8]:
-                self.debug_print(f"RECEIVED STATS REQUEST")
-                self.handle_statistics_request(node)
-                return True
+            handled = super().stream_data(data, node)
 
-            elif b"RESPONSE" == data[:8]:
-                self.debug_print(f"RECEIVED STATS")
-                stats = pickle.loads(data[8:])
-                node_hash = stats["id"]
-                self.node_stats[node_hash] = stats
+            if not handled:
+
+                if b"REQUESTS" == data[:8]:
+                    self.debug_print(f"RECEIVED STATS REQUEST")
+                    self.handle_statistics_request(node)
+                    return True
+
+                elif b"RESPONSE" == data[:8]:
+                    self.debug_print(f"RECEIVED STATS")
+                    stats = pickle.loads(data[8:])
+                    node_hash = stats["id"]
+                    self.node_stats[node_hash] = stats
+                    return True
 
                 return False
+
+            else:
+
+                return True
 
         except Exception as e:
             self.debug_print(f"torch_node->stream_data: {e}")
@@ -183,22 +193,27 @@ class TorchNode(SmartDHTNode):
         return candidate_node
 
     def bootstrap(self):
-        num_validators = self.contract.functions.getValidatorIdCount().call()
+        num_validators = self.contract.functions.getValidatorIdCounter().call() - 1
         sample_size = min(num_validators, 10)  # Adjust sample size as needed
 
         # Randomly select sample_size validators
         random_sample = random.sample(range(1, num_validators + 1), sample_size)
 
         for validatorId in random_sample:
+
             # Get validator information from smart contract
             _, address, id_hash, reputation, active = (
                 self.contract.functions.validators(validatorId).call()
             )
 
-            host, port = self.query_routing_table(id_hash)
+            node_info = self.query_routing_table(id_hash.encode())
+
+            if node_info is None:
+                continue
 
             # Connect to the validator's node and exchange information
-            connected = self.connect_dht_node(host, port)
+            connected = self.connect_dht_node(node_info["host"], node_info["port"])
 
             # Check to see if connected, if not we can try another random node
-            # if connected:
+            if not connected:
+                self.delete(validatorId)

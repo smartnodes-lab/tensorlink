@@ -100,6 +100,7 @@ class SmartDHTNode(Node):
         self.replication_factor = 3
         self.bucket_size = 2
         self.routing_table = {}
+        self.nodes = {}
         self.jobs = []
         self.workers = []
         self.validators = []
@@ -144,7 +145,9 @@ class SmartDHTNode(Node):
             elif b"ROUTEREP" == data[:8]:
                 self.debug_print(f"RECEIVED ROUTE RESPONSE")
                 key, value = pickle.loads(data[8:])
-                self.routing_table[key] = value
+
+                if value is not None:
+                    self.routing_table[key] = value
 
             elif b"DELETE" == data[:6]:
                 # Delete the key-value pair from the DHT
@@ -183,70 +186,81 @@ class SmartDHTNode(Node):
             verification of connecting user
         """
         connected_node_id = connection.recv(4096)
+        role, connected_node_id = connected_node_id[0:1], connected_node_id[1:]
 
         # Generate random number to confirm with incoming node
         randn = str(random.random())
         port = random.randint(5000, 65000)
         message = f"{randn},{port},{self.key_hash}"
 
-        # Authenticate incoming node's id is valid key
+        # Authenticate validator node's id is valid key
         if authenticate_public_key(connected_node_id) is True:
-            # Further confirmation of user key via smart contract
-            try:
-                verified_public_key = self.contract.functions.validatorIdByHash(
-                    hashlib.sha256(connected_node_id).hexdigest()
-                ).call()
+            start_time = time.time()
 
-                if verified_public_key > 0:
-                    id_bytes = connected_node_id
-                    start_time = time.time()
+            if role == b"V":
+                # Further confirmation of validator key via smart contract
+                try:
+                    verified_public_key = self.contract.functions.validatorIdByHash(
+                        hashlib.sha256(connected_node_id).hexdigest()
+                    ).call()
 
-                    # Encrypt random number with node's key to confirm identity
-                    connection.send(encrypt(message.encode(), self.port, id_bytes))
+                    if verified_public_key < 1:
+                        return
 
-                    # Await response
-                    response = connection.recv(4096)
-                    latency = time.time() - start_time
-                    response, parent_port, node_id = response.split(b",")
+                except Exception as e:
+                    self.debug_print(f"Contract query error: {e}")
 
-                    if response.decode() == randn:
-                        thread_client = self.create_connection(
-                            connection,
-                            client_address[0],
-                            client_address[1],
-                            node_id,
-                            int(parent_port),
+            elif role == b"U":
+                # Some check of the DHT for any user reputation / blacklisted users
+                pass
+
+            elif role == b"W":
+                # Some check of the DHT for any user reputation / blacklisted users
+                pass
+
+            # Encrypt random number with node's key to confirm identity
+            connection.send(encrypt(message.encode(), self.port, connected_node_id))
+
+            # Await response
+            response = connection.recv(4096)
+            latency = time.time() - start_time
+            response, parent_port, node_id = response.split(b",")
+
+            if response.decode() == randn:
+                thread_client = self.create_connection(
+                    connection,
+                    client_address[0],
+                    client_address[1],
+                    node_id,
+                    int(parent_port),
+                )
+                thread_client.start()
+                thread_client.latency = latency
+
+                for node in self.connections:
+                    if (
+                        node.host == client_address[0]
+                        and node.port == port
+                        or node.parent_port == port
+                    ):
+                        self.debug_print(
+                            f"connect_with_node: already connected with node: {node.node_id}"
                         )
-                        thread_client.start()
-                        thread_client.latency = latency
+                        thread_client.stop()
+                        break
 
-                        for node in self.connections:
-                            if (
-                                node.host == client_address[0]
-                                and node.port == port
-                                or node.parent_port == port
-                            ):
-                                self.debug_print(
-                                    f"connect_with_node: already connected with node: {node.node_id}"
-                                )
-                                thread_client.stop()
-                                break
-
-                        if not thread_client.terminate_flag.is_set():
-                            self.inbound.append(thread_client)
-                            self.connect_dht_node(
-                                thread_client.host,
-                                thread_client.parent_port,
-                                connected=True,
-                            )
-                else:
-                    self.debug_print(
-                        f"SmartNode: Connection refused, node not registered!"
+                if not thread_client.terminate_flag.is_set():
+                    self.inbound.append(thread_client)
+                    self.connect_dht_node(
+                        thread_client.host,
+                        thread_client.parent_port,
+                        connected=True,
                     )
-                    connection.close()
-
-            except Exception as e:
-                self.debug_print(f"Contract query error: {e}")
+            else:
+                self.debug_print(
+                    f"SmartNode: Connection refused, validator not registered!"
+                )
+                connection.close()
 
         else:
             self.debug_print("SmartNode: connection refused, invalid proof!")
@@ -343,7 +357,7 @@ class SmartDHTNode(Node):
 
         return bucket_index
 
-    def query_routing_table(self, key_hash):
+    def query_routing_table(self, key_hash, ids_to_exclude=[]):
         """
         Get the node responsible for, or closest to a given key.
         """
@@ -354,29 +368,36 @@ class SmartDHTNode(Node):
         for node_hash, node in self.routing_table.items():
             distance = calculate_xor(key_hash, node_hash)
             if distance < closest_distance:
-                closest_node = (node_hash, node)
-                closest_distance = distance
+                if not ids_to_exclude or node_hash not in ids_to_exclude:
+                    closest_node = (node_hash, node)
+                    closest_distance = distance
 
         # If we could not retrieve the stored value, route to nearest node
-        if isinstance(closest_node[1], Connection):
+        if isinstance(closest_node[1], dict):
             # If the query matches the node id, return node info
             if closest_node[0] == key_hash:
-                node_info = {
-                    "host": closest_node[1].host,
-                    "port": closest_node[1].parent_port,
-                }
-                return node_info
+                return closest_node[1]
 
             # If the query doesn't match node id, route request thru nearest node
             else:
                 start_time = time.time()
-                self.request_value(key_hash, closest_node[1])
+                node = self.nodes[closest_node[0]]
+                self.request_value(key_hash, node)
 
                 while key_hash not in self.routing_table.keys():
                     if (
-                        time.time() - start_time > 5
+                        time.time() - start_time > 3
                     ):  # Some arbitrary timeout time for now
-                        return None
+                        if len(ids_to_exclude) >= 1:
+                            return None
+
+                        ids_to_exclude.append(closest_node[0])
+                        return self.query_routing_table(
+                            key_hash,
+                            ids_to_exclude,
+                        )
+        else:
+            pass
 
         # In the case we have the target query value that isn't a node, return the value
         return self.routing_table[key_hash]
@@ -397,11 +418,17 @@ class SmartDHTNode(Node):
         if connected:
             node = None
             for n in self.connections:
-                if (n.host, n.parent_port) == (host, port):
+                if (n.host, n.parent_port) == (host, port) or (n.host, n.port) == (
+                    host,
+                    port,
+                ):
                     node = n
                     break
 
-            self.store_key_value_pair(node.node_id, node)
+            self.store_key_value_pair(
+                node.node_id, {"host": node.host, "port": node.port}
+            )
+            self.nodes[node.node_id] = node
             return True
 
         return False
