@@ -33,8 +33,7 @@ class Node(threading.Thread):
         self.rsa_pub_key = get_rsa_pub_key(self.port, True)
 
         # Node & Connection parameters
-        self.inbound = []
-        self.outbound = []
+        self.connections = []
         self.reconnect = []
 
         self.terminate_flag = threading.Event()
@@ -43,10 +42,6 @@ class Node(threading.Thread):
 
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
-
-    @property
-    def connections(self):
-        return self.inbound + self.outbound
 
     def debug_print(self, message):
         if self.debug:
@@ -86,10 +81,12 @@ class Node(threading.Thread):
     def connect_with_node(
         self, host: str, port: int, reconnect: bool = False, our_node_id=""
     ) -> bool:
+        # Check if trying to connect to self
         if host == self.host and port == self.port:
             self.debug_print("connect_with_node: cannot connect with yourself!")
             return False
 
+        # Check if already connected
         for node in self.connections:
             if node.host == host and node.port == port or node.parent_port == port:
                 self.debug_print(
@@ -97,6 +94,7 @@ class Node(threading.Thread):
                 )
                 return True
 
+        # Attempt connection via ID exchange
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             """
@@ -106,6 +104,7 @@ class Node(threading.Thread):
             - grab host + port via decrypting on-chain info
             """
             self.debug_print(f"connecting to {host} port {port}")
+            # Initialize a socket for potential connection
             sock.connect((host, port))
 
             start_time = time.time()
@@ -134,7 +133,7 @@ class Node(threading.Thread):
             thread_client.latency = latency
 
             # self.connections.append(thread_client)
-            self.outbound.append(thread_client)
+            self.connections.append(thread_client)
 
             # If reconnection to this host is required, add to the list
             if reconnect:
