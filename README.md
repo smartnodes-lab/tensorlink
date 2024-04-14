@@ -4,11 +4,13 @@ TensorLink is a decentralized platform designed to scale neural network training
 
 ## Key Features:
 
-- **Model Distribution:** TensorLink leverages pipeline parallelism, distributing model parameters across multiple nodes, allowing for accelerated training and larger models. This feature enables users to scale the models they can train on their own devices while accelerating the training process, addressing two significant challenges in machine learning utilization.
-  
-- **Data Privacy and Security:** TensorLink provides workflows for obfuscating input data and fragmenting model structures, ensuring the privacy of sensitive information. Users can securely leverage the platform without compromising data confidentiality.
+- **Model wrapping:** tensorlink acts as a transparent layer over your existing models, enabling distributed computing without altering the underlying codebase. This allows for easy integration while preserving the integrity of your original ML models.
 
-- **Consensus:** TensorLink implements a novel proof-of-learning consensus mechanism to ensure the integrity and accuracy of distributed learning processes. Collateralized Validators play a crucial role in maintaining the network's reliability and transparency as well.
+- **Model Distribution:** Leveraging pipeline and data parallelism, tensorlink effectively scales the training of larger models and addresses common inefficiencies associated with internet-based distributed learning systems.
+  
+- **Data Privacy and Security:** tensorlink offers workflows which prioritize the protection of sensitive information using data obfuscation and model fragmentation techniques.
+
+- **Consensus:** tensorlink utilizes an innovative proof-of-learning protocol, supported by collateralized nodes and a robust reputation system. This framework validates the accuracy and integrity of distributed learning activities, ensuring transparent and secure operations across the network.
 
 ## TODO: Getting Started / Examples
 
