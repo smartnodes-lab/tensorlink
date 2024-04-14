@@ -44,31 +44,28 @@ class Validator(TorchNode):
 
                 # Job acceptance from worker
                 if b"ACCEPTJOB" == data[:9]:
-                    module_id = data[9:]
-                    self.node_requests[module_id].append(node.node_id)
+                    self.debug_print(f"Validator:worker accepted job")
+                    module_id = pickle.loads(data[9:])
+                    self.node_requests[tuple(module_id)] = node.node_id
 
                 # Job decline from worker
                 elif b"DECLINEJOB" == data[:10]:
+                    self.debug_print(f"Validator:worker declined job")
                     pass
 
                 # Job creation request from user
-                elif b"REQJOB" == data[:6]:
-                    expected_sample_job = {
-                        "id": hashlib.sha256(os.urandom(256)).hexdigest(),
-                        "author": self.key_hash,
-                        "capacity": 4e9,
-                        "dp_factor": 3,
-                        "distribution": [1e9, 1e9, 1e9, 1e9],
-                    }
+                elif b"JOBREQ" == data[:6]:
+                    self.debug_print(f"Validator:user requested job")
+                    job_req = pickle.loads(data[6:])
+                    self.create_job(job_req)
+                    return True
+                else:
+                    return False
 
-                    self.create_job(expected_sample_job)
-
-            else:
-
-                return True
+            return True
 
         except Exception as e:
-            self.debug_print(f"worker:stream_data:{e}")
+            self.debug_print(f"Validator:stream_data:{e}")
             raise e
 
     def validate(self, data):
@@ -95,16 +92,18 @@ class Validator(TorchNode):
         recruitment_threads = []
         n_modules = len(modules)
         current_module = modules.pop(0)
+        time.sleep(2)
 
-        for key_hash, stats in self.node_stats:
+        # Request workers to handle job
+        for key_hash, node in self.nodes.items():
             if (
-                stats["training"] is True and stats["role"] == 0
+                node.role == b"W" and node.stats["training"] is True
             ):  # Worker is currently active and has the memory
-                if stats["memory"] >= current_module:
-                    worker = self.routing_table[key_hash]
+                if node.stats["memory"] >= current_module[1]:
+                    worker = self.nodes[key_hash]
                     t = threading.Thread(
                         target=self.send_job_request,
-                        args=(worker, n_modules - len(modules) + 1, current_module),
+                        args=(worker, current_module[0], current_module[1]),
                     )
                     t.start()
                     recruitment_threads.append(t)
@@ -117,38 +116,44 @@ class Validator(TorchNode):
         for t in recruitment_threads:
             t.join()
 
+        requesting_node = self.nodes[job_data["author"].encode()]
+        recruited_workers = []
+
         # Cycle thru each model and make sure a worker has accepted them
         for n in range(n_modules):
-            val = self.node_requests[n]
-            if isinstance(val, list):
-                candidate_node_id = val.pop(0)
-                candidate_node = self.query_routing_table(candidate_node_id)
-                if isinstance(candidate_node, Connection):
-                    self.send_to_node()
+            mod_id = tuple(job_data["distribution"][n][0])
+            candidate_node_id = self.node_requests[tuple(mod_id)]
+            candidate_node = self.query_routing_table(candidate_node_id)
+            recruited_workers.append([mod_id, candidate_node])
 
-        job = {
-            "id": b"",  # Job ID hash
-            "author": b"",  # Author ID hash
-            "capacity": 0,  # Combined model size
-            "dp_factor": 0,  # Number of parallel streams
-            "distribution": {},  # Distribution graph for a single data parallel stream
-            "loss": [],  # Global (or individual worker) loss + accuracy
-            "accuracy": [],
-        }
+        self.send_to_node(
+            requesting_node, b"ACCEPTJOB" + pickle.dumps(recruited_workers)
+        )
+
+        # job = {
+        #     "id": b"",  # Job ID hash
+        #     "author": b"",  # Author ID hash
+        #     "capacity": 0,  # Combined model size
+        #     "dp_factor": 0,  # Number of parallel streams
+        #     "distribution": {},  # Distribution graph for a single data parallel stream
+        #     "loss": [],  # Global (or individual worker) loss + accuracy
+        #     "accuracy": [],
+        # }
 
         # Recruit available workers and send them to user?
 
         # Store job and replicate to other nodes
-        self.store_key_value_pair(job["id"], job)
+        self.store_key_value_pair(job_data["id"], job_data)
 
     def send_job_request(self, node, module_id, module_size: int):
         data = pickle.dumps([module_id, module_size])
-        data = b"JOB" + data
+        data = b"JOBREQ" + data
+        module_id = tuple(module_id)
+        self.node_requests[module_id] = None
         self.send_to_node(node, data)
-        self.node_requests[module_id] = []
         start_time = time.time()
 
-        while not self.node_requests[module_id]:
+        while self.node_requests[module_id] is None:
             if time.time() - start_time > 5:
-                self.node_requests[module_id] = None
+                del self.node_requests[module_id]
                 break

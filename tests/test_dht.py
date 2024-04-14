@@ -1,4 +1,4 @@
-from src.p2p.smart_node import SmartDHTNode
+from src.p2p.smart_node import SmartNode
 import hashlib
 import time
 
@@ -8,21 +8,21 @@ if __name__ == "__main__":
     port = 5026
 
     # Spawn 3 workers on their own ports + threads
-    node1 = SmartDHTNode(
+    node1 = SmartNode(
         host=ip,
         port=port,
         debug=True,
         public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
     )
 
-    node2 = SmartDHTNode(
+    node2 = SmartNode(
         host=ip,
         port=port + 1,
-        debug=False,
+        debug=True,
         public_key="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
     )
 
-    node3 = SmartDHTNode(
+    node3 = SmartNode(
         host=ip,
         port=port + 2,
         debug=False,
@@ -38,7 +38,7 @@ if __name__ == "__main__":
 
     node2.bootstrap()
 
-    time.sleep(12)
+    time.sleep(1)
     key = hashlib.sha256(b"a").hexdigest().encode()
     node2.store_key_value_pair(key, "TEST VALUE")
 

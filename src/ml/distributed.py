@@ -1,7 +1,5 @@
-from torch.nn.modules.module import T
-
 from src.ml.model_analyzer import *
-from src.roles.worker import Worker
+from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 
 from torch.nn import Parameter
@@ -32,17 +30,6 @@ def contains_offloaded(module: nn.Module):
     return exists
 
 
-class Trainer:
-    def __init__(self, worker):
-        self.worker = worker
-
-    def run_training(self):
-        pass
-
-    def average_gradients(self):
-        pass
-
-
 class DistributedModel(nn.Module):
     """
     DistributedModel:
@@ -53,7 +40,7 @@ class DistributedModel(nn.Module):
     def __init__(
         self,
         model: nn.Module,
-        master_node: Worker,
+        master_node: TorchNode,
         batch_size: int,
         micro_batch_size: int,
         config=None,
@@ -327,14 +314,11 @@ class DistributedModel(nn.Module):
                 target = find_module(self.model, mod_name)
                 assert target is not None, f"Module {mod_name} not found in model."
                 module, mod_ids = target  # unpacking the tuple
-                module_memory = estimate_memory(module)
-                node["memory"] -= module_memory
-                self.wrap_module(mod_ids, node["connection"])
+                self.wrap_module(mod_ids, node)
                 return 0, 0
 
         def recurse_model(module, mod_id=[]):
             # Get module information
-
             module_memory = estimate_memory(module)
             module_children = list(module.named_children())
             module_type = f"{type(module)}".split(".")[-1].split(">")[0][:-1]
@@ -351,12 +335,10 @@ class DistributedModel(nn.Module):
                 ]
 
             elif module_memory < self.get_node_most_memory()[1]:
-                worker_key = self.get_node_most_memory()[0]
-                self.master_node.nodes[worker_key]["memory"] -= module_memory
+                # worker_key = self.get_node_most_memory()[0]
+                # self.master_node.nodes[worker_key]["memory"] -= module_memory
                 distributed_module_ids.append(mod_id)
-                self.wrap_module(
-                    mod_id, self.master_node.nodes[worker_key]["connection"]
-                )
+                self.wrap_module(mod_id, self.master_node.nodes[worker_key])
                 return [
                     {
                         "id": worker_key,
@@ -399,9 +381,9 @@ class DistributedModel(nn.Module):
         return graph
 
     def wrap_module(self, module_id: list, worker: Connection):
-        child_module = access_module(self.model, module_id)
+        child_module, module_name = access_module(self.model, module_id)
         parent_module = (
-            access_module(self.model, module_id[:-1])
+            access_module(self.model, module_id[:-1])[0]
             if len(module_id) > 1
             else self.model
         )
@@ -443,7 +425,7 @@ class OffloadedModule(nn.Module):
         pytorch model flow.
     """
 
-    def __init__(self, master_node: Worker, worker_node: Connection):
+    def __init__(self, master_node: TorchNode, worker_node: Connection):
         super(OffloadedModule, self).__init__()
 
         self.master_node = master_node

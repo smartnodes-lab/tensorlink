@@ -1,5 +1,5 @@
 from src.p2p.connection import Connection
-from src.p2p.smart_node import SmartDHTNode
+from src.p2p.smart_node import SmartNode
 from src.ml.model_analyzer import get_gpu_memory
 
 import torch.nn as nn
@@ -10,7 +10,7 @@ import pickle
 import time
 
 
-class TorchNode(SmartDHTNode):
+class TorchNode(SmartNode):
     def __init__(
         self,
         host: str,
@@ -26,6 +26,7 @@ class TorchNode(SmartDHTNode):
             debug=debug,
             max_connections=max_connections,
         )
+
         # State info
         self.available_memory = get_gpu_memory()
         self.state = 0
@@ -35,10 +36,14 @@ class TorchNode(SmartDHTNode):
         self.master = False
 
         # Stores connections and their context
-        self.nodes = {}
         self.node_stats = {}
         self.node_requests = {}
         self.distributed_graph = {}
+
+        self.modules = {}
+        self.optimizers = {}
+        self.parameters = {}
+        self.state_updates = {}
         self.updater_flag = threading.Event()
 
         self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
@@ -58,8 +63,13 @@ class TorchNode(SmartDHTNode):
                     self.debug_print(f"RECEIVED STATS")
                     stats = pickle.loads(data[8:])
                     node_hash = stats["id"]
-                    self.node_stats[node_hash] = stats
+                    self.nodes[node_hash.encode()].stats = stats
                     return True
+
+                elif b"LOADED" == data[:6]:
+                    self.debug_print(f"Successfully offloaded submodule to worker.")
+                    pickled = data[6:]
+                    self.distributed_graph[pickled] = node
 
                 return False
 
@@ -154,26 +164,24 @@ class TorchNode(SmartDHTNode):
 
     # Iterate connected nodes and request their current state
     def request_worker_stats(self):
-        while not self.updater_flag.is_set():
+        # while not self.updater_flag.is_set():
 
-            for node in self.connections:
-                # if hasattr(node, "")
-                # Beforehand, check the last time the worker has updated (self.prune_workers?)
-                self.send_statistics_request(node)
-                time.sleep(1)
-
+        for node in self.connections:
+            # if hasattr(node, "")
+            # Beforehand, check the last time the worker has updated (self.prune_workers?)
+            self.send_statistics_request(node)
+            time.sleep(1)
             # if self.nodes:
             #     self.updater_flag.set()
 
-            time.sleep(5)
+            # time.sleep(5)
+        return
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         # memory = self.available_memory
-        memory = 1e9
-
         stats = {
             "id": self.key_hash,
-            "memory": memory,
+            "memory": self.available_memory,
             "role": self.state,
             "training": self.training,
             #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
@@ -191,29 +199,3 @@ class TorchNode(SmartDHTNode):
     def select_candidate_worker(self):
         candidate_node = max(self.nodes.values(), key=lambda x: x["memory"])
         return candidate_node
-
-    def bootstrap(self):
-        num_validators = self.contract.functions.getValidatorIdCounter().call() - 1
-        sample_size = min(num_validators, 10)  # Adjust sample size as needed
-
-        # Randomly select sample_size validators
-        random_sample = random.sample(range(1, num_validators + 1), sample_size)
-
-        for validatorId in random_sample:
-
-            # Get validator information from smart contract
-            _, address, id_hash, reputation, active = (
-                self.contract.functions.validators(validatorId).call()
-            )
-
-            node_info = self.query_routing_table(id_hash.encode())
-
-            if node_info is None:
-                continue
-
-            # Connect to the validator's node and exchange information
-            connected = self.connect_dht_node(node_info["host"], node_info["port"])
-
-            # Check to see if connected, if not we can try another random node
-            if not connected:
-                self.delete(validatorId)

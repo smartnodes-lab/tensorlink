@@ -42,13 +42,6 @@ class Worker(TorchNode):
         )
         self.role = b"W"
 
-        # For storing forward, backward, and intermediate tensors
-        # Should be switched to some other data structure that relates to specific epochs
-        self.modules = {}
-        self.optimizers = {}
-        self.parameters = {}
-        self.state_updates = {}
-
         self.loss = None
 
     def stream_data(self, data: bytes, node: Connection):
@@ -173,14 +166,16 @@ class Worker(TorchNode):
 
                         return True
 
-                elif b"JOB" == data[:3]:
+                elif b"JOBREQ" == data[:6]:
                     try:
                         # Accept job request from validator if we can handle it
-                        module_id, module_size = pickle.loads(data[3:])
+                        module_id, module_size = pickle.loads(data[6:])
 
-                        if self.available_memory > module_size:
+                        if self.available_memory > module_size and self.training:
                             # Respond to validator that we can accept the job
                             data = b"ACCEPTJOB" + pickle.dumps(module_id)
+                            self.available_memory -= module_size
+
                         else:
                             data = b"DECLINEJOB"
 
@@ -232,11 +227,6 @@ class Worker(TorchNode):
 
                         return True
 
-                elif b"LOADED" == data[:6]:
-                    self.debug_print(f"Successfully offloaded submodule to worker.")
-                    pickled = data[6:]
-                    self.distributed_graph[pickled] = node
-
                     return True
 
                 return False
@@ -255,8 +245,8 @@ class Worker(TorchNode):
         listener.start()
 
         # Thread for periodic worker statistics updates
-        stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
-        stats_updater.start()
+        # stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
+        # stats_updater.start()
 
         # time.sleep(5)
         # self.updater_flag.set()
