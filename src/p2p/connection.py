@@ -16,6 +16,7 @@ class Connection(threading.Thread):
         port: int,
         node_id: str,
         parent_port: int = None,
+        role=None,
     ):
         super(Connection, self).__init__()
 
@@ -27,8 +28,10 @@ class Connection(threading.Thread):
         self.terminate_flag = threading.Event()
 
         self.node_id = node_id
+        self.role = role
         self.sock.settimeout(60)
         self.latency = 0
+        self.stats = {}
         self.chunk_size = 131_072
 
         # End of transmission + compression characters for the network messages.

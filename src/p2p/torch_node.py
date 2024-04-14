@@ -1,15 +1,16 @@
 from src.p2p.connection import Connection
-from src.p2p.smart_node import SmartDHTNode
+from src.p2p.smart_node import SmartNode
 from src.ml.model_analyzer import get_gpu_memory
 
 import torch.nn as nn
 import threading
+import random
 import hashlib
 import pickle
 import time
 
 
-class TorchNode(SmartDHTNode):
+class TorchNode(SmartNode):
     def __init__(
         self,
         host: str,
@@ -17,7 +18,6 @@ class TorchNode(SmartDHTNode):
         wallet_address: str,
         debug: bool = False,
         max_connections: int = 0,
-        callback=None,
     ):
         super(TorchNode, self).__init__(
             host,
@@ -25,38 +25,57 @@ class TorchNode(SmartDHTNode):
             wallet_address,
             debug=debug,
             max_connections=max_connections,
-            callback=callback,
         )
+
         # State info
         self.available_memory = get_gpu_memory()
         self.state = 0
 
+        # Model training parameters
+        self.training = False
+        self.master = False
+
         # Stores connections and their context
-        self.nodes = {}
+        self.node_stats = {}
+        self.node_requests = {}
         self.distributed_graph = {}
+
+        self.modules = {}
+        self.optimizers = {}
+        self.parameters = {}
+        self.state_updates = {}
         self.updater_flag = threading.Event()
 
         self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
     def stream_data(self, data: bytes, node: Connection) -> bool:
         try:
-            if b"REQUEST" == data[:7]:
-                self.debug_print(f"RECEIVED STATS REQUEST")
-                self.broadcast_statistics(node)
+            handled = super().stream_data(data, node)
+
+            if not handled:
+
+                if b"REQUESTS" == data[:8]:
+                    self.debug_print(f"RECEIVED STATS REQUEST")
+                    self.handle_statistics_request(node)
+                    return True
+
+                elif b"RESPONSE" == data[:8]:
+                    self.debug_print(f"RECEIVED STATS")
+                    stats = pickle.loads(data[8:])
+                    node_hash = stats["id"]
+                    self.nodes[node_hash.encode()].stats = stats
+                    return True
+
+                elif b"LOADED" == data[:6]:
+                    self.debug_print(f"Successfully offloaded submodule to worker.")
+                    pickled = data[6:]
+                    self.distributed_graph[pickled] = node
+
+                return False
+
+            else:
 
                 return True
-
-            elif b"RESPONSE" == data[:8]:
-                self.debug_print(f"RECEIVED NODE STATS")
-
-                pickled = pickle.loads(data[8:])
-                node_id, stats = pickled
-                stats["connection"] = node
-                self.nodes[node_id] = stats
-
-                return True
-
-            return False
 
         except Exception as e:
             self.debug_print(f"torch_node->stream_data: {e}")
@@ -72,6 +91,7 @@ class TorchNode(SmartDHTNode):
 
     def send_forward(self, node: Connection, args, context):
         pickled_data = b"FORWARD" + pickle.dumps((context, args))
+        print(hashlib.sha256(pickled_data).hexdigest())
         self.send_to_node(node, pickled_data)
 
     def send_backward(self, node: Connection, args, context):
@@ -106,9 +126,9 @@ class TorchNode(SmartDHTNode):
         self.send_to_node(node, module_bytes)
         time.sleep(1)
 
-    def send_statistics_request(self, worker_node):
-        message = b"REQUEST"
-        self.send_to_node(worker_node, message)
+    def send_statistics_request(self, node):
+        message = b"REQUESTS"
+        self.send_to_node(node, message)
 
     def broadcast_statistics(self, callee, additional_context: dict = None):
         memory = self.available_memory
@@ -141,6 +161,40 @@ class TorchNode(SmartDHTNode):
                 self.updater_flag.set()
 
             time.sleep(5)
+
+    # Iterate connected nodes and request their current state
+    def request_worker_stats(self):
+        # while not self.updater_flag.is_set():
+
+        for node in self.connections:
+            # if hasattr(node, "")
+            # Beforehand, check the last time the worker has updated (self.prune_workers?)
+            self.send_statistics_request(node)
+            time.sleep(1)
+            # if self.nodes:
+            #     self.updater_flag.set()
+
+            # time.sleep(5)
+        return
+
+    def handle_statistics_request(self, callee, additional_context: dict = None):
+        # memory = self.available_memory
+        stats = {
+            "id": self.key_hash,
+            "memory": self.available_memory,
+            "role": self.state,
+            "training": self.training,
+            #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
+        }
+
+        if additional_context is not None:
+            for k, v in additional_context.items():
+                if k not in stats.keys():
+                    stats[k] = v
+
+        stats_bytes = pickle.dumps(stats)
+        stats_bytes = b"RESPONSE" + stats_bytes
+        self.send_to_node(callee, stats_bytes)
 
     def select_candidate_worker(self):
         candidate_node = max(self.nodes.values(), key=lambda x: x["memory"])

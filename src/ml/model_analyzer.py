@@ -41,7 +41,11 @@ def gradient_memory(module):
 
 
 def optimizer_memory(optimizer):
-    return sum(state.numel() * state.element_size() for group in optimizer.param_groups for state in group['params'])
+    return sum(
+        state.numel() * state.element_size()
+        for group in optimizer.param_groups
+        for state in group["params"]
+    )
 
 
 def estimate_memory(module):
@@ -49,7 +53,9 @@ def estimate_memory(module):
     Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy
     forward pass and thus is preferred for now.
     """
-    return 4 * sum(param.numel() * param.element_size() for param in module.parameters())
+    return 4 * sum(
+        param.numel() * param.element_size() for param in module.parameters()
+    )
 
 
 def estimate_memory_requirement(layer, dummy_input: torch.Tensor, optimizer):
@@ -86,20 +92,6 @@ def get_first_layer(model: nn.Module):
         return model
 
 
-def access_module(model: nn.Module, module_id: list):
-    assert(len(module_id) > 0)
-    module = model
-
-    for idx in module_id:
-        if isinstance(module, nn.ModuleList):
-            module = module[idx]
-        else:
-            child_name = list(module.named_children())[idx][0]
-            module = getattr(module, child_name)
-
-    return module
-
-  
 def find_module(module: nn.Module, target_name: str, ids: list = []):
     if not list(module.named_children()):
         return
@@ -112,3 +104,18 @@ def find_module(module: nn.Module, target_name: str, ids: list = []):
         res = find_module(values, target_name, new_ids)
         if res:
             return res
+
+
+def access_module(module: nn.Module, indices: list):
+    assert len(indices) > 0
+    current_module = module
+    module_name = None
+    for index in indices:
+        children = list(current_module.named_children())
+        if index >= len(children):
+            raise IndexError("Index out of range for current module's children.")
+
+        # Access the submodule
+        current_module = children[index][1]
+        module_name = children[index][0]
+    return current_module, module_name
