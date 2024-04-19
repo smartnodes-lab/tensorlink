@@ -20,7 +20,7 @@ with open("./src/assets/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
 ABI = METADATA["abi"]
-CONTRACT_ADDRESS = "0x576511A2aC20e732122F7a98D9892214F1e0AAF1"
+CONTRACT_ADDRESS = "0xb89513D0F115a1c83f55513531BA2600cA087cEF"
 
 
 def hash_key(key: bytes, number=False):

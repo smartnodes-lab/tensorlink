@@ -1,9 +1,8 @@
-import random
-
 from src.p2p.connection import Connection
 from src.cryptography.rsa import *
 
 from typing import List
+from miniupnpc import UPnP
 import threading
 import socket
 import time
@@ -42,6 +41,7 @@ class Node(threading.Thread):
         self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
+        self.setup_upnp(port)
 
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
@@ -52,9 +52,24 @@ class Node(threading.Thread):
 
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.host, self.port))
+        self.sock.bind(("127.0.0.1", self.port))
         self.sock.settimeout(5.0)
         self.sock.listen(1)
+
+    def setup_upnp(self, port):
+        upnp = UPnP()
+        upnp.discoverdelay = 200
+        upnp.discover()
+        upnp.selectigd()
+
+        # Try to forward the port
+        result = upnp.addportmapping(port, "TCP", upnp.lanaddr, port, "P2P Node", "")
+
+        if result:
+            self.debug_print(f"UPnP port forward successful on port {self.port}")
+        else:
+            self.debug_print("Failed to set UPnP port forwarding")
+            self.stop()
 
     def create_connection(
         self,
