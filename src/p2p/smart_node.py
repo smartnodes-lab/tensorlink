@@ -521,35 +521,38 @@ class SmartNode(Node):
                     closest_distance = distance
 
         # In the case we have the target query value
-        if closest_node[0] == key_hash:
-            if closest_node[1] is None:
-                self.delete(closest_node[0])
-                return None
-            return self.routing_table[closest_node[0]]
+        if closest_node is not None:
+            if closest_node[0] == key_hash:
+                if closest_node[1] is None:
+                    self.delete(closest_node[0])
+                    return None
+                return self.routing_table[closest_node[0]]
 
-        # If we could not retrieve the stored value, route request to nearest node
-        else:
-            if closest_node[0] in self.nodes:
-                start_time = time.time()
-                node = self.nodes[closest_node[0]]
-                self.request_value(key_hash, node)
-
-                while key_hash not in self.routing_table.keys():
-                    if (
-                        time.time() - start_time > 1000
-                    ):  # Some arbitrary timeout time for now
-                        if len(ids_to_exclude) >= 1:
-                            return None
-
-                        ids_to_exclude.append(closest_node[0])
-                        return self.query_routing_table(
-                            key_hash,
-                            ids_to_exclude,
-                        )
-
-                return self.routing_table[key_hash]
+            # If we could not retrieve the stored value, route request to nearest node
             else:
-                return None
+                if closest_node[0] in self.nodes:
+                    start_time = time.time()
+                    node = self.nodes[closest_node[0]]
+                    self.request_value(key_hash, node)
+
+                    while key_hash not in self.routing_table.keys():
+                        if (
+                            time.time() - start_time > 5
+                        ):  # Some arbitrary timeout time for now
+                            if len(ids_to_exclude) >= 1:
+                                return None
+
+                            ids_to_exclude.append(closest_node[0])
+                            return self.query_routing_table(
+                                key_hash,
+                                ids_to_exclude,
+                            )
+
+                    return self.routing_table[key_hash]
+                else:
+                    return None
+        else:
+            return None
 
     def request_value(self, key: bytes, node: Connection):
         data = b"ROUTEREQ" + key

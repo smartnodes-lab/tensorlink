@@ -5,7 +5,7 @@ from transformers import BertModel
 
 
 if __name__ == "__main__":
-    ip = "142."
+    ip = "127.0.0.1"
     port = 5026
 
     validator = Validator(
@@ -26,5 +26,8 @@ if __name__ == "__main__":
 
     user.bootstrap()
 
-    model = BertModel.from_pretrained("bert-base-uncased")
-    d_model = user.request_job(model, 1.4e9)
+    user.stop()
+    validator.stop()
+
+    # model = BertModel.from_pretrained("bert-base-uncased")
+    # d_model = user.request_job(model, 1.4e9)

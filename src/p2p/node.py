@@ -41,7 +41,13 @@ class Node(threading.Thread):
         self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
-        self.setup_upnp(port)
+
+        self.upnp = UPnP()
+        self.upnp.discoverdelay = 500
+        self.upnp.discover()
+        self.upnp.selectigd()
+
+        self.add_port_mapping(port)
 
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
@@ -56,20 +62,36 @@ class Node(threading.Thread):
         self.sock.settimeout(5.0)
         self.sock.listen(1)
 
-    def setup_upnp(self, port):
-        upnp = UPnP()
-        upnp.discoverdelay = 200
-        upnp.discover()
-        upnp.selectigd()
-
+    def add_port_mapping(self, port):
         # Try to forward the port
-        result = upnp.addportmapping(port, "TCP", upnp.lanaddr, port, "P2P Node", "")
+        result = self.upnp.addportmapping(
+            port, "TCP", self.upnp.lanaddr, port, "P2P Node", ""
+        )
 
         if result:
             self.debug_print(f"UPnP port forward successful on port {self.port}")
         else:
             self.debug_print("Failed to set UPnP port forwarding")
             self.stop()
+
+    def remove_port_mapping(self, port, protocol="TCP"):
+        result = self.upnp.deleteportmapping(port, protocol)
+
+        if result:
+            self.debug_print(f"UPnP removed mapping on port {self.port}")
+        else:
+            self.debug_print("Failed to remove port mapping")
+
+    def shutdown_upnp(self, port):
+        upnp = UPnP()
+        upnp.discoverdelay = 200
+        upnp.discover()
+        upnp.selectigd()
+        upnp.deleteportmapping(port, "TCP")
+        self.debug_print(f"UPnP port forwarding removed for port {port}")
+
+    def get_external_ip(self):
+        return self.upnp.externalipaddress()
 
     def create_connection(
         self,
@@ -195,6 +217,7 @@ class Node(threading.Thread):
     def stop(self) -> None:
         self.debug_print("Node stopping")
         self.terminate_flag.set()
+        self.shutdown_upnp(self.port)
 
     def reconnect_nodes(self) -> None:
         """This method checks whether nodes that have the reconnection status are still connected. If not
