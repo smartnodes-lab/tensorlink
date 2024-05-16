@@ -4,7 +4,6 @@ from src.p2p.connection import Connection
 from src.p2p.node import Node
 
 from web3 import Web3
-
 import threading
 import hashlib
 import random
@@ -20,7 +19,7 @@ with open("./src/assets/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
 ABI = METADATA["abi"]
-CONTRACT_ADDRESS = "0xb89513D0F115a1c83f55513531BA2600cA087cEF"
+CONTRACT_ADDRESS = "0x982c5d907bcc765f18fc88800aECF4795c63AD9E"
 
 
 def hash_key(key: bytes, number=False):
@@ -78,15 +77,16 @@ class SmartNode(Node):
         self,
         host: str,
         port: int,
-        public_key: str,
+        private_key: str,
         url: str = RPC,
         contract: str = CONTRACT_ADDRESS,
         debug: bool = False,
         max_connections: int = 0,
         dht_callback=None,
+        upnp=True,
     ):
         super(SmartNode, self).__init__(
-            host, port, debug, max_connections, self.stream_data
+            host, port, debug, max_connections, self.stream_data, upnp=upnp
         )
         # DHT Parameters
         self.replication_factor = 3
@@ -95,12 +95,17 @@ class SmartNode(Node):
         self.buckets = [Bucket(d, self.bucket_size) for d in range(256)]
         self.nodes = {}
         self.dht_callback = dht_callback
+        self.route_cache = {}
 
         # Smart contract parameters
         self.chain = Web3(Web3.HTTPProvider(url))
         self.contract_address = Web3.to_checksum_address(contract)
         self.contract = None
         self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
+
+        # Setup Web3 connection + account
+        self.account = self.chain.eth.account.from_key(private_key)
+        self.chain.eth.default_account = self.account.address
 
         # Grab the SmartNode contract
         try:
@@ -159,6 +164,10 @@ class SmartNode(Node):
             elif b"ROUTEREQ" == data[:8]:
                 # Retrieve the value associated with the key from the DHT
                 self.debug_print(f"RECEIVED ROUTE REQUEST")
+
+                # if node.node_id in self.route_cache.keys():
+                #     if self.route_cache[node.node_id] > 3:  # If we have received the same request from that node above a certain threshold of time del
+
                 key = data[8:]
                 value = self.query_routing_table(key)
                 data = pickle.dumps([key, value])
@@ -173,6 +182,9 @@ class SmartNode(Node):
 
                 if value is not None:
                     self.routing_table[key] = value
+
+            elif b"ROUTECONNECT" == data[:12]:
+                self.debug_print(f"RECEIVED ROUTE CONNECTIONG REQUEST")
 
             elif b"DELETE" == data[:6]:
                 # Delete the key-value pair from the DHT
@@ -478,32 +490,40 @@ class SmartNode(Node):
 
     def bootstrap(self):
         num_validators = self.contract.functions.getValidatorIdCounter().call() - 1
-        sample_size = min(num_validators, 10)  # Adjust sample size as needed
+        sample_size = min(num_validators, 1)  # Adjust sample size as needed
 
         # Randomly select sample_size validators
-        random_sample = random.sample(range(1, num_validators + 1), sample_size)
-        random_sample = [1, 2, 3]
+        candidate_validators = []
 
-        for validatorId in random_sample:
+        while len(candidate_validators) < sample_size:
+            validator_id = random.sample(range(1, num_validators + 1), 1)[0]
+            validator_state = self.contract.functions.getValidatorState(
+                validator_id
+            ).call()
 
-            # Get validator information from smart contract
-            _, address, id_hash, reputation, active = (
-                self.contract.functions.validators(validatorId).call()
-            )
+            if validator_state > 0:
+                # Get validator information from smart contract
+                _, address, id_hash, locked, unlock_time, reputation, active = (
+                    self.contract.functions.validators(validator_id).call()
+                )
 
-            node_info = self.query_routing_table(id_hash.encode())
-            # host, port = connection_info["host"], connection_info["port"]
+                # Try and grab node connection info from dht
+                node_info = self.query_routing_table(id_hash.encode())
 
-            if node_info is None:
-                self.delete(id_hash)
-                continue
+                # Delete space for node info if not found and move on to the next validator
+                if node_info is None:
+                    self.delete(id_hash)
+                    continue
 
-            # Connect to the validator's node and exchange information
-            connected = self.connect_dht_node(node_info["host"], node_info["port"])
+                # Connect to the validator's node and exchange information
+                connected = self.connect_dht_node(node_info["host"], node_info["port"])
 
-            # Check to see if connected, if not we can try another random node
-            if not connected:
-                self.delete(id_hash)
+                # Check to see if connected, if not, try another random node
+                if not connected:
+                    self.delete(id_hash)
+                    continue
+
+                candidate_validators.append(validator_id)
 
     def query_routing_table(self, key_hash, ids_to_exclude=[]):
         """

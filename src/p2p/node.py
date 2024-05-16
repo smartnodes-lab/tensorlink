@@ -22,6 +22,7 @@ class Node(threading.Thread):
         debug: bool = False,
         max_connections: int = 0,
         callback=None,
+        upnp=True,
     ):
         super(Node, self).__init__()
 
@@ -42,12 +43,15 @@ class Node(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
 
-        self.upnp = UPnP()
-        self.upnp.discoverdelay = 500
-        self.upnp.discover()
-        self.upnp.selectigd()
+        if upnp is True:
+            self.upnp = UPnP()
+            self.upnp.discoverdelay = 500
+            self.upnp.discover()
+            self.upnp.selectigd()
+            self.add_port_mapping(port)
 
-        self.add_port_mapping(port)
+        else:
+            self.upnp = None
 
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
@@ -83,12 +87,13 @@ class Node(threading.Thread):
             self.debug_print("Failed to remove port mapping")
 
     def shutdown_upnp(self, port):
-        upnp = UPnP()
-        upnp.discoverdelay = 200
-        upnp.discover()
-        upnp.selectigd()
-        upnp.deleteportmapping(port, "TCP")
-        self.debug_print(f"UPnP port forwarding removed for port {port}")
+        if self.upnp:
+            upnp = UPnP()
+            upnp.discoverdelay = 200
+            upnp.discover()
+            upnp.selectigd()
+            upnp.deleteportmapping(port, "TCP")
+            self.debug_print(f"UPnP port forwarding removed for port {port}")
 
     def get_external_ip(self):
         return self.upnp.externalipaddress()

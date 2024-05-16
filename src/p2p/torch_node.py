@@ -15,16 +15,18 @@ class TorchNode(SmartNode):
         self,
         host: str,
         port: int,
-        wallet_address: str,
+        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
+        upnp=True,
     ):
         super(TorchNode, self).__init__(
             host,
             port,
-            wallet_address,
+            private_key,
             debug=debug,
             max_connections=max_connections,
+            upnp=upnp,
         )
 
         # State info

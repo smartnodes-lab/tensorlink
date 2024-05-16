@@ -1,5 +1,3 @@
-import hashlib
-
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
@@ -29,16 +27,18 @@ class Worker(TorchNode):
         self,
         host: str,
         port: int,
-        wallet_address: str,
+        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
+        upnp=True,
     ):
         super(Worker, self).__init__(
             host,
             port,
-            wallet_address,
+            private_key,
             debug=debug,
             max_connections=max_connections,
+            upnp=upnp,
         )
         self.role = b"W"
 
@@ -90,7 +90,6 @@ class Worker(TorchNode):
 
                     # Module-specific handling (ie for OffloadedModule / nn.Module)
                     elif self.training and len(self.modules) > 0:
-                        print(hashlib.sha256(data).hexdigest())
                         (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
                         self.modules[module_id].forward_queues.put(
                             ([n_iter, n_micro], tensor)
