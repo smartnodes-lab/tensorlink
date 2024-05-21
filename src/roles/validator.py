@@ -13,16 +13,18 @@ class Validator(TorchNode):
         self,
         host: str,
         port: int,
-        wallet_address: str,
+        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
+        upnp=True,
     ):
         super(Validator, self).__init__(
             host,
             port,
-            wallet_address,
+            private_key,
             debug=debug,
             max_connections=max_connections,
+            upnp=upnp,
         )
 
         # Additional attributes specific to the Validator class
@@ -59,6 +61,11 @@ class Validator(TorchNode):
                     job_req = pickle.loads(data[6:])
                     self.create_job(job_req)
                     return True
+
+                elif b"JOBUPDATE" == data[:9]:
+                    self.debug_print(f"Validator:user update job request")
+                    self.update_job(data[9:])
+
                 else:
                     return False
 
@@ -68,33 +75,51 @@ class Validator(TorchNode):
             self.debug_print(f"Validator:stream_data:{e}")
             raise e
 
-    def validate(self, data):
-        """
-        Perform validation by comparing computations with worker nodes.
-        """
-        # Perform computations using the provided data
-        # Compare results with computations from worker nodes
-        # Store validation results in self.validation_results
-        pass
+    # def validate(self, job_id: bytes, module_id: ):
+    #     """
+    #     Perform validation by comparing computations with worker nodes.
+    #     params:
+    #         job_id: job hash
+    #         module_id:
+    #         epoch:
+    #         input: input of module at specific
+    #         output:
+    #     """
+    #     # Perform computations using the provided data
+    #     # Compare results with computations from worker nodes
+    #     # Store validation results in self.validation_results
+    #
+    #     job_info = self.query_routing_table(job_id)
+    #
+    #     if job_info:
+    #         # Confirm job is listed
+    #         author = job_info["author"]
+    #         listed_author = self.contract.functions.getJobAuthor(author).call()
+    #
+    #         if author != listed_author:
+    #             self.debug_print(f"Invalid/incorrect job")
+    #
+    #         # Get worker node ids of specific module in workflow
+    #         self.
+    #     pass
 
     def create_job(self, job_data):
         # Method must be invoked by job request from a user
         # We receive a minimum job information data structure from user
 
         modules = job_data["distribution"].copy()
-        self.store_key_value_pair(job_data["id"].encode(), job_data)
 
         # Query DHT for user id and reputation
         # user = self.query_routing_table(expected_sample_job["id"])
 
         # Update connected workers stats
         self.request_worker_stats()
+
+        # Request workers to handle job
         recruitment_threads = []
         n_modules = len(modules)
         current_module = modules.pop(0)
-        time.sleep(2)
 
-        # Request workers to handle job
         for key_hash, node in self.nodes.items():
             if (
                 node.role == b"W" and node.stats["training"] is True
@@ -116,7 +141,7 @@ class Validator(TorchNode):
         for t in recruitment_threads:
             t.join()
 
-        requesting_node = self.nodes[job_data["author"].encode()]
+        requesting_node = self.nodes[job_data["author"]]
         recruited_workers = []
 
         # Cycle thru each model and make sure a worker has accepted them
@@ -143,7 +168,7 @@ class Validator(TorchNode):
         # Recruit available workers and send them to user?
 
         # Store job and replicate to other nodes
-        self.store_key_value_pair(job_data["id"], job_data)
+        self.store_key_value_pair(job_data["id"].encode(), job_data)
 
     def send_job_request(self, node, module_id, module_size: int):
         data = pickle.dumps([module_id, module_size])
@@ -157,3 +182,36 @@ class Validator(TorchNode):
             if time.time() - start_time > 5:
                 del self.node_requests[module_id]
                 break
+
+    def confirm_job_integrity(self, job: dict, user: Connection):
+        keys = [
+            "author",
+            "seed_validators",
+            "dp_factor",
+            "distribution",
+            "capacity",
+            "workers",
+        ]
+        assert set(keys) == set(job.keys()), "Invalid received job structure."
+
+        assert job["author"] == user.node_id, "Invalid user."
+
+        assert job["id"] in self.routing_table.keys(), "Job not found in routing table."
+
+        self.routing_table[job["id"]] = job
+
+    def distribute_job(self):
+        """Distribute job to a few other non-seed validators"""
+        for validator in self.validators:
+            pass
+        pass
+
+    def update_job(self, job_bytes: bytes):
+        """Update non-seed validators, loss, accuracy, other info"""
+        job = pickle.loads(job_bytes)
+
+    def create_worker(self):
+        pass
+
+    def update_worker(self):
+        pass

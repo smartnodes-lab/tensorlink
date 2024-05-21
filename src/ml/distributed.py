@@ -451,7 +451,9 @@ class OffloadedModule(nn.Module):
         while self.master_node.distributed_graph[self.module_id] is None:
             time.sleep(0.01)
 
-        #     # Module loaded successfully
+        print(1)
+
+        # # Module loaded successfully
         # except TimeoutError:
         #     # Timeout occurred, handle it
         #     self.handle_timeout()

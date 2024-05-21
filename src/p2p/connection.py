@@ -121,13 +121,17 @@ class Connection(threading.Thread):
                 # We have reached the end of one nodes processing
                 if eot_pos > 0:
                     packet = buffer + chunk[:eot_pos]
-                    with open(file_name, "ab") as f:
-                        f.write(packet)
-                        time.sleep(0.001)
-                        buffer = b""
-                        b_size = 0
+                    try:
+                        with open(file_name, "ab") as f:
+                            f.write(packet)
+                            time.sleep(0.001)
+                            buffer = b""
+                            b_size = 0
 
-                    self.main_node.handle_message(self, b"DONE STREAM")
+                        self.main_node.handle_message(self, b"DONE STREAM")
+
+                    except Exception as e:
+                        raise e
 
                 elif len(buffer) > 40_000_000:
                     try:

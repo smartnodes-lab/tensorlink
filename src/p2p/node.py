@@ -1,9 +1,8 @@
-import random
-
 from src.p2p.connection import Connection
 from src.cryptography.rsa import *
 
 from typing import List
+from miniupnpc import UPnP
 import threading
 import socket
 import time
@@ -23,6 +22,7 @@ class Node(threading.Thread):
         debug: bool = False,
         max_connections: int = 0,
         callback=None,
+        upnp=True,
     ):
         super(Node, self).__init__()
 
@@ -43,6 +43,16 @@ class Node(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.init_sock()
 
+        if upnp is True:
+            self.upnp = UPnP()
+            self.upnp.discoverdelay = 500
+            self.upnp.discover()
+            self.upnp.selectigd()
+            self.add_port_mapping(port)
+
+        else:
+            self.upnp = None
+
         # To add ssl encryption?
         # self.sock = ssl.wrap_socket(self.sock)
 
@@ -52,9 +62,41 @@ class Node(threading.Thread):
 
     def init_sock(self) -> None:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.host, self.port))
+        self.sock.bind(("127.0.0.1", self.port))
         self.sock.settimeout(5.0)
         self.sock.listen(1)
+
+    def add_port_mapping(self, port):
+        # Try to forward the port
+        result = self.upnp.addportmapping(
+            port, "TCP", self.upnp.lanaddr, port, "P2P Node", ""
+        )
+
+        if result:
+            self.debug_print(f"UPnP port forward successful on port {self.port}")
+        else:
+            self.debug_print("Failed to set UPnP port forwarding")
+            self.stop()
+
+    def remove_port_mapping(self, port, protocol="TCP"):
+        result = self.upnp.deleteportmapping(port, protocol)
+
+        if result:
+            self.debug_print(f"UPnP removed mapping on port {self.port}")
+        else:
+            self.debug_print("Failed to remove port mapping")
+
+    def shutdown_upnp(self, port):
+        if self.upnp:
+            upnp = UPnP()
+            upnp.discoverdelay = 200
+            upnp.discover()
+            upnp.selectigd()
+            upnp.deleteportmapping(port, "TCP")
+            self.debug_print(f"UPnP port forwarding removed for port {port}")
+
+    def get_external_ip(self):
+        return self.upnp.externalipaddress()
 
     def create_connection(
         self,
@@ -180,6 +222,7 @@ class Node(threading.Thread):
     def stop(self) -> None:
         self.debug_print("Node stopping")
         self.terminate_flag.set()
+        self.shutdown_upnp(self.port)
 
     def reconnect_nodes(self) -> None:
         """This method checks whether nodes that have the reconnection status are still connected. If not

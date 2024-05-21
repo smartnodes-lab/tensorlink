@@ -9,57 +9,53 @@ if __name__ == "__main__":
     user = User(
         host=local_host,
         port=5025,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=False,
+        private_key="ead8bd63b4e3e2e3aa846b1f0dfa602d0c61ef79e0b32c180cbc5ceb0828f1f6",
+        debug=True,
+        upnp=False,
     )
 
     validator1 = Validator(
         host=local_host,
         port=5026,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=False,
+        private_key="afabc26f69943849b267cd38836c0cab241998a59e1e81010d130b899e2e08d2",
+        debug=True,
+        upnp=False,
     )
 
     validator2 = Validator(
         host=local_host,
         port=5027,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=False,
-    )
-
-    validator3 = Validator(
-        host=local_host,
-        port=5028,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=False,
+        private_key="af9834c2cf887fbdf236d03691de043c17353eb7cafff451bb3a7bd949c6f0be",
+        debug=True,
+        upnp=False,
     )
 
     worker1 = Worker(
         host=local_host,
         port=5029,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=False,
+        private_key="ec79739589c5d236a2d04d8884dd93f4493efe95b1844b96013307ac6cdd101a",
+        debug=True,
+        upnp=False,
     )
 
+    # Start up test nodes
     user.start()
     validator1.start()
     validator2.start()
-    validator3.start()
     worker1.start()
 
+    # Initial seed connection
     user.connect_dht_node(local_host, 5026)  # Simulate a seed node connection
     validator2.connect_dht_node(local_host, 5026)
-    validator3.connect_dht_node(local_host, 5026)
     worker1.connect_dht_node(local_host, 5026)
 
+    # Bootstrap
     validator1.bootstrap()
     validator2.bootstrap()
-    validator3.bootstrap()
     worker1.bootstrap()
     user.bootstrap()
 
     user.stop()
     validator1.stop()
     validator2.stop()
-    validator3.stop()
     worker1.stop()
