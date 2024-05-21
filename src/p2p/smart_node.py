@@ -19,7 +19,7 @@ with open("./src/assets/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
 ABI = METADATA["abi"]
-CONTRACT_ADDRESS = "0x982c5d907bcc765f18fc88800aECF4795c63AD9E"
+CONTRACT_ADDRESS = "0x4de777622241d806d8D89B6a1942caa62d38CD1E"
 
 
 def hash_key(key: bytes, number=False):
@@ -91,11 +91,14 @@ class SmartNode(Node):
         # DHT Parameters
         self.replication_factor = 3
         self.bucket_size = 2
-        self.routing_table = {}
         self.buckets = [Bucket(d, self.bucket_size) for d in range(256)]
         self.nodes = {}
         self.dht_callback = dht_callback
-        self.route_cache = {}
+        self.routing_table = {}
+        self.messages = {}
+        self.workers = []
+        self.validators = []
+        self.jobs = []
 
         # Smart contract parameters
         self.chain = Web3(Web3.HTTPProvider(url))
@@ -134,6 +137,13 @@ class SmartNode(Node):
                 self.stream_data(streamed_bytes, node)
 
                 os.remove(file_name)
+
+            elif b"PING" == data[:4]:
+                self.send_to_node(node, b"PONG")
+
+            elif b"PONG" == data[:4]:
+                end_time = time.time()
+                self.messages[node.node_id]
 
             elif b"REQUESTP" == data:
                 self.debug_print(f"RECEIVED PEER REQUEST")
@@ -262,6 +272,10 @@ class SmartNode(Node):
                 # Some check of the DHT for any user reputation / blacklisted users
                 pass
 
+            else:
+                self.debug_print(f"SmartNode: Connection refused, invalid role!")
+                connection.close()
+
             # Encrypt random number with node's key to confirm identity
             proof_response = encrypt(message.encode(), self.port, connected_node_id)
             message = proof_response + b"," + self.role + self.rsa_pub_key
@@ -386,49 +400,57 @@ class SmartNode(Node):
                 verification, their_pub_key = verification.split(b",")
                 their_role, their_pub_key = their_pub_key[0:1], their_pub_key[1:]
                 proof = decrypt(verification, self.port)
-                proof, new_port, node_id = proof.split(b",")
+                if authenticate_public_key(their_pub_key) is True:
+                    proof, new_port, node_id = proof.split(b",")
 
-                # Now we must verify the other nodes credentials
-                randn = str(random.random())
-                message = (
-                    proof
-                    + b","
-                    + f"{self.port}".encode()
-                    + b","
-                    + self.key_hash.encode()
-                    + b","
-                    + randn.encode()
-                )
-                encrypted_message = encrypt(message, port, their_pub_key)
-                sock.send(encrypted_message)
-                response = sock.recv(4096)
-
-                if randn == response.decode():
-                    # Form connection
-                    thread_client = self.create_connection(
-                        sock, host, int(new_port), node_id, port, role=their_role
+                    # Now we must verify the other nodes credentials
+                    randn = str(random.random())
+                    message = (
+                        proof
+                        + b","
+                        + f"{self.port}".encode()
+                        + b","
+                        + self.key_hash.encode()
+                        + b","
+                        + randn.encode()
                     )
-                    thread_client.start()
-                    thread_client.latency = latency
+                    encrypted_message = encrypt(message, port, their_pub_key)
+                    sock.send(encrypted_message)
+                    response = sock.recv(4096)
 
-                    self.nodes[node_id] = thread_client
-                    self.connections.append(self.nodes[node_id])
-
-                    # If reconnection to this host is required, add to the list
-                    if reconnect:
-                        self.debug_print(
-                            f"connect_with_node: reconnection check enabled on {host}:{port}"
+                    if randn == response.decode():
+                        # Form connection
+                        thread_client = self.create_connection(
+                            sock, host, int(new_port), node_id, port, role=their_role
                         )
-                        self.reconnect.append({"host": host, "port": port, "tries": 0})
+                        thread_client.start()
+                        thread_client.latency = latency
 
-                        return False
+                        self.nodes[node_id] = thread_client
+                        self.connections.append(self.nodes[node_id])
 
-                    connected = True
+                        # If reconnection to this host is required, add to the list
+                        if reconnect:
+                            self.debug_print(
+                                f"connect_with_node: reconnection check enabled on {host}:{port}"
+                            )
+                            self.reconnect.append(
+                                {"host": host, "port": port, "tries": 0}
+                            )
 
+                            return False
+
+                        connected = True
+
+                    else:
+                        sock.close()
+                        self.debug_print(
+                            f"SmartNode: Connection refused, invalid proof!: {node_id}"
+                        )
                 else:
                     sock.close()
                     self.debug_print(
-                        f"SmartNode: Connection refused, invalid proof!: {node_id}"
+                        f"SmartNode: Connection refused, invalid key!: {their_pub_key}"
                     )
 
             except Exception as error:
@@ -445,7 +467,12 @@ class SmartNode(Node):
                     node = n
                     break
 
+            if node is None:
+                return False
+
             node_info = get_connection_info(node)
+            self.messages[node.node_id] = {"requests": [], "most-recent": 0}
+
             self.store_key_value_pair(node.node_id, node_info)
             return True
 
@@ -588,10 +615,17 @@ class SmartNode(Node):
             bucket.add_node(self.routing_table[key])
             return True
 
-        else:
-            # Pass along to another node (x replication factor)
+        # Pass along to another node (x replication factor)
+        num_validators = self.contract.functions.getValidatorIdCounter().call() - 1
+        random_ids = [random.randrange(1, num_validators + 1) for _ in range(3)]
+
+        for validator_id in random_ids:
+            validator_state = self.contract.functions.getValidatorState(
+                validator_id
+            ).call()
+
             target_node = self.query_routing_table(key)
-            self.store_key_value_pair_with_acknowledgment(key, value, target_node)
+            self.request_store_key_value_pair(key, value, target_node)
 
         # Replicate the data to the next closest nodes
         # for i in range(self.replication_factor):
@@ -599,13 +633,9 @@ class SmartNode(Node):
         #     if next_node:
         #         next_node.store(key, value)
 
-    def store_key_value_pair_with_acknowledgment(self, key, value, node):
-        pass
-
-    def forward_to_other_node(self, key, value):
-        target_node = self.query_routing_table(hash_key(key))
-        pickled = pickle.dumps((key, value))
-        self.send_to_node(target_node, b"STORE" + pickled)
+    def request_store_key_value_pair(self, key: bytes, value, node: Connection):
+        data = b"STORE" + pickle.dumps((key, value))
+        self.send_to_node(node, data)
 
     def calculate_bucket_index(self, key_int):
         """
@@ -627,3 +657,9 @@ class SmartNode(Node):
             self.debug_print(f"Key '{key}' deleted from DHT.")
         else:
             self.debug_print(f"Key '{key}' not found in DHT.")
+
+    def ping(self, node_id):
+        connection = self.query_routing_table(node_id)
+        start_time = time.time()
+        self.send_to_node(connection, b"PING")
+        self.messages[node_id] = start_time

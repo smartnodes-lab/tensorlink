@@ -183,9 +183,6 @@ class Validator(TorchNode):
                 del self.node_requests[module_id]
                 break
 
-    def update_job(self, job_bytes: bytes):
-        job = pickle.loads(job_bytes)
-
     def confirm_job_integrity(self, job: dict, user: Connection):
         keys = [
             "author",
@@ -202,3 +199,19 @@ class Validator(TorchNode):
         assert job["id"] in self.routing_table.keys(), "Job not found in routing table."
 
         self.routing_table[job["id"]] = job
+
+    def distribute_job(self):
+        """Distribute job to a few other non-seed validators"""
+        for validator in self.validators:
+            pass
+        pass
+
+    def update_job(self, job_bytes: bytes):
+        """Update non-seed validators, loss, accuracy, other info"""
+        job = pickle.loads(job_bytes)
+
+    def create_worker(self):
+        pass
+
+    def update_worker(self):
+        pass

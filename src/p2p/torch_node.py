@@ -38,7 +38,6 @@ class TorchNode(SmartNode):
         self.master = False
 
         # Stores connections and their context
-        self.node_stats = {}
         self.node_requests = {}
         self.distributed_graph = {}
 
