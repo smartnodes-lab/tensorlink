@@ -1,3 +1,4 @@
+import hashlib
 from typing import Union
 import socket
 import time
@@ -14,28 +15,30 @@ class Connection(threading.Thread):
         sock: socket.socket,
         host: str,
         port: int,
-        node_id: str,
-        parent_port: int = None,
-        role=None,
+        main_port: int,
+        node_key: bytes,
+        role: int,
     ):
         super(Connection, self).__init__()
-
+        self.ping = -1
+        self.pinged = -1
         self.host = host
         self.port = port
-        self.parent_port = parent_port
+        self.main_port = port
         self.main_node = main_node
         self.sock = sock
         self.terminate_flag = threading.Event()
+        self.stats = {}
 
-        self.node_id = node_id
+        self.node_key = node_key
+        self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(60)
         self.latency = 0
-        self.stats = {}
         self.chunk_size = 131_072
 
         # End of transmission + compression characters for the network messages.
-        self.EOT_CHAR = b"SALLAM"
+        self.EOT_CHAR = b"CHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
 
     def compress(self, data):
@@ -150,13 +153,6 @@ class Connection(threading.Thread):
 
         self.sock.settimeout(None)
         self.sock.close()
-
-    def measure_latency(self) -> float:
-        start_time = time.time()
-        self.send(b"LATENCY_TEST")
-        self.sock.recv(128)
-        end_time = time.time()
-        return end_time - start_time
 
     """
     Connection thread between two nodes that are able to send/stream data from/to

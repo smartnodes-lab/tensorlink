@@ -1,13 +1,8 @@
-from src.p2p.connection import Connection
-from src.p2p.smart_node import SmartNode
 from src.ml.model_analyzer import get_gpu_memory
+from src.p2p.smart_node import SmartNode
+from src.p2p.connection import Connection
 
-import torch.nn as nn
-import threading
-import random
-import hashlib
 import pickle
-import time
 
 
 class TorchNode(SmartNode):
@@ -15,188 +10,132 @@ class TorchNode(SmartNode):
         self,
         host: str,
         port: int,
-        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
+        off_chain_test=False,
     ):
         super(TorchNode, self).__init__(
             host,
             port,
-            private_key,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
+            off_chain_test=off_chain_test,
         )
 
-        # State info
+        # Available GPU memory estimation
         self.available_memory = get_gpu_memory()
-        self.state = 0
 
-        # Model training parameters
-        self.training = False
-        self.master = False
-
-        # Stores connections and their context
-        self.node_requests = {}
-        self.distributed_graph = {}
-
+        # Model parameters
         self.modules = {}
         self.optimizers = {}
         self.parameters = {}
         self.state_updates = {}
-        self.updater_flag = threading.Event()
 
-        self.key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
+        # Master flag for handling different types of storage as master
+        self.master = False
 
-    def stream_data(self, data: bytes, node: Connection) -> bool:
+    def handle_data(self, data: bytes, node: Connection):
         try:
-            handled = super().stream_data(data, node)
+            handled = super().handle_data(data, node)
+            ghost = 0
 
             if not handled:
-
-                if b"REQUESTS" == data[:8]:
-                    self.debug_print(f"RECEIVED STATS REQUEST")
-                    self.handle_statistics_request(node)
-                    return True
-
-                elif b"RESPONSE" == data[:8]:
-                    self.debug_print(f"RECEIVED STATS")
-                    stats = pickle.loads(data[8:])
-                    node_hash = stats["id"]
-                    self.nodes[node_hash.encode()].stats = stats
-                    return True
-
-                elif b"LOADED" == data[:6]:
-                    self.debug_print(f"Successfully offloaded submodule to worker.")
+                if b"LOADED" == data[:6]:
                     pickled = data[6:]
-                    self.distributed_graph[pickled] = node
+                    self.debug_print(
+                        f"Successfully offloaded submodule to: {node.node_id}"
+                    )
+                elif b"FORWARD" == data[:7]:
+                    # Received a forward pass
+                    self.debug_print(
+                        f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6), 1} MB"
+                    )
 
-                return False
+                    if self.master:
+                        # TODO we must check that the forward received corresponds to a sent pass/specific module
+                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
+                        self.modules["Master"].forward_queues[n_micro].put(
+                            ([n_iter, n_micro, module_id], tensor)
+                        )
 
-            else:
+                    # TODO we must check that the forward received corresponds to a sent pass/specific module
+                    elif self.modules:
+                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
+                        self.modules[module_id].forward_queues.put(
+                            ([n_iter, n_micro], tensor)
+                        )
 
-                return True
+                elif b"BACKWARD" == data[:8]:
+                    # TODO same with backwards pass
+                    self.debug_print(
+                        f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                    )
+
+                    # Master-specific handling (ie for DistributedModel)
+                    if self.master:
+                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
+                        self.modules["Master"].backward_queues[n_micro].put(
+                            ([n_iter, n_micro, module_id], tensor)
+                        )
+
+                    # Module-specific handling (ie for OffloadedModule / nn.Module)
+                    elif self.modules:
+                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
+                        self.modules[module_id].backward_queues.put(
+                            ([n_iter, n_micro], tensor)
+                        )
+
+                # Handle requests for module parameters
+                elif b"PARAMS-REQ" == data[:10]:
+                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+
+                    # TODO Must ensure requesting node is indeed the master or an overseeing validator
+                    module_id = data[10:]
+                    self.send_parameters(
+                        node, self.modules[module_id].parameters(), module_id
+                    )
+
+                    return True
+
+                # Handle and store responses from a parameters request
+                elif b"PARAMETERS" == data[:10]:
+                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+                    module_id, parameters = pickle.loads(data[10:])
+                    self.parameters[module_id] = parameters
+
+                else:
+                    # We do not log a ghost here since SmartNode is meant to be a super class and this should
+                    # only be invoked by a super call
+                    return False
+
+            if ghost > 0:
+                self.update_node_stats(node.node_id, "GHOST")
+                # TODO: potentially some form of reporting mechanism via ip and port
+
+            return True
 
         except Exception as e:
-            self.debug_print(f"torch_node->stream_data: {e}")
-            raise e
-
-    def send_tensor(self, tensor, node: Connection):
-        # tensor_bytes = self.BoT + pickle.dumps(tensor) + self.EoT
-        tensor_bytes = b"TENSOR" + pickle.dumps(tensor)
-        self.debug_print(
-            f"worker: sending {round(tensor_bytes.__sizeof__() / 1e9, 3)} GB"
-        )
-        self.send_to_node(node, tensor_bytes)
+            self.debug_print(f"handle_data: Error handling data: {e}")
 
     def send_forward(self, node: Connection, args, context):
+        """Send forward pass to node, must contain args (module args) and context (module + epoch id)"""
         pickled_data = b"FORWARD" + pickle.dumps((context, args))
-        print(hashlib.sha256(pickled_data).hexdigest())
         self.send_to_node(node, pickled_data)
 
     def send_backward(self, node: Connection, args, context):
+        """Send backward pass to node, must contain args (module args) and context (module + epoch id)"""
         pickled_data = b"BACKWARD" + pickle.dumps((context, args))
         self.send_to_node(node, pickled_data)
 
     def send_parameters(self, node: Connection, parameters, module_id):
+        """Send specific module parameters
+        TODO should be accompanied by a requested proof (from smart contract) or the specific user
+        """
         pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
         self.send_to_node(node, pickled_data)
 
     def send_parameters_req(self, node: Connection, module_id):
-        self.send_to_node(node, b"PARAMSREQ" + module_id)
-
-    def send_train_updated(self, node: Connection, mode: bool, module_id):
-        tag = b"TU-REQ"
-        mode = b"1" if mode else b"0"
-        data = tag + mode + module_id
-        self.send_to_node(node, data)
-
-    def send_update_train_request(self, node: Connection, mode: bool, module_id):
-        tag = b"UT-REQ"
-        mode = b"1" if mode else b"0"
-        data = tag + mode + module_id
-        self.send_to_node(node, data)
-
-    def send_module(self, module: nn.Module, node: Connection, prefix: bytes = b""):
-        module.parent = self.key_hash
-        module_bytes = pickle.dumps(module)
-        module_bytes = prefix + b"MODULE" + module_bytes
-
-        print("SENDING MODULE")
-        self.send_to_node(node, module_bytes)
-        time.sleep(1)
-
-    def send_statistics_request(self, node):
-        message = b"REQUESTS"
-        self.send_to_node(node, message)
-
-    def broadcast_statistics(self, callee, additional_context: dict = None):
-        memory = self.available_memory
-
-        stats = {
-            "id": self.rsa_pub_key + self.port.to_bytes(4, "big"),
-            "memory": memory,
-            "state": self.state,
-        }
-
-        if additional_context is not None:
-            for k, v in additional_context.items():
-                if k not in stats.keys():
-                    stats[k] = v
-
-        stats_bytes = pickle.dumps((self.key_hash, stats))
-        stats_bytes = b"RESPONSE" + stats_bytes
-        self.send_to_node(callee, stats_bytes)
-
-    # Iterate connected nodes and request their current state
-    def update_worker_stats(self):
-        while not self.updater_flag.is_set():
-
-            for node in self.connections:
-                # Beforehand, check the last time the worker has updated (self.prune_workers?)
-                self.send_statistics_request(node)
-                time.sleep(1)
-
-            if self.nodes:
-                self.updater_flag.set()
-
-            time.sleep(5)
-
-    # Iterate connected nodes and request their current state
-    def request_worker_stats(self):
-        # while not self.updater_flag.is_set():
-
-        for node in self.connections:
-            # if hasattr(node, "")
-            # Beforehand, check the last time the worker has updated (self.prune_workers?)
-            self.send_statistics_request(node)
-            time.sleep(1)
-            # if self.nodes:
-            #     self.updater_flag.set()
-
-            # time.sleep(5)
-        return
-
-    def handle_statistics_request(self, callee, additional_context: dict = None):
-        # memory = self.available_memory
-        stats = {
-            "id": self.key_hash,
-            "memory": self.available_memory,
-            "role": self.state,
-            "training": self.training,
-            #         # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
-        }
-
-        if additional_context is not None:
-            for k, v in additional_context.items():
-                if k not in stats.keys():
-                    stats[k] = v
-
-        stats_bytes = pickle.dumps(stats)
-        stats_bytes = b"RESPONSE" + stats_bytes
-        self.send_to_node(callee, stats_bytes)
-
-    def select_candidate_worker(self):
-        candidate_node = max(self.nodes.values(), key=lambda x: x["memory"])
-        return candidate_node
+        """Request parameters from a specific worker"""
+        self.send_to_node(node, b"PARAMS-REQ" + module_id)

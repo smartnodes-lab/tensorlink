@@ -8,59 +8,124 @@ import time
 import os
 
 
+def assert_job_req(job_req: dict):
+    required_keys = [
+        "author",
+        "capacity",
+        "dp_factor",
+        "distribution",
+        "id",
+        "job_number",
+        "n_workers",
+        "seed_validators",
+        "workers",
+    ]
+
+    return set(job_req.keys()) == set(required_keys)
+
+
 class Validator(TorchNode):
     def __init__(
         self,
         host: str,
         port: int,
-        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
+        off_chain_test=False,
+        private_key=None,
     ):
         super(Validator, self).__init__(
             host,
             port,
-            private_key,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
+            off_chain_test=off_chain_test,
         )
 
         # Additional attributes specific to the Validator class
-        self.job_ids = []
-        self.worker_ids = []
+        self.jobs = []
         self.role = b"V"
 
-    def stream_data(self, data, node: Connection):
+        if private_key:
+            self.account = self.chain.eth.account.from_key(private_key)
+
+        self.chain.eth.default_account = self.account.address
+
+    def handle_data(self, data, node: Connection):
         """
         Callback function to receive streamed data from worker nodes.
         """
-        # Process streamed data and trigger validation if necessary
         try:
-
-            handled = super().stream_data(data, node)
+            handled = super().handle_data(data, node)
+            ghost = 0
 
             # Try worker-related tags if not found in parent class
             if not handled:
-
                 # Job acceptance from worker
-                if b"ACCEPTJOB" == data[:9]:
-                    self.debug_print(f"Validator:worker accepted job")
-                    module_id = pickle.loads(data[9:])
-                    self.node_requests[tuple(module_id)] = node.node_id
+                if b"ACCEPT-JOB" == data[:10]:
+                    job_id = data[10:74]
+                    module_id = data[74:148]
+
+                    if (
+                        node.node_id in self.requests
+                        and job_id + module_id in self.requests[node.node_id]
+                    ):
+                        self.debug_print(f"Validator: worker has accepted job!")
+                        self.requests[node.node_id].remove(job_id + module_id)
+
+                    else:
+                        ghost += 1
 
                 # Job decline from worker
-                elif b"DECLINEJOB" == data[:10]:
-                    self.debug_print(f"Validator:worker declined job")
-                    pass
+                elif b"DECLINE-JOB" == data[:11]:
+                    self.debug_print(f"Validator: worker has declined job!")
+                    if (
+                        node.node_id in self.requests
+                        and b"JOB-REQ" in self.requests[node.node_id]
+                    ):
+                        self.requests[node.node_id].remove(b"JOB-REQ")
+                    else:
+                        ghost += 1
 
                 # Job creation request from user
-                elif b"JOBREQ" == data[:6]:
-                    self.debug_print(f"Validator:user requested job")
-                    job_req = pickle.loads(data[6:])
-                    self.create_job(job_req)
-                    return True
+                elif b"JOB-REQ" == data[:7]:
+                    self.debug_print(f"Validator: user requested job.")
+                    job_req = pickle.loads(data[7:])
+
+                    # Ensure all job data is present
+                    if assert_job_req(job_req) is False:
+                        ghost += 1
+                        # TODO ask the user to send again if id was specified
+                    else:
+                        # Get author of job listed on SC and confirm job and node id TODO reduce number of calls
+                        job_author = self.contract.functions.getJobAuthor(
+                            job_req["job_number"]
+                        ).call()
+                        job_author_id = self.contract.functions.userHashByAddress(
+                            job_author
+                        ).call()
+
+                        if job_author_id.encode() == node.node_id:
+                            self.create_job(job_req)
+                            print("Cheese")
+                        else:
+                            ghost += 1
+
+                elif b"STATS-RESPONSE" == data[:14]:
+                    self.debug_print(f"Received stats from worker: {node.node_id}")
+
+                    if (
+                        node.node_id not in self.requests
+                        or b"STATS" not in self.requests[node.node_id]
+                    ):
+                        ghost += 1
+
+                    else:
+                        stats = pickle.loads(data[14:])
+                        self.requests[node.node_id].remove(b"STATS")
+                        self.nodes[node.node_id].stats = stats
 
                 elif b"JOBUPDATE" == data[:9]:
                     self.debug_print(f"Validator:user update job request")
@@ -69,10 +134,14 @@ class Validator(TorchNode):
                 else:
                     return False
 
+            if ghost > 0:
+                self.update_node_stats(node.node_id, "GHOST")
+                # TODO: potentially some form of reporting mechanism via ip and port
+
             return True
 
         except Exception as e:
-            self.debug_print(f"Validator:stream_data:{e}")
+            self.debug_print(f"Validator: stream_data: {e}")
             raise e
 
     # def validate(self, job_id: bytes, module_id: ):
@@ -106,54 +175,51 @@ class Validator(TorchNode):
     def create_job(self, job_data):
         # Method must be invoked by job request from a user
         # We receive a minimum job information data structure from user
-
         modules = job_data["distribution"].copy()
+        job_id = job_data["id"]
+        self.store_value(job_id, job_data)
 
-        # Query DHT for user id and reputation
-        # user = self.query_routing_table(expected_sample_job["id"])
+        # Query SC for user id and reputation?
 
         # Update connected workers stats
         self.request_worker_stats()
+        time.sleep(1)
 
         # Request workers to handle job
-        recruitment_threads = []
         n_modules = len(modules)
-        current_module = modules.pop(0)
+        workers = [
+            self.nodes[worker_id].stats
+            for worker_id in self.workers
+            if self.nodes[worker_id].stats
+        ]
 
-        for key_hash, node in self.nodes.items():
-            if (
-                node.role == b"W" and node.stats["training"] is True
-            ):  # Worker is currently active and has the memory
-                if node.stats["memory"] >= current_module[1]:
-                    worker = self.nodes[key_hash]
-                    t = threading.Thread(
-                        target=self.send_job_request,
-                        args=(worker, current_module[0], current_module[1]),
-                    )
-                    t.start()
-                    recruitment_threads.append(t)
+        # Cycle thru offloaded modules and send request to workers for offloading
+        recruitment_threads = []
+        for module_id, module in modules.items():
 
-                    if len(modules) > 1:
-                        current_module = modules.pop(0)
-                    else:
-                        break
+            t = threading.Thread(
+                target=self.recruit_worker,
+                args=(
+                    job_data["author"],
+                    job_id,
+                    module_id,
+                    module["size"],
+                ),
+            )
+            t.start()
+            recruitment_threads.append(t)
 
         for t in recruitment_threads:
             t.join()
 
+        # Send recruited worker info to user
         requesting_node = self.nodes[job_data["author"]]
-        recruited_workers = []
+        worker_info = [
+            (k, self.query_dht(values["worker"]))
+            for k, values in job_data["distribution"].items()
+        ]
 
-        # Cycle thru each model and make sure a worker has accepted them
-        for n in range(n_modules):
-            mod_id = tuple(job_data["distribution"][n][0])
-            candidate_node_id = self.node_requests[tuple(mod_id)]
-            candidate_node = self.query_routing_table(candidate_node_id)
-            recruited_workers.append([mod_id, candidate_node])
-
-        self.send_to_node(
-            requesting_node, b"ACCEPTJOB" + pickle.dumps(recruited_workers)
-        )
+        self.send_to_node(requesting_node, b"ACCEPT-JOB" + pickle.dumps(worker_info))
 
         # job = {
         #     "id": b"",  # Job ID hash
@@ -168,20 +234,62 @@ class Validator(TorchNode):
         # Recruit available workers and send them to user?
 
         # Store job and replicate to other nodes
-        self.store_key_value_pair(job_data["id"].encode(), job_data)
+        # self.store_key_value_pair(job_data["id"].encode(), job_data)
 
-    def send_job_request(self, node, module_id, module_size: int):
-        data = pickle.dumps([module_id, module_size])
-        data = b"JOBREQ" + data
-        module_id = tuple(module_id)
-        self.node_requests[module_id] = None
-        self.send_to_node(node, data)
-        start_time = time.time()
+    def recruit_worker(
+        self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int
+    ) -> bool:
+        data = pickle.dumps([user_id, job_id, module_id, module_size])
+        data = b"JOB-REQ" + data
+        found = False
 
-        while self.node_requests[module_id] is None:
-            if time.time() - start_time > 5:
-                del self.node_requests[module_id]
-                break
+        # Cycle through workers finding the closest free memory to required memory
+        while not found:
+            selected_worker = None
+            closest_mem_diff = float("inf")
+
+            for worker_id in self.workers:
+                worker_stats = self.nodes[worker_id].stats
+
+                if worker_stats:
+                    worker_mem = worker_stats["memory"]
+
+                    if worker_mem >= module_size:
+                        memory_diff = worker_mem - module_size
+
+                        if memory_diff < closest_mem_diff:
+                            closest_mem_diff = memory_diff
+                            selected_worker = worker_stats["id"]
+
+            # If we can no longer find a worker with the required memory
+            if not selected_worker:
+                return False
+
+            if isinstance(module_id, str):
+                module_id = module_id.encode()
+
+            node = self.nodes[selected_worker]
+            self.store_request(node.node_id, job_id + module_id)
+            self.send_to_node(node, data)
+
+            start_time = time.time()
+            not_found = None
+            while module_id in self.requests[node.node_id]:
+                if time.time() - start_time > 5:
+                    self.requests[node.node_id].remove(module_id)
+                    not_found = True
+                    break
+
+            if not_found:
+                continue
+            else:
+                node.stats["memory"] -= module_size
+
+                job = self.query_dht(job_id)
+                job["distribution"][module_id]["worker"] = node.node_id
+                return True
+        else:
+            return False
 
     def confirm_job_integrity(self, job: dict, user: Connection):
         keys = [
@@ -199,6 +307,14 @@ class Validator(TorchNode):
         assert job["id"] in self.routing_table.keys(), "Job not found in routing table."
 
         self.routing_table[job["id"]] = job
+
+    def request_worker_stats(self):
+        for worker_id in self.workers:
+            connection = self.nodes[worker_id]
+            message = b"STATS-REQUEST"
+            self.send_to_node(connection, message)
+            self.store_request(connection.node_id, b"STATS")
+            # TODO disconnect workers who do not respond/have not recently responded to request
 
     def distribute_job(self):
         """Distribute job to a few other non-seed validators"""

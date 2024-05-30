@@ -254,13 +254,5 @@ class Node(threading.Thread):
                 )
                 self.reconnect.remove(node_to_check)
 
-    def handle_message(self, node: Connection, data):
-        self.debug_print(
-            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB"
-        )
-
-        if self.callback is not None:
-            self.callback(data, node)
-
     # def measure_latency(self, node: Connection):
     #     start_time = time.time()

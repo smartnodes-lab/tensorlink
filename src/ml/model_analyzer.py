@@ -21,7 +21,7 @@ def get_gpu_memory():
             device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
             memory += device_memory
     else:
-        # CPU should be able to handle 1 GB (temporary fix)
+        # TODO CPU should be able to handle 1 GB (temporary fix)
         memory += 1.37e9
 
     return memory
@@ -107,7 +107,11 @@ def find_module(module: nn.Module, target_name: str, ids: list = []):
 
 
 def access_module(module: nn.Module, indices: list):
-    assert len(indices) > 0
+    """Access a module from a model based on its integer ID (depth)"""
+    if len(indices) <= 0:
+        # First module selecrted
+        return module, "root"
+
     current_module = module
     module_name = None
     for index in indices:

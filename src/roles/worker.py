@@ -27,55 +27,42 @@ class Worker(TorchNode):
         self,
         host: str,
         port: int,
-        private_key: str,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
+        off_chain_test=False,
+        public_key=None,
     ):
         super(Worker, self).__init__(
             host,
             port,
-            private_key,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
+            off_chain_test=off_chain_test,
         )
+        self.training = False
         self.role = b"W"
-
         self.loss = None
+        self.public_key = public_key
 
-    def stream_data(self, data: bytes, node: Connection):
+    def handle_data(self, data: bytes, node: Connection):
         """
-                Handle incoming tensors from connected nodes and new job requests
-
-                Todo:
-        d            - ensure correct nodes sending data
-                    - potentially move/forward method directly to Connection to save data via identifying data
-                        type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
+        Handle incoming tensors from connected nodes and new job requests
+        Todo:
+            - ensure correct nodes sending data
+            - potentially move/forward method directly to Connection to save data via identifying data
+                type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
         """
 
         try:
-
-            handled = super().stream_data(data, node)
+            handled = super().handle_data(data, node)
+            ghost = 0
 
             # Try worker-related tags if not found in parent class
             if not handled:
-
-                # The case where we load via downloaded pickle file (potential security threat? & slow)
-                if b"DONE STREAM" == data[:11]:
-                    file_name = f"streamed_data_{node.host}_{node.port}"
-
-                    with open(file_name, "rb") as f:
-                        streamed_bytes = f.read()
-
-                    handled = self.stream_data(streamed_bytes, node)
-
-                    os.remove(file_name)
-
-                    return handled
-
                 # Handle incoming forward pass request
-                elif b"FORWARD" == data[:7]:
+                if b"FORWARD" == data[:7]:
                     self.debug_print(
                         f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
                     )
@@ -165,22 +152,34 @@ class Worker(TorchNode):
 
                         return True
 
-                elif b"JOBREQ" == data[:6]:
+                elif b"STATS-REQUEST" == data[:13]:
+                    self.debug_print(f"Received stats request from: {node.node_id}")
+                    self.handle_statistics_request(node)
+
+                elif b"JOB-REQ" == data[:7]:
                     try:
                         # Accept job request from validator if we can handle it
-                        module_id, module_size = pickle.loads(data[6:])
+                        user_id, job_id, module_id, module_size = pickle.loads(data[7:])
 
-                        if self.available_memory > module_size and self.training:
+                        if (
+                            self.available_memory >= module_size
+                        ):  # TODO Ensure were active?
                             # Respond to validator that we can accept the job
-                            data = b"ACCEPTJOB" + pickle.dumps(module_id)
+                            # Store a request to wait for the user connection as well
+                            self.store_request(user_id + module_id, b"AWAIT-USER")
+                            data = b"ACCEPT-JOB" + job_id + module_id
+
+                            # Update available memory
                             self.available_memory -= module_size
 
                         else:
-                            data = b"DECLINEJOB"
+                            data = b"DECLINE-JOB"
 
                         self.send_to_node(node, data)
 
                     except Exception as e:
+                        print(data)
+                        print(node.main_port)
                         raise e
 
                 # elif b"PoL" == data[:3]:
@@ -226,63 +225,64 @@ class Worker(TorchNode):
 
                         return True
 
-                    return True
+                else:
+                    return False
 
-                return False
+            if ghost > 0:
+                self.update_node_stats(node.node_id, "GHOST")
+                # TODO: potentially some form of reporting mechanism via ip and port
 
-            else:
-
-                return True
+            return True
 
         except Exception as e:
             self.debug_print(f"worker:stream_data:{e}")
             raise e
 
-    def run(self):
-        # Thread for handling incoming connections
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-
-        # Thread for periodic worker statistics updates
-        # stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
-        # stats_updater.start()
-
-        # time.sleep(5)
-        # self.updater_flag.set()
-
-        # # Thread for handling incoming tensors from connected nodes (just an idea)
-        # data_stream = threading.Thread(target=self.stream_data, daemo=True)
-        # data_stream.start()
-
-        # Main worker loop
-        while not self.terminate_flag.is_set():
-            if (
-                self.training and self.port != 5026
-            ):  # Port included for master testing without master class
-                self.train_loop()
-
-            # Include the following steps:
-            # 1. Broadcast GPU memory statistics
-            # self.broadcast_statistics()
-
-            # 5. Handle requests for proof of training
-            # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
-
-            self.reconnect_nodes()
-            time.sleep(1)
-
-        print("Node stopping...")
-        for node in self.connections:
-            node.stop()
-
-        time.sleep(1)
-
-        for node in self.connections:
-            node.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
+    # def run(self):
+    #     # Thread for handling incoming connections
+    #     listener = threading.Thread(target=self.listen, daemon=True)
+    #     listener.start()
+    #
+    #     # Thread for periodic worker statistics updates
+    #     # stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
+    #     # stats_updater.start()
+    #
+    #     # time.sleep(5)
+    #     # self.updater_flag.set()
+    #
+    #     # # Thread for handling incoming tensors from connected nodes (just an idea)
+    #     # data_stream = threading.Thread(target=self.stream_data, daemo=True)
+    #     # data_stream.start()
+    #
+    #     # Main worker loop
+    #     while not self.terminate_flag.is_set():
+    #         if (
+    #             self.training and self.port != 5026
+    #         ):  # Port included for master testing without master class
+    #             self.train_loop()
+    #
+    #         # Include the following steps:
+    #         # 1. Broadcast GPU memory statistics
+    #         # self.broadcast_statistics()
+    #
+    #         # 5. Handle requests for proof of training
+    #         # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
+    #
+    #         # self.reconnect_nodes()
+    #         time.sleep(1)
+    #
+    #     print("Node stopping...")
+    #     for node in self.connections:
+    #         node.stop()
+    #
+    #     time.sleep(1)
+    #
+    #     for node in self.connections:
+    #         node.join()
+    #
+    #     self.sock.settimeout(None)
+    #     self.sock.close()
+    #     print("Node stopped")
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
@@ -354,6 +354,29 @@ class Worker(TorchNode):
 
         if self.training:
             proof["output"] = handle_output(self.model(dummy_input)).sum()
+
+    def handle_statistics_request(self, callee, additional_context: dict = None):
+        """When a validator requests a stats request, return stats"""
+        # memory = self.available_memory
+        stats = {
+            "id": self.rsa_key_hash,
+            "memory": self.available_memory,
+            "role": self.role,
+            "training": self.training,
+            # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
+        }
+
+        if additional_context is not None:
+            for k, v in additional_context.items():
+                if k not in stats.keys():
+                    stats[k] = v
+
+        stats_bytes = pickle.dumps(stats)
+        stats_bytes = b"STATS-RESPONSE" + stats_bytes
+        self.send_to_node(callee, stats_bytes)
+
+    def activate(self):
+        self.training = True
 
     """Key Methods to Implement"""
     # def request_worker(self, nodes, module_memory: int, module_type: int):
