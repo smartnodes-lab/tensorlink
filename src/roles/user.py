@@ -133,7 +133,8 @@ class User(TorchNode):
         # Publish job request to smart contract (args: n_seed_validators, requested_capacity), returns validator IDs
         # TODO check if user already has job and switch to that if so, (re initialize a job if failed to start or
         #  disconnected, request data from validators/workers if disconnected and have to reset info.
-        if self.contract.functions.jobIdByUser(user_id).call() > 1:
+        job_id = self.contract.functions.jobIdByUser(user_id).call()
+        if job_id > 1:
             self.debug_print(
                 f"request_job: User has active job, loading active job. Delete job request if this was unintentional!"
             )
@@ -161,10 +162,7 @@ class User(TorchNode):
 
             self.debug_print("request_job: Job requested on Smart Contract!")
 
-        job_number = self.contract.functions.jobIdByUser(user_id).call()
-        validator_addresses = self.contract.functions.getJobValidators(
-            job_number
-        ).call()
+        validator_addresses = self.contract.functions.getJobValidators(job_id).call()
 
         # Connect to seed validators
         validator_hashes = []
