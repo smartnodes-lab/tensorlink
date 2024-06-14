@@ -15,6 +15,6 @@ if __name__ == "__main__":
 
     worker.start()
     worker.activate()
-    val_id = worker.contract.functions.validatorHashById(1).call()
 
+    val_id = worker.contract.functions.validatorKeyById(1).call()
     worker.connect_node(val_id, "127.0.0.1", 5026)

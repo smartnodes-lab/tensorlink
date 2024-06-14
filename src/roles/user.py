@@ -33,14 +33,30 @@ class User(TorchNode):
             upnp=upnp,
             off_chain_test=off_chain_test,
         )
-
+        print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
         self.role = b"U"
         self.job = None
+
+        # user_id = self.contract.functions.userIdByHash(
+        #     self.rsa_key_hash.decode()
+        # ).call()
+        # if user_id <= 0:
+        #     print(
+        #         f"User not registered on Smart Nodes! Your current public ID is {self.rsa_key_hash}"
+        #     )
+        #     print(f"Awaiting user ({self.rsa_key_hash}) registration...")
+        #
+        #     time.sleep(10)
+        #     while (
+        #         self.contract.functions.userIdByHash(self.rsa_key_hash.decode()).call()
+        #         <= 0
+        #     ):
+        #         time.sleep(5)
 
         if private_key:
             self.account = self.chain.eth.account.from_key(private_key)
 
-        self.chain.eth.default_account = self.account.address
+            self.chain.eth.default_account = self.account.address
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -101,7 +117,9 @@ class User(TorchNode):
         assert not self.off_chain_test, "Cannot request job without SC connection."
 
         # Ensure we (user) are registered
-        user_id = self.contract.functions.getUserId(self.rsa_key_hash.decode()).call()
+        user_id = self.contract.functions.userIdByHash(
+            self.rsa_key_hash.decode()
+        ).call()
         if user_id < 1:
             self.debug_print(f"request_job: User not registered on smart contract!")
             return None
@@ -134,7 +152,7 @@ class User(TorchNode):
         # TODO check if user already has job and switch to that if so, (re initialize a job if failed to start or
         #  disconnected, request data from validators/workers if disconnected and have to reset info.
         job_id = self.contract.functions.jobIdByUser(user_id).call()
-        if job_id > 1:
+        if job_id >= 1:
             self.debug_print(
                 f"request_job: User has active job, loading active job. Delete job request if this was unintentional!"
             )
@@ -162,16 +180,12 @@ class User(TorchNode):
 
             self.debug_print("request_job: Job requested on Smart Contract!")
 
-        validator_addresses = self.contract.functions.getJobValidators(job_id).call()
+        validator_ids = self.contract.functions.getJobValidators(job_id).call()
 
         # Connect to seed validators
         validator_hashes = []
-        for validator in validator_addresses:
-            # TODO reduce the number of smart contract queries, potentially update the mappings and read fns on SC.
-            validator_id = self.contract.functions.validatorIdByAddress(
-                validator
-            ).call()
-            validator_hash = self.contract.functions.validatorHashById(
+        for validator_id in validator_ids:
+            validator_hash = self.contract.functions.validatorKeyById(
                 validator_id
             ).call()
 
@@ -215,15 +229,15 @@ class User(TorchNode):
             "capacity": capacity,
             "dp_factor": n_pipelines,
             "distribution": distribution,
-            "job_number": job_number,
+            "job_number": job_id,
             "n_workers": n_pipelines * len(distribution),
             "seed_validators": validator_hashes,
             "workers": [{} for _ in range(n_pipelines)],
         }
 
         # Get unique job id given current parameters
-        job_id = hashlib.sha256(pickle.dumps(job_request)).hexdigest().encode()
-        job_request["id"] = job_id
+        job_hash = hashlib.sha256(pickle.dumps(job_request)).hexdigest().encode()
+        job_request["id"] = job_hash
         self.job = job_request
 
         # Send job request to multiple validators (seed validators)

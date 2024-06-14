@@ -11,7 +11,16 @@ if __name__ == "__main__":
         debug=True,
         upnp=False,
         off_chain_test=False,
-        private_key="892938adae985cde8831026ceb6d312d9c81dfe7c1d4aba8d7bd3f219bd81385",
+        private_key="1c6768059a3e77d68a2dc3a075c93161803dbe2ad3b72069b6801a1db3a8a8f8",
     )
+
+    # validator2 = Validator(
+    #     ip,
+    #     port + 1,
+    #     debug=True,
+    #     upnp=False,
+    #     off_chain_test=False,
+    #     private_key="d23f58a739fe6dd1390191a67e11d3d681e048168d985c9acb5609bff1f799ea",
+    # )
 
     validator.start()

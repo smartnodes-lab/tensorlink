@@ -48,10 +48,10 @@ class Validator(TorchNode):
         self.jobs = []
         self.role = b"V"
 
-        if private_key:
-            self.account = self.chain.eth.account.from_key(private_key)
-
-        self.chain.eth.default_account = self.account.address
+        if not off_chain_test:
+            self.chain.eth.default_account = self.account.address
+            if private_key:
+                self.account = self.chain.eth.account.from_key(private_key)
 
     def handle_data(self, data, node: Connection):
         """
@@ -99,17 +99,20 @@ class Validator(TorchNode):
                         ghost += 1
                         # TODO ask the user to send again if id was specified
                     else:
-                        # Get author of job listed on SC and confirm job and node id TODO reduce number of calls
-                        job_author = self.contract.functions.getJobAuthor(
-                            job_req["job_number"]
-                        ).call()
-                        job_author_id = self.contract.functions.userHashByAddress(
-                            job_author
+                        # Get author of job listed on SC and confirm job and node id TODO to be implemented post-alpha
+                        # job_author = self.contract.functions.userIdByJob(
+                        #     job_req["job_number"]
+                        # ).call()
+                        # job_author_id = self.contract.functions.userKeyById(
+                        #     job_author
+                        # ).call()
+                        job_id = self.contract.functions.jobIdByUserIdHash(
+                            node.node_id
                         ).call()
 
-                        if job_author_id.encode() == node.node_id:
+                        # if job_author_id.encode() == node.node_id:
+                        if job_id <= 0:
                             self.create_job(job_req)
-                            print("Cheese")
                         else:
                             ghost += 1
 

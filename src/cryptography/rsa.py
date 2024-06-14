@@ -6,11 +6,16 @@ import os
 
 
 def generate_rsa_key_pair(user) -> None:
-    path = f"keys/{user}"
+    system = os.name
+    if system == "posix":  # Unix-based systems (Linux, macOS, etc.)
+        path = os.path.join("/etc/Tensorlink/keys", user)
+    elif system == "nt":  # Windows
+        path = os.path.join("C:\\ProgramData\\Tensorlink\\keys", user)
+    else:
+        raise NotImplementedError(f"Unsupported operating system: {system}")
 
     if not os.path.exists(os.path.join(path, "public_key.pem")):
-        if not os.path.exists(path):
-            os.mkdir(path)
+        os.makedirs(path, exist_ok=True)
 
         # Save private and public rsa keys to files
         with open(os.path.join(path, "private_key.pem"), "wb") as f:
@@ -37,6 +42,7 @@ def generate_rsa_key_pair(user) -> None:
 
 def load_public_key(user):
     path = f"keys/{user}/public_key.pem"
+    print(os.getcwd())
     with open(path, "rb") as f:
         return serialization.load_pem_public_key(f.read(), backend=default_backend())
 
@@ -96,7 +102,6 @@ def get_private_key_obj(private_key_bytes):
 
 
 def get_rsa_pub_key(user, b=False):
-    generate_rsa_key_pair(user)
     public_key = load_public_key(user)
 
     if b is True:
@@ -106,7 +111,6 @@ def get_rsa_pub_key(user, b=False):
 
 
 def get_rsa_priv_key(user, b=False):
-    generate_rsa_key_pair(user)
     private_key = load_private_key(user)
 
     if b is True:

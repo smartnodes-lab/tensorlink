@@ -127,7 +127,6 @@ class Connection(threading.Thread):
                     try:
                         with open(file_name, "ab") as f:
                             f.write(packet)
-                            time.sleep(0.001)
                             buffer = b""
                             b_size = 0
 
@@ -148,8 +147,6 @@ class Connection(threading.Thread):
 
                 else:
                     buffer += chunk
-
-            time.sleep(0.01)
 
         self.sock.settimeout(None)
         self.sock.close()

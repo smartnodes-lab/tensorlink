@@ -17,7 +17,7 @@ import os
 
 load_dotenv()
 
-with open("./src/assets/SmartNodes.json", "r") as f:
+with open("./config/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
 URL = os.getenv("URL")
@@ -116,6 +116,13 @@ class SmartNode(threading.Thread):
         # Initialize node
         self.terminate_flag = threading.Event()
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # More parameters for smart contract / p2p info
+        self.rsa_pub_key = get_rsa_pub_key(self.port, True)
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+        self.role = b""
+        self.id = 0
+
         if upnp:
             self.init_upnp()
 
@@ -136,11 +143,6 @@ class SmartNode(threading.Thread):
             except Exception as e:
                 self.debug_print(f"Could not retrieve contract: {e}")
                 self.stop()
-
-        # More parameters for smart contract / p2p info
-        self.rsa_pub_key = get_rsa_pub_key(self.port, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
-        self.role = b""
 
         # Stores key of stored values
         self.workers = []
@@ -287,7 +289,7 @@ class SmartNode(threading.Thread):
     ) -> bool:
         """Validates incoming node's keys via a random number swap, along with SC verification of connecting user"""
         id_info = connection.recv(4096)
-        _, role, connected_node_id = pickle.loads(id_info)
+        _, role, id_no, connected_node_id = pickle.loads(id_info)
         node_id_hash = hashlib.sha256(connected_node_id).hexdigest().encode()
 
         # If we are the instigator of the connection, we will have received a request to verify our id
@@ -311,12 +313,12 @@ class SmartNode(threading.Thread):
                 if role == b"V":
                     try:
                         # Query contract for users key hash
-                        verified_public_key = self.contract.functions.validatorIdByHash(
-                            node_id_hash.decode()
+                        validator_info = self.contract.functions.getValidatorInfo(
+                            id_no
                         ).call()
 
                         # If validator was not found
-                        if verified_public_key < 1:
+                        if not validator_info[0]:
                             self.close_connection_socket(
                                 connection,
                                 f"handshake: validator role claimed but is not "
@@ -332,7 +334,7 @@ class SmartNode(threading.Thread):
                         )
 
                 elif role == b"U":
-                    # TODO: user handling
+                    # TODO: user handling, to be done once users are required to register (post-alpha)
                     pass
 
                 elif role == b"W":
@@ -358,7 +360,9 @@ class SmartNode(threading.Thread):
                 # Send main port if we are the instigator
                 message = pickle.dumps((self.port, proof, encrypted_number))
             else:
-                message = pickle.dumps((encrypted_number, self.role, self.rsa_pub_key))
+                message = pickle.dumps(
+                    (encrypted_number, self.role, self.id, self.rsa_pub_key)
+                )
 
             connection.send(message)
 
@@ -463,7 +467,7 @@ class SmartNode(threading.Thread):
                 return False
 
             self.debug_print(f"connect_node: connecting to {host}:{port}")
-            message = pickle.dumps((None, self.role, self.rsa_pub_key))
+            message = pickle.dumps((None, self.role, self.id, self.rsa_pub_key))
             sock.send(message)
             return self.handshake(sock, (host, port), instigator=True)
         else:
@@ -471,23 +475,17 @@ class SmartNode(threading.Thread):
 
     def get_validator_count(self):
         """Get number of listed validators on Smart Nodes"""
-        num_validators = self.contract.functions.getValidatorIdCounter().call() - 1
+        num_validators = self.contract.functions.getValidatorCount().call()
         return num_validators
 
     def get_validator_info(self, validator_ind: int):
         """Get validator info from Smart Nodes"""
-        validator_state = self.contract.functions.getValidatorState(
-            validator_ind
-        ).call()
+        validator_state = self.contract.functions.getValidatorInfo(validator_ind).call()
 
         # If validator was active at last state update, retrieve id and request connection info
-        if validator_state > 0:
+        if validator_state:
             # Get validator information from smart contract
-            _, address, id_hash, locked, unlock_time, reputation, active = (
-                self.contract.functions.validators(validator_ind).call()
-            )
-
-            return address, id_hash, locked, unlock_time, reputation, active
+            return validator_state[0], validator_state[1]
 
         else:
             return None
@@ -510,9 +508,7 @@ class SmartNode(threading.Thread):
             validator_contract_info = self.get_validator_info(validator_id)
 
             if validator_contract_info is not None:
-                web3_address, id_hash, locked, unlock_time, reputation, active = (
-                    validator_contract_info
-                )
+                is_active, id_hash = validator_contract_info
                 id_hash = id_hash.encode()
                 validator_p2p_info = self.query_dht(id_hash)
 
@@ -549,6 +545,7 @@ class SmartNode(threading.Thread):
         Retrieve stored value from DHT or query the closest node to a given key.
         * should be run in its own thread due to blocking RPC
         """
+        self.debug_print(f"Querying DHT for {key_hash}")
         closest_node = None
         closest_distance = float("inf")
 
