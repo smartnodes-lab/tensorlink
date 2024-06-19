@@ -15,7 +15,7 @@ def assert_job_req(job_req: dict):
         "dp_factor",
         "distribution",
         "id",
-        "job_number",
+        # "job_number",
         "n_workers",
         "seed_validators",
         "workers",
@@ -106,15 +106,15 @@ class Validator(TorchNode):
                         # job_author_id = self.contract.functions.userKeyById(
                         #     job_author
                         # ).call()
-                        job_id = self.contract.functions.jobIdByUserIdHash(
-                            node.node_id
-                        ).call()
+                        # job_id = self.contract.functions.jobIdByUserIdHash(
+                        #     node.node_id
+                        # ).call()
+                        node_info = self.query_dht(node.node_id)
 
-                        # if job_author_id.encode() == node.node_id:
-                        if job_id <= 0:
-                            self.create_job(job_req)
-                        else:
+                        if node_info and node_info["reputation"] <= 0:
                             ghost += 1
+                        else:
+                            self.create_job(job_req)
 
                 elif b"STATS-RESPONSE" == data[:14]:
                     self.debug_print(f"Received stats from worker: {node.node_id}")
@@ -130,9 +130,9 @@ class Validator(TorchNode):
                         self.requests[node.node_id].remove(b"STATS")
                         self.nodes[node.node_id].stats = stats
 
-                elif b"JOBUPDATE" == data[:9]:
+                elif b"JOB-UPDATE" == data[:10]:
                     self.debug_print(f"Validator:user update job request")
-                    self.update_job(data[9:])
+                    self.update_job(data[10:])
 
                 else:
                     return False
@@ -278,7 +278,7 @@ class Validator(TorchNode):
             start_time = time.time()
             not_found = None
             while module_id in self.requests[node.node_id]:
-                if time.time() - start_time > 5:
+                if time.time() - start_time > 3:
                     self.requests[node.node_id].remove(module_id)
                     not_found = True
                     break
@@ -287,7 +287,6 @@ class Validator(TorchNode):
                 continue
             else:
                 node.stats["memory"] -= module_size
-
                 job = self.query_dht(job_id)
                 job["distribution"][module_id]["worker"] = node.node_id
                 return True

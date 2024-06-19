@@ -2,7 +2,10 @@ from src.ml.model_analyzer import get_gpu_memory
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
 
+import torch.optim as optim
+import torch.nn as nn
 import pickle
+import queue
 
 
 class TorchNode(SmartNode):
@@ -32,6 +35,7 @@ class TorchNode(SmartNode):
         self.optimizers = {}
         self.parameters = {}
         self.state_updates = {}
+        self.distributed_graph = {}
 
         # Master flag for handling different types of storage as master
         self.master = False
@@ -105,6 +109,22 @@ class TorchNode(SmartNode):
                     module_id, parameters = pickle.loads(data[10:])
                     self.parameters[module_id] = parameters
 
+                # elif b"MODULE" == data[:6]:
+                #     self.debug_print(
+                #         f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                #     )
+                #
+                #     module = pickle.loads(data[6:])
+                #     module.forward_queues = queue.Queue()
+                #     module.backward_queues = queue.Queue()
+                #     module.intermediates = {}
+                #
+                #     self.modules[module.id] = module
+                #     self.optimizers[module.id] = optim.Adam(module.parameters())
+                #
+                #     self.debug_print(f"Loaded distributed module!")
+                #     self.send_to_node(node, b"LOADED" + module.id)
+
                 else:
                     # We do not log a ghost here since SmartNode is meant to be a super class and this should
                     # only be invoked by a super call
@@ -139,3 +159,7 @@ class TorchNode(SmartNode):
     def send_parameters_req(self, node: Connection, module_id):
         """Request parameters from a specific worker"""
         self.send_to_node(node, b"PARAMS-REQ" + module_id)
+
+    def send_module(self, module: nn.Module, node: Connection):
+        module_bytes = pickle.dumps(module)
+        self.send_to_node(node, b"MODULE" + module_bytes)

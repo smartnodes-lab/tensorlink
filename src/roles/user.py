@@ -1,16 +1,17 @@
-import time
-
 from src.ml.distributed import DistributedModel
 from src.ml.model_analyzer import *
 from src.p2p.connection import Connection
 from src.p2p.torch_node import TorchNode
+from src.p2p.node_api import *
 
 from web3.exceptions import ContractLogicError
 import torch.nn as nn
 import threading
+import requests
+import hashlib
 import pickle
 import random
-import hashlib
+import time
 import os
 
 
@@ -34,8 +35,15 @@ class User(TorchNode):
             off_chain_test=off_chain_test,
         )
         print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
+
         self.role = b"U"
-        self.job = None
+        self.distributed_graph = {}
+
+        self.endpoint = create_endpoint(self)
+        self.endpoint_thread = threading.Thread(
+            target=self.endpoint.run, args=("127.0.0.1", 5029), daemon=True
+        )
+        self.endpoint_thread.start()
 
         # user_id = self.contract.functions.userIdByHash(
         #     self.rsa_key_hash.decode()
@@ -69,8 +77,8 @@ class User(TorchNode):
             if not handled:
                 # We have received a job accept request from a validator handle
                 if b"ACCEPT-JOB" == data[:10]:
-                    if node.node_id in self.job["seed_validators"]:
-                        self.debug_print(f"Validator: {node.node_id} accepted job!")
+                    if node.node_id in self.jobs[-1]["seed_validators"]:
+                        self.debug_print(f"Validator ({node.node_id}) accepted job!")
                         distribution = pickle.loads(data[10:])
 
                         for mod_id, worker_info in distribution:
@@ -86,7 +94,10 @@ class User(TorchNode):
                                 self.modules[mod_id]["workers"].append(
                                     worker_info["id"]
                                 )
-
+                    elif b"LOADED" == data[:6]:
+                        self.debug_print(f"Successfully offloaded submodule to worker.")
+                        pickled = data[6:]
+                        self.distributed_graph[pickled] = node
                     else:
                         ghost += 1
                 else:
@@ -114,15 +125,16 @@ class User(TorchNode):
     ):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
-        assert not self.off_chain_test, "Cannot request job without SC connection."
-
-        # Ensure we (user) are registered
-        user_id = self.contract.functions.userIdByHash(
-            self.rsa_key_hash.decode()
-        ).call()
-        if user_id < 1:
-            self.debug_print(f"request_job: User not registered on smart contract!")
-            return None
+        # Commented out code as user contract interactions will come later
+        # assert not self.off_chain_test, "Cannot request job without SC connection."
+        # # Ensure we (user) are registered
+        # user_id = self.contract.functions.userIdByHash(
+        #     self.rsa_key_hash.decode()
+        # ).call()
+        #
+        # if user_id < 1:
+        #     self.debug_print(f"request_job: User not registered on smart contract!")
+        #     return None
 
         # Get model distribution schematic (moduleId-to-workerIndex)
         config = self.parse_model(model, max_module_size, handle_layers=handle_layers)
@@ -151,53 +163,53 @@ class User(TorchNode):
         # Publish job request to smart contract (args: n_seed_validators, requested_capacity), returns validator IDs
         # TODO check if user already has job and switch to that if so, (re initialize a job if failed to start or
         #  disconnected, request data from validators/workers if disconnected and have to reset info.
-        job_id = self.contract.functions.jobIdByUser(user_id).call()
-        if job_id >= 1:
-            self.debug_print(
-                f"request_job: User has active job, loading active job. Delete job request if this was unintentional!"
-            )
-        else:
-            tx_hash = self.contract.functions.requestJob(1, capacity).transact(
-                {"from": self.account.address}
-            )
-            tx_receipt = self.chain.eth.wait_for_transaction_receipt(tx_hash)
-
-            if tx_receipt.status != 1:
-                try:
-                    tx = self.chain.eth.get_transaction(tx_hash)
-                    tx_input = tx.input
-                    revert_reason = self.chain.eth.call(
-                        {"to": tx.to, "data": tx_input}, tx.blockNumber
-                    )
-
-                except ContractLogicError as e:
-                    revert_reason = f"ContractLogicError: {e}"
-
-                except Exception as e:
-                    revert_reason = f"Could not fetch revert reason: {e}"
-
-                self.debug_print(f"request_job: Job request reverted; {revert_reason}")
-
-            self.debug_print("request_job: Job requested on Smart Contract!")
-
-        validator_ids = self.contract.functions.getJobValidators(job_id).call()
+        # job_id = self.contract.functions.jobIdByUser(user_id).call()
+        # if job_id >= 1:
+        #     self.debug_print(
+        #         f"request_job: User has active job, loading active job. Delete job request if this was unintentional!"
+        #     )
+        # else:
+        #     tx_hash = self.contract.functions.requestJob(1, capacity).transact(
+        #         {"from": self.account.address}
+        #     )
+        #     tx_receipt = self.chain.eth.wait_for_transaction_receipt(tx_hash)
+        #
+        #     if tx_receipt.status != 1:
+        #         try:
+        #             tx = self.chain.eth.get_transaction(tx_hash)
+        #             tx_input = tx.input
+        #             revert_reason = self.chain.eth.call(
+        #                 {"to": tx.to, "data": tx_input}, tx.blockNumber
+        #             )
+        #
+        #         except ContractLogicError as e:
+        #             revert_reason = f"ContractLogicError: {e}"
+        #
+        #         except Exception as e:
+        #             revert_reason = f"Could not fetch revert reason: {e}"
+        #
+        #         self.debug_print(f"request_job: Job request reverted; {revert_reason}")
+        #
+        # self.debug_print("request_job: Job requested on Smart Contract!")
+        # validator_ids = self.contract.functions.getJobValidators(job_id).call()
+        validator_ids = [random.choice(self.validators)]
 
         # Connect to seed validators
         validator_hashes = []
         for validator_id in validator_ids:
-            validator_hash = self.contract.functions.validatorKeyById(
-                validator_id
-            ).call()
-
-            validator_hash = validator_hash.encode()
-            validator_hashes.append(validator_hash)
+            # validator_hash = self.contract.functions.validatorKeyById(
+            #     validator_id
+            # ).call()
+            # validator_hash = validator_hash.encode()
+            # validator_hashes.append(validator_hash)
+            validator_hashes.append(validator_id)
 
             # Try and grab node connection info from dht
-            node_info = self.query_dht(validator_hash)
+            node_info = self.query_dht(validator_id)
 
             # Delete space for node info if not found and move on to the next validator
             if node_info is None:
-                self.delete(validator_hash)
+                self.delete(validator_id)
                 self.debug_print(
                     f"request_job: Could not connect to validator for job initialize, try again."
                 )
@@ -206,17 +218,17 @@ class User(TorchNode):
 
             # Connect to the validator's node and exchange information
             connected = self.connect_node(
-                validator_hash, node_info["host"], node_info["port"]
+                validator_id, node_info["host"], node_info["port"]
             )
 
             if not connected:
-                self.delete(validator_hash)
+                self.delete(validator_id)
                 self.debug_print(
                     f"request_job: Could not connect to validator for job initialize, try again."
                 )
                 return False
 
-        # Get validator connectionsq
+        # Get validator connections
         validators = [
             self.nodes[val_hash]
             for val_hash in validator_hashes
@@ -229,7 +241,7 @@ class User(TorchNode):
             "capacity": capacity,
             "dp_factor": n_pipelines,
             "distribution": distribution,
-            "job_number": job_id,
+            # "job_number": self,
             "n_workers": n_pipelines * len(distribution),
             "seed_validators": validator_hashes,
             "workers": [{} for _ in range(n_pipelines)],
@@ -238,7 +250,7 @@ class User(TorchNode):
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(pickle.dumps(job_request)).hexdigest().encode()
         job_request["id"] = job_hash
-        self.job = job_request
+        self.jobs.append(job_request)
 
         # Send job request to multiple validators (seed validators)
         job_req_threads = []
@@ -255,27 +267,24 @@ class User(TorchNode):
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
         dist_model_config = {}
-        while True:
-            pass
-
-        for mod_id, module in job_request["distribution"].items():
+        for mod_id, module in distribution.items():
             # Wait for loading confirmation from worker nodes
-            if job_request["distribution"][mod_id]:
-                worker_info = job_request["distribution"][mod_id]
-
-                module, name = access_module(model, list(mod_id))
-            dist_model_config[name] = self.node_requests[
-                mod_id
-            ].pop()  # TODO Takes the last (most recent model for now, should accomodate all pipelines in the future)
+            worker_info = self.modules[mod_id]
+            worker_id = worker_info["workers"][0]
+            # module, name = access_module(model, config[mod_id]["mod_id"])
 
             # Update job with selected worker
-            job_request["workers"][pipeline][mod_id] = dist_model_config[name]
+            # TODO Takes the last (most recent model for now, should accommodate all pipelines in the future)
+            job_request["workers"][0][
+                worker_id
+            ] = mod_id  # TODO 0 hardcoded and must be replaced with n_pipelines
+            dist_model_config[mod_id] = worker_id
 
-        # Send activation message to validators
-        for validator in validators:
-            self.send_job_status_update(validator, job_request)
+        # TODO Send activation message to validators
+        # for validator in validators:
+        #     self.send_job_status_update(validator, job_request)
 
-        self.job = job_request
+        self.jobs[-1] = job_request
 
         dist_model = DistributedModel(
             model, self, minibatch_size, microbatch_size, config=dist_model_config
@@ -296,8 +305,6 @@ class User(TorchNode):
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print("SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB")
                 return
-
-        self.debug_print("")
         return
 
     def parse_model(
@@ -429,3 +436,12 @@ class User(TorchNode):
         # Update the job state to the overseeing validators
         job_bytes = b"JOB-UPDATE" + pickle.dumps(job)
         self.send_to_node(node, job_bytes)
+
+    def get_self_info(self):
+        data = super().get_self_info()
+
+        if len(self.jobs) > 0:
+            job = self.jobs[-1]
+            data["job"] = {"capacity": job["id"]}
+
+        return data

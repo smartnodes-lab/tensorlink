@@ -1,29 +1,43 @@
 from src.cryptography.rsa import *
 from src.p2p.connection import Connection
 
+from logging.handlers import TimedRotatingFileHandler
 from dotenv import load_dotenv
 from typing import Callable
 from miniupnpc import UPnP
 from web3 import Web3
-import json
-import hashlib
 import threading
+import logging
+import hashlib
 import pickle
 import random
 import socket
+import json
 import time
 import os
 
 
 load_dotenv()
 
+# Grab smart contract information
+CHAIN_URL = os.getenv("CHAIN_URL")
+CONTRACT = os.getenv("CONTRACT")
+
 with open("./config/SmartNodes.json", "r") as f:
     METADATA = json.load(f)
 
-URL = os.getenv("URL")
-CONTRACT = os.getenv("CONTRACT")
 ABI = METADATA["abi"]
 PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+
+# Configure logging with TimedRotatingFileHandler
+log_handler = TimedRotatingFileHandler(
+    "dht_logs.log", when="midnight", interval=1, backupCount=30
+)
+log_handler.setFormatter(logging.Formatter("%(message)s"))
+log_handler.suffix = "%Y%m%d"
+logging.getLogger().addHandler(log_handler)
+logging.getLogger().setLevel(logging.INFO)
+STATE_FILE = "./dht_state.json"
 
 
 def hash_key(key: bytes, number=False):
@@ -50,8 +64,14 @@ def get_connection_info(node, main_port=None):
         "port": node.port if not main_port else main_port,
         "role": node.role,
         "id": node.node_id,
+        "reputation": node.reputation,
     }
     return info
+
+
+def log_entry(node, metadata):
+    entry = {"timestamp": time.ctime(), "node": node.node_id, "metadata": metadata}
+    logging.info(json.dumps(entry))
 
 
 class Bucket:
@@ -76,20 +96,19 @@ class Bucket:
 
 class SmartNode(threading.Thread):
     """
-    A P2P node secured by RSA encryption and smart contract validation for the Smart Nodes ecosystem.
+    A P2P node secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
     """
 
     def __init__(
         self,
         host: str,
         port: int,
-        url: str = URL,
+        url: str = CHAIN_URL,
         contract: str = CONTRACT,
         debug: bool = False,
         max_connections: int = 0,
         upnp: bool = True,
         off_chain_test: bool = False,
-        private_key=None,  # TODO Get rid of, use config / .env, this is just for test purposes
     ):
         super(SmartNode, self).__init__()
 
@@ -123,6 +142,12 @@ class SmartNode(threading.Thread):
         self.role = b""
         self.id = 0
 
+        # Stores key of stored values
+        self.workers = []
+        self.validators = []
+        self.users = []
+        self.jobs = []
+
         if upnp:
             self.init_upnp()
 
@@ -144,12 +169,6 @@ class SmartNode(threading.Thread):
                 self.debug_print(f"Could not retrieve contract: {e}")
                 self.stop()
 
-        # Stores key of stored values
-        self.workers = []
-        self.validators = []
-        self.users = []
-        self.jobs = []
-
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
         Handles incoming data from node connections and performs an appropriate response.
@@ -162,7 +181,9 @@ class SmartNode(threading.Thread):
 
             # Larger data streams are stored in secondary storage during streaming to improve efficiency
             if b"DONE STREAM" == data[:11]:
-                file_name = f"streamed_data_{node.host}_{node.port}"
+                file_name = (
+                    f"streamed_data_{node.host}_{node.port}_{self.host}_{self.port}"
+                )
 
                 with open(file_name, "rb") as file:
                     streamed_bytes = file.read()
@@ -291,6 +312,17 @@ class SmartNode(threading.Thread):
         id_info = connection.recv(4096)
         _, role, id_no, connected_node_id = pickle.loads(id_info)
         node_id_hash = hashlib.sha256(connected_node_id).hexdigest().encode()
+
+        # Query node info/history from dht for reputation if we are a validator
+        if self.role == b"V":
+            if len(self.nodes) > 0:
+                node_info = self.query_dht(node_id_hash)
+                if node_info:
+                    if node_info["reputation"] == 0:
+                        self.debug_print(
+                            f"User with poor reputation attempting connection: {node_id_hash}"
+                        )
+                        connection.close()
 
         # If we are the instigator of the connection, we will have received a request to verify our id
         if instigator:
@@ -652,6 +684,35 @@ class SmartNode(threading.Thread):
                 replicate -= 1
                 pass
 
+    def save_dht_state(self):
+        """Serialize and save the DHT state to a file."""
+        try:
+            with open(STATE_FILE, "w") as f:
+                json.dump(self.routing_table, f)
+            self.debug_print("DHT state saved successfully.")
+
+        except Exception as e:
+            self.debug_print(f"Error saving DHT state: {e}")
+
+    def load_dht_state(self):
+        """Load the DHT state from a file."""
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, "r") as f:
+                    state = json.load(f)
+
+                self.routing_table = state
+                self.debug_print("DHT state loaded successfully.")
+
+            except Exception as e:
+                self.debug_print(f"Error loading DHT state: {e}")
+
+    def periodic_save_dht_state(self):
+        """Periodically save the DHT state."""
+        while not self.terminate_flag.is_set():
+            self.save_dht_state()
+            time.sleep(600)
+
     def request_store_value(self):
         pass
 
@@ -836,6 +897,8 @@ class SmartNode(threading.Thread):
         """Shut down node and all associated connections/threads"""
         self.debug_print(f"Node stopping.")
         self.terminate_flag.set()
+        if self.role == b"U":
+            self.endpoint_thread.join()
         self.stop_upnp()
 
     def run(self):
@@ -858,3 +921,13 @@ class SmartNode(threading.Thread):
         self.sock.settimeout(None)
         self.sock.close()
         print("Node stopped")
+
+    # Methods to interact with Flask endpoints
+    def get_self_info(self):
+        data = {
+            "id": self.rsa_key_hash.decode(),
+            "validators": [k.decode() for k in self.validators],
+            "workers": [k.decode() for k in self.workers],
+            "users": [k.decode() for k in self.users],
+        }
+        return data

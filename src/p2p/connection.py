@@ -22,6 +22,8 @@ class Connection(threading.Thread):
         super(Connection, self).__init__()
         self.ping = -1
         self.pinged = -1
+        self.reputation = 50
+
         self.host = host
         self.port = port
         self.main_port = port
@@ -34,7 +36,6 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(60)
-        self.latency = 0
         self.chunk_size = 131_072
 
         # End of transmission + compression characters for the network messages.
@@ -119,7 +120,7 @@ class Connection(threading.Thread):
 
             if chunk != b"":
                 eot_pos = chunk.find(self.EOT_CHAR)
-                file_name = f"streamed_data_{self.host}_{self.port}"
+                file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
 
                 # We have reached the end of one nodes processing
                 if eot_pos > 0:

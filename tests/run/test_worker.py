@@ -10,11 +10,14 @@ if __name__ == "__main__":
         5028,
         debug=True,
         upnp=False,
-        off_chain_test=False,
+        off_chain_test=True,
     )
 
     worker.start()
     worker.activate()
 
-    val_id = worker.contract.functions.validatorKeyById(1).call()
-    worker.connect_node(val_id, "127.0.0.1", 5026)
+    worker.connect_node(
+        b"21c99fa3c263570d20132c24ef1b347e1b8afcdcfe88c303fb1f45b84b387a5b",
+        "127.0.0.1",
+        5026,
+    )

@@ -309,12 +309,9 @@ class DistributedModel(nn.Module):
 
         if config:
 
-            for mod_name, worker_id in config.items():
+            for mod_id, worker_id in config.items():
                 node = self.master_node.nodes[worker_id]
-                target = find_module(self.model, mod_name)
-                assert target is not None, f"Module {mod_name} not found in model."
-                module, mod_ids = target  # unpacking the tuple
-                self.wrap_module(mod_ids, node)
+                self.wrap_module(mod_id, node)
                 return 0, 0
 
         def recurse_model(module, mod_id=[]):
@@ -381,6 +378,7 @@ class DistributedModel(nn.Module):
         return graph
 
     def wrap_module(self, module_id: list, worker: Connection):
+        module_id = self.master_node.modules[module_id]["mod_id"]
         child_module, module_name = access_module(self.model, module_id)
         parent_module = (
             access_module(self.model, module_id[:-1])[0]

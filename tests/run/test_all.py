@@ -1,6 +1,8 @@
 from src.roles.validator import Validator
+from src.roles.worker import Worker
 from src.roles.user import User
 
+from transformers import BertModel
 import time
 
 
@@ -17,30 +19,32 @@ if __name__ == "__main__":
         private_key="1c6768059a3e77d68a2dc3a075c93161803dbe2ad3b72069b6801a1db3a8a8f8",
     )
 
-    validator2 = Validator(
+    user = User(
         ip,
         port + 1,
         debug=True,
         upnp=False,
         off_chain_test=True,
-        private_key="d23f58a739fe6dd1390191a67e11d3d681e048168d985c9acb5609bff1f799ea",
     )
 
-    user = User(
-        ip,
-        port + 2,
-        debug=True,
-        upnp=False,
-        off_chain_test=True,
-    )
+    # worker = Worker(
+    #     ip,
+    #     port + 2,
+    #     debug=True,
+    #     upnp=False,
+    #     off_chain_test=True,
+    # )
 
     validator.start()
-    validator2.start()
+    # worker.start()
+    user.start()
 
-    validator2.connect_node(validator.rsa_key_hash, ip, port)
     user.connect_node(validator.rsa_key_hash, ip, port)
+    # worker.connect_node(validator.rsa_key_hash, ip, port)
 
-    time.sleep(10)
+    model = BertModel.from_pretrained("bert-base-uncased")
+    distributed_model = user.request_job(model, handle_layers=True)
 
-    validator.stop()
-    validator2.stop()
+    # validator.stop()
+    # worker.stop()
+    # user.stop()
