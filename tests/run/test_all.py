@@ -7,23 +7,17 @@ import time
 
 
 if __name__ == "__main__":
-    ip = "127.0.0.1"
-    port = 5026
 
     validator = Validator(
-        ip,
-        port,
         debug=True,
-        upnp=False,
+        upnp=True,
         off_chain_test=True,
         private_key="1c6768059a3e77d68a2dc3a075c93161803dbe2ad3b72069b6801a1db3a8a8f8",
     )
 
     user = User(
-        ip,
-        port + 1,
         debug=True,
-        upnp=False,
+        upnp=True,
         off_chain_test=True,
     )
 
@@ -39,12 +33,13 @@ if __name__ == "__main__":
     # worker.start()
     user.start()
 
-    user.connect_node(validator.rsa_key_hash, ip, port)
+    user.connect_node(validator.rsa_key_hash, "192.168.2.237", 7779)
+    time.sleep(3)
     # worker.connect_node(validator.rsa_key_hash, ip, port)
 
-    model = BertModel.from_pretrained("bert-base-uncased")
-    distributed_model = user.request_job(model, handle_layers=True)
+    # model = BertModel.from_pretrained("bert-base-uncased")
+    # distributed_model = user.request_job(model, handle_layers=True)
 
-    # validator.stop()
+    validator.stop()
     # worker.stop()
-    # user.stop()
+    user.stop()

@@ -18,8 +18,6 @@ import os
 class User(TorchNode):
     def __init__(
         self,
-        host: str,
-        port: int,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
@@ -27,13 +25,12 @@ class User(TorchNode):
         private_key=None,
     ):
         super(User, self).__init__(
-            host,
-            port,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
         )
+
         print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         self.role = b"U"

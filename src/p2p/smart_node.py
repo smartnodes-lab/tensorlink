@@ -38,6 +38,7 @@ log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.INFO)
 STATE_FILE = "./dht_state.json"
+BASE_PORT = 7779
 
 
 def hash_key(key: bytes, number=False):
@@ -101,8 +102,6 @@ class SmartNode(threading.Thread):
 
     def __init__(
         self,
-        host: str,
-        port: int,
         url: str = CHAIN_URL,
         contract: str = CONTRACT,
         debug: bool = False,
@@ -113,8 +112,10 @@ class SmartNode(threading.Thread):
         super(SmartNode, self).__init__()
 
         # Node Parameters
-        self.host = host
-        self.port = port
+        self.host = "0.0.0.0"
+        self.port = BASE_PORT
+
+        self.used_ports = set()
         self.debug = debug
         self.max_connections = max_connections
 
@@ -137,7 +138,7 @@ class SmartNode(threading.Thread):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         # More parameters for smart contract / p2p info
-        self.rsa_pub_key = get_rsa_pub_key(self.port, True)
+        self.rsa_pub_key = get_rsa_pub_key(True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
         self.role = b""
         self.id = 0
@@ -327,7 +328,7 @@ class SmartNode(threading.Thread):
         # If we are the instigator of the connection, we will have received a request to verify our id
         if instigator:
             encrypted_number = _
-            proof = decrypt(encrypted_number, self.port)
+            proof = decrypt(encrypted_number)
 
             try:
                 proof = float(proof)
@@ -382,9 +383,7 @@ class SmartNode(threading.Thread):
 
             # Random number swap to confirm the nodes RSA key
             rand_n = random.random()
-            encrypted_number = encrypt(
-                str(rand_n).encode(), self.port, connected_node_id
-            )
+            encrypted_number = encrypt(str(rand_n).encode(), connected_node_id)
 
             # Encrypt random number with node's key to confirm their identity
             # If we are the instigator, we will also need to send our proof
@@ -416,7 +415,7 @@ class SmartNode(threading.Thread):
                 # Unpack response (verification of their ID along with a request to verify ours)
                 response = pickle.loads(response)
                 main_port, rand_n_proof, verification = response
-                verification = decrypt(verification, self.port)
+                verification = decrypt(verification)
 
                 # Send our verification (their random number request)
                 connection.send(verification)
@@ -464,7 +463,10 @@ class SmartNode(threading.Thread):
                     elif role == b"U":
                         self.users.append(node_id_hash)
 
-                return True
+                    return True
+
+                else:
+                    return False
 
             else:
                 self.close_connection_socket(connection, "Proof request was not valid.")
@@ -488,9 +490,10 @@ class SmartNode(threading.Thread):
             return True
 
         if can_connect:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
             try:
+                our_port = self.get_next_port()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind((self.host, our_port))
                 sock.connect((host, port))
             except Exception as e:
                 self.debug_print(
@@ -773,29 +776,29 @@ class SmartNode(threading.Thread):
     def init_sock(self) -> None:
         """Initializes the main socket for handling incoming connections"""
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", self.port))
+        port = self.get_next_port()
+        self.port = port
+        self.sock.bind((self.host, port))
         self.sock.settimeout(10)
         self.sock.listen(1)
 
     def init_upnp(self) -> None:
         """Enables UPnP on main socket to allow connections"""
-        if self.upnp:
-            self.upnp = UPnP()
-            self.upnp.discoverdelay = 500
-            self.upnp.discover()
-            self.upnp.selectigd()
+        # if self.upnp:
+        self.upnp = UPnP()
+        self.upnp.discoverdelay = 10_000
+        self.upnp.discover()
+        self.upnp.selectigd()
 
-            result = self.upnp.addportmapping(
-                self.port, "TCP", self.upnp.lanaddr, self.port, "SmartNode", ""
-            )
+    def add_port_mapping(self, external_port, internal_port):
+        result = self.upnp.addportmapping(
+            external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
+        )
 
-            if result:
-                self.debug_print(
-                    f"init_upnp: UPnP port forward successful on port {self.port}"
-                )
-            else:
-                self.debug_print("init_upnp: Failed to initialize UPnP.")
-                self.stop()
+        if result:
+            self.debug_print(f"UPnP port forward successful on port {self.port}")
+        else:
+            self.debug_print("Failed to initialize UPnP.")
 
     def get_external_ip(self):
         """Get public IP address"""
@@ -931,3 +934,23 @@ class SmartNode(threading.Thread):
             "users": [k.decode() for k in self.users],
         }
         return data
+
+    def get_next_port(self):
+        port = self.port
+
+        while True:
+            if port not in self.used_ports:
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.bind((self.host, port))
+                    sock.close()
+                    self.used_ports.add(port)
+                    return port
+
+                except OSError:
+                    port += 1
+
+                except Exception as e:
+                    raise e
+            else:
+                port += 1

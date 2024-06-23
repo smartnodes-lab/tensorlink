@@ -25,8 +25,6 @@ class Worker(TorchNode):
 
     def __init__(
         self,
-        host: str,
-        port: int,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
@@ -34,13 +32,12 @@ class Worker(TorchNode):
         public_key=None,
     ):
         super(Worker, self).__init__(
-            host,
-            port,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
         )
+
         self.training = False
         self.role = b"W"
         self.loss = None

@@ -5,18 +5,20 @@ import base64
 import os
 
 
-def generate_rsa_key_pair(user) -> None:
-    system = os.name
-    if system == "posix":  # Unix-based systems (Linux, macOS, etc.)
-        path = os.path.join("/etc/Tensorlink/keys", user)
-    elif system == "nt":  # Windows
-        path = os.path.join("C:\\ProgramData\\Tensorlink\\keys", user)
-    else:
-        raise NotImplementedError(f"Unsupported operating system: {system}")
+def get_keys_path():
+    # Get the current directory of the script
+    keys_dir = os.path.join(os.getcwd(), "keys")
+
+    # Create the keys directory if it doesn't exist
+    os.makedirs(keys_dir, exist_ok=True)
+
+    return keys_dir
+
+
+def generate_rsa_key_pair() -> None:
+    path = get_keys_path()
 
     if not os.path.exists(os.path.join(path, "public_key.pem")):
-        os.makedirs(path, exist_ok=True)
-
         # Save private and public rsa keys to files
         with open(os.path.join(path, "private_key.pem"), "wb") as f:
             key = rsa.generate_private_key(
@@ -40,15 +42,20 @@ def generate_rsa_key_pair(user) -> None:
             )
 
 
-def load_public_key(user):
-    path = f"keys/{user}/public_key.pem"
-    print(os.getcwd())
+def load_public_key():
+    path = get_keys_path()
+    path = os.path.join(path, "public_key.pem")
+    generate_rsa_key_pair()
+
     with open(path, "rb") as f:
         return serialization.load_pem_public_key(f.read(), backend=default_backend())
 
 
-def load_private_key(user):
-    path = f"keys/{user}/private_key.pem"
+def load_private_key():
+    path = get_keys_path()
+    path = os.path.join(path, "private_key.pem")
+    generate_rsa_key_pair()
+
     with open(path, "rb") as f:
         return serialization.load_pem_private_key(
             f.read(), backend=default_backend(), password=None
@@ -101,8 +108,8 @@ def get_private_key_obj(private_key_bytes):
     )
 
 
-def get_rsa_pub_key(user, b=False):
-    public_key = load_public_key(user)
+def get_rsa_pub_key(b=False):
+    public_key = load_public_key()
 
     if b is True:
         return get_public_key_bytes(public_key)
@@ -110,8 +117,8 @@ def get_rsa_pub_key(user, b=False):
         return public_key
 
 
-def get_rsa_priv_key(user, b=False):
-    private_key = load_private_key(user)
+def get_rsa_priv_key(b=False):
+    private_key = load_private_key()
 
     if b is True:
         return get_private_key_bytes(private_key)
@@ -119,10 +126,10 @@ def get_rsa_priv_key(user, b=False):
         return private_key
 
 
-def encrypt(data, user, pub_key: bytes = None):
+def encrypt(data, pub_key: bytes = None):
     # Encrypt the data using RSA-OAEP
     if pub_key is None:
-        pub_key = get_rsa_pub_key(user)
+        pub_key = get_rsa_pub_key()
     else:
         pub_key = get_public_key_obj(pub_key)
 
@@ -138,8 +145,8 @@ def encrypt(data, user, pub_key: bytes = None):
     return base64.b64encode(encrypted_data)
 
 
-def decrypt(data, user):
-    private_key = get_rsa_priv_key(user)
+def decrypt(data):
+    private_key = get_rsa_priv_key()
 
     decrypted_data = private_key.decrypt(
         base64.b64decode(data),

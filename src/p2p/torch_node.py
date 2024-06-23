@@ -11,16 +11,12 @@ import queue
 class TorchNode(SmartNode):
     def __init__(
         self,
-        host: str,
-        port: int,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
     ):
         super(TorchNode, self).__init__(
-            host,
-            port,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,

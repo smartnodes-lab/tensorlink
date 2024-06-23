@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tensorlink_mattjhawken"
+version = "0.0.1"
+authors = [
+  { name="Matthew Hawken", email="mattjhawken@proton.me" },
+]
+description = "Plug-and-play distributed model training for PyTorch."
+readme = "README.md"
+requires-python = ">=3.9.5"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/smartnodes/tensorlink"
+Issues = "https://github.com/smartnodes/tensorlink/issues"
