@@ -2,7 +2,7 @@ from src.roles.validator import Validator
 from src.roles.worker import Worker
 from src.roles.user import User
 
-from transformers import BertModel
+# from transformers import BertModel
 import time
 
 
