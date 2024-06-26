@@ -1,5 +1,6 @@
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
+from src.cryptography.rsa import get_rsa_pub_key
 
 import threading
 import hashlib
@@ -43,6 +44,12 @@ class Validator(TorchNode):
         # Additional attributes specific to the Validator class
         self.jobs = []
         self.role = b"V"
+
+        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+
+        self.debug_colour = "\033[92m"
+        self.debug_print(f"Launching Validator: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         if not off_chain_test:
             self.chain.eth.default_account = self.account.address
@@ -217,8 +224,7 @@ class Validator(TorchNode):
             (k, self.query_dht(values["worker"]))
             for k, values in job_data["distribution"].items()
         ]
-
-        self.send_to_node(requesting_node, b"ACCEPT-JOB" + pickle.dumps(worker_info))
+        self.send_to_node(requesting_node, b"ACCEPT-JOB" + job_id + pickle.dumps(worker_info))
 
         # job = {
         #     "id": b"",  # Job ID hash

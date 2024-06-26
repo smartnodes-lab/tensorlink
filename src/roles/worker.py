@@ -1,10 +1,12 @@
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
+from src.cryptography.rsa import get_rsa_pub_key
 
 import torch.nn as nn
 import torch.optim as optim
 import threading
+import hashlib
 import pickle
 import queue
 import torch
@@ -42,6 +44,12 @@ class Worker(TorchNode):
         self.role = b"W"
         self.loss = None
         self.public_key = public_key
+
+        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+
+        self.debug_colour = "\033[94m"
+        self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})")
 
     def handle_data(self, data: bytes, node: Connection):
         """

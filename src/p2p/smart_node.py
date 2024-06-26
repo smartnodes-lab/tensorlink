@@ -38,7 +38,7 @@ log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.INFO)
 STATE_FILE = "./dht_state.json"
-BASE_PORT = 7779
+BASE_PORT = 11911
 
 
 def hash_key(key: bytes, number=False):
@@ -108,16 +108,28 @@ class SmartNode(threading.Thread):
         max_connections: int = 0,
         upnp: bool = True,
         off_chain_test: bool = False,
+        debug_colour=None
     ):
         super(SmartNode, self).__init__()
 
         # Node Parameters
-        self.host = "0.0.0.0"
-        self.port = BASE_PORT
+        self.terminate_flag = threading.Event()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+        # Get private ip
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        self.host = s.getsockname()[0]
+        s.close()
+
+        self.port = BASE_PORT
         self.used_ports = set()
         self.debug = debug
         self.max_connections = max_connections
+
+        self.debug_colour = None
+        if debug_colour:
+            self.debug_colour = debug_colour
 
         self.upnp = None
         self.off_chain_test = off_chain_test
@@ -133,13 +145,9 @@ class SmartNode(threading.Thread):
         self.routing_table = {}
         self.requests = {}
 
-        # Initialize node
-        self.terminate_flag = threading.Event()
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
         # More parameters for smart contract / p2p info
-        self.rsa_pub_key = get_rsa_pub_key(True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+        self.rsa_pub_key = None
+        self.rsa_key_hash = None
         self.role = b""
         self.id = 0
 
@@ -278,7 +286,10 @@ class SmartNode(threading.Thread):
     def debug_print(self, message) -> None:
         """Print to console if debug is enabled"""
         if self.debug:
-            print(f"{self.host}:{self.port} -> {message}")
+            if self.debug_colour is None:
+                print(f"{self.host}:{self.port} -> {message}")
+            else:
+                print(f"{self.debug_colour}{self.host}:{self.port} -> {message}")
 
     def listen(self):
         """Listen for incoming connections and initialize custom handshake"""
@@ -328,7 +339,7 @@ class SmartNode(threading.Thread):
         # If we are the instigator of the connection, we will have received a request to verify our id
         if instigator:
             encrypted_number = _
-            proof = decrypt(encrypted_number)
+            proof = decrypt(encrypted_number, self.role)
 
             try:
                 proof = float(proof)
@@ -383,7 +394,7 @@ class SmartNode(threading.Thread):
 
             # Random number swap to confirm the nodes RSA key
             rand_n = random.random()
-            encrypted_number = encrypt(str(rand_n).encode(), connected_node_id)
+            encrypted_number = encrypt(str(rand_n).encode(), self.role, connected_node_id)
 
             # Encrypt random number with node's key to confirm their identity
             # If we are the instigator, we will also need to send our proof
@@ -415,7 +426,7 @@ class SmartNode(threading.Thread):
                 # Unpack response (verification of their ID along with a request to verify ours)
                 response = pickle.loads(response)
                 main_port, rand_n_proof, verification = response
-                verification = decrypt(verification)
+                verification = decrypt(verification, self.role)
 
                 # Send our verification (their random number request)
                 connection.send(verification)

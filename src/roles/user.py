@@ -3,6 +3,7 @@ from src.ml.model_analyzer import *
 from src.p2p.connection import Connection
 from src.p2p.torch_node import TorchNode
 from src.p2p.node_api import *
+from src.cryptography.rsa import get_rsa_pub_key
 
 from web3.exceptions import ContractLogicError
 import torch.nn as nn
@@ -31,10 +32,14 @@ class User(TorchNode):
             off_chain_test=off_chain_test,
         )
 
-        print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
-
         self.role = b"U"
         self.distributed_graph = {}
+
+        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+
+        self.debug_colour = "\033[96m"
+        self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         self.endpoint = create_endpoint(self)
         self.endpoint_thread = threading.Thread(
@@ -76,7 +81,8 @@ class User(TorchNode):
                 if b"ACCEPT-JOB" == data[:10]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         self.debug_print(f"Validator ({node.node_id}) accepted job!")
-                        distribution = pickle.loads(data[10:])
+                        job_id = data[10:74]
+                        distribution = pickle.loads(data[74:])
 
                         for mod_id, worker_info in distribution:
                             # Connect to workers for each model
@@ -91,6 +97,8 @@ class User(TorchNode):
                                 self.modules[mod_id]["workers"].append(
                                     worker_info["id"]
                                 )
+                                self.requests[node.node_id].remove(job_id)
+
                     elif b"LOADED" == data[:6]:
                         self.debug_print(f"Successfully offloaded submodule to worker.")
                         pickled = data[6:]
@@ -297,11 +305,12 @@ class User(TorchNode):
         self.send_to_node(validator, message)
         start_time = time.time()
 
+        # Wait for validator request and accept timeouts
         while job_info["id"] in self.requests[validator.node_id]:
-            if time.time() - start_time > 60:
+            if time.time() - start_time > 10:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print("SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB")
-                return
+                return self.send_job_req(validator, job_info)
         return
 
     def parse_model(

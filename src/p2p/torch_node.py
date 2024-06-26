@@ -158,4 +158,5 @@ class TorchNode(SmartNode):
 
     def send_module(self, module: nn.Module, node: Connection):
         module_bytes = pickle.dumps(module)
+        self.debug_print(f"Sending module: {len(module_bytes)} to worker: {node.node_id}")
         self.send_to_node(node, b"MODULE" + module_bytes)

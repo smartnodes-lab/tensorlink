@@ -18,6 +18,6 @@ if __name__ == "__main__":
 
     worker.connect_node(
         b"21c99fa3c263570d20132c24ef1b347e1b8afcdcfe88c303fb1f45b84b387a5b",
-        "127.0.0.1",
+        "192.168.2.237",
         5026,
     )

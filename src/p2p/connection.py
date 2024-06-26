@@ -39,7 +39,7 @@ class Connection(threading.Thread):
         self.chunk_size = 131_072
 
         # End of transmission + compression characters for the network messages.
-        self.EOT_CHAR = b"CHENQUI"
+        self.EOT_CHAR = b"HELLOCHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
 
     def compress(self, data):

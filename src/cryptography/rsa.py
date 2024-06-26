@@ -5,9 +5,9 @@ import base64
 import os
 
 
-def get_keys_path():
+def get_keys_path(role):
     # Get the current directory of the script
-    keys_dir = os.path.join(os.getcwd(), "keys")
+    keys_dir = os.path.join(os.getcwd(), f"keys/{role.decode()}")
 
     # Create the keys directory if it doesn't exist
     os.makedirs(keys_dir, exist_ok=True)
@@ -15,8 +15,8 @@ def get_keys_path():
     return keys_dir
 
 
-def generate_rsa_key_pair() -> None:
-    path = get_keys_path()
+def generate_rsa_key_pair(role) -> None:
+    path = get_keys_path(role)
 
     if not os.path.exists(os.path.join(path, "public_key.pem")):
         # Save private and public rsa keys to files
@@ -42,19 +42,19 @@ def generate_rsa_key_pair() -> None:
             )
 
 
-def load_public_key():
-    path = get_keys_path()
+def load_public_key(role):
+    path = get_keys_path(role)
     path = os.path.join(path, "public_key.pem")
-    generate_rsa_key_pair()
+    generate_rsa_key_pair(role)
 
     with open(path, "rb") as f:
         return serialization.load_pem_public_key(f.read(), backend=default_backend())
 
 
-def load_private_key():
-    path = get_keys_path()
+def load_private_key(role):
+    path = get_keys_path(role)
     path = os.path.join(path, "private_key.pem")
-    generate_rsa_key_pair()
+    generate_rsa_key_pair(role)
 
     with open(path, "rb") as f:
         return serialization.load_pem_private_key(
@@ -108,8 +108,8 @@ def get_private_key_obj(private_key_bytes):
     )
 
 
-def get_rsa_pub_key(b=False):
-    public_key = load_public_key()
+def get_rsa_pub_key(role, b=False):
+    public_key = load_public_key(role)
 
     if b is True:
         return get_public_key_bytes(public_key)
@@ -117,8 +117,8 @@ def get_rsa_pub_key(b=False):
         return public_key
 
 
-def get_rsa_priv_key(b=False):
-    private_key = load_private_key()
+def get_rsa_priv_key(role, b=False):
+    private_key = load_private_key(role)
 
     if b is True:
         return get_private_key_bytes(private_key)
@@ -126,10 +126,10 @@ def get_rsa_priv_key(b=False):
         return private_key
 
 
-def encrypt(data, pub_key: bytes = None):
+def encrypt(data, role, pub_key: bytes = None):
     # Encrypt the data using RSA-OAEP
     if pub_key is None:
-        pub_key = get_rsa_pub_key()
+        pub_key = get_rsa_pub_key(role)
     else:
         pub_key = get_public_key_obj(pub_key)
 
@@ -145,8 +145,8 @@ def encrypt(data, pub_key: bytes = None):
     return base64.b64encode(encrypted_data)
 
 
-def decrypt(data):
-    private_key = get_rsa_priv_key()
+def decrypt(data, role):
+    private_key = get_rsa_priv_key(role)
 
     decrypted_data = private_key.decrypt(
         base64.b64decode(data),
