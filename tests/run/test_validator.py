@@ -2,15 +2,11 @@ from src.roles.validator import Validator
 
 
 if __name__ == "__main__":
-    ip = "127.0.0.1"
-    port = 5026
 
     validator = Validator(
-        ip,
-        port,
         debug=True,
         upnp=False,
-        off_chain_test=False,
+        off_chain_test=True,
         private_key="1c6768059a3e77d68a2dc3a075c93161803dbe2ad3b72069b6801a1db3a8a8f8",
     )
 

@@ -38,7 +38,7 @@ log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.INFO)
 STATE_FILE = "./dht_state.json"
-BASE_PORT = 11911
+BASE_PORT = 38751
 
 
 def hash_key(key: bytes, number=False):

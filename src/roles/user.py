@@ -114,7 +114,7 @@ class User(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"worker:stream_data:{e}")
+            self.debug_print(f"stream_data:{e}")
             raise e
 
     def request_peers(self):
@@ -149,7 +149,7 @@ class User(TorchNode):
         for mod_id, mod_info in config.items():
             if mod_info["type"] == "offloaded":
                 # Add offloaded module size and id to job info
-
+                print(mod_id)
                 distribution[mod_id] = {"size": mod_info["size"]}
                 self.modules[mod_id] = mod_info
 
@@ -307,7 +307,7 @@ class User(TorchNode):
 
         # Wait for validator request and accept timeouts
         while job_info["id"] in self.requests[validator.node_id]:
-            if time.time() - start_time > 10:
+            if time.time() - start_time > 100:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print("SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB")
                 return self.send_job_req(validator, job_info)
