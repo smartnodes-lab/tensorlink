@@ -1,6 +1,5 @@
 from transformers import BertModel
 from src.roles.user import User
-from src.roles.worker import Worker
 
 
 if __name__ == "__main__":

@@ -1,20 +1,24 @@
 from src.ml.model_analyzer import get_gpu_memory
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
+from src.ml.model_manager import ModuleManager
 
 import torch.optim as optim
 import torch.nn as nn
+import threading
 import pickle
 import queue
 
 
 class TorchNode(SmartNode):
     def __init__(
-        self,
-        debug: bool = False,
-        max_connections: int = 0,
-        upnp=True,
-        off_chain_test=False,
+            self,
+            request_queue,
+            response_queue,
+            debug: bool = False,
+            max_connections: int = 0,
+            upnp=True,
+            off_chain_test=False,
     ):
         super(TorchNode, self).__init__(
             debug=debug,
@@ -26,7 +30,10 @@ class TorchNode(SmartNode):
         # Available GPU memory estimation
         self.available_memory = get_gpu_memory()
 
-        # Model parameters
+        self.request_queue = request_queue
+        self.response_queue = response_queue
+
+        # Pointers to model parameters in DistributedModels
         self.modules = {}
         self.optimizers = {}
         self.parameters = {}
@@ -47,6 +54,9 @@ class TorchNode(SmartNode):
                     self.debug_print(
                         f"Successfully offloaded submodule to: {node.node_id}"
                     )
+                    pickled = data[6:]
+                    self.distributed_graph[pickled] = node
+
                 elif b"FORWARD" == data[:7]:
                     # Received a forward pass
                     self.debug_print(
@@ -105,21 +115,21 @@ class TorchNode(SmartNode):
                     module_id, parameters = pickle.loads(data[10:])
                     self.parameters[module_id] = parameters
 
-                # elif b"MODULE" == data[:6]:
-                #     self.debug_print(
-                #         f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                #     )
-                #
-                #     module = pickle.loads(data[6:])
-                #     module.forward_queues = queue.Queue()
-                #     module.backward_queues = queue.Queue()
-                #     module.intermediates = {}
-                #
-                #     self.modules[module.id] = module
-                #     self.optimizers[module.id] = optim.Adam(module.parameters())
-                #
-                #     self.debug_print(f"Loaded distributed module!")
-                #     self.send_to_node(node, b"LOADED" + module.id)
+                elif b"MODULE" == data[:6]:
+                    self.debug_print(
+                        f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
+                    )
+
+                    module = pickle.loads(data[6:])
+                    module.forward_queues = queue.Queue()
+                    module.backward_queues = queue.Queue()
+                    module.intermediates = {}
+
+                    self.modules[module.id] = module
+                    self.optimizers[module.id] = optim.Adam(module.parameters())
+
+                    self.debug_print(f"Loaded distributed module!")
+                    self.send_to_node(node, b"LOADED" + module.id)
 
                 else:
                     # We do not log a ghost here since SmartNode is meant to be a super class and this should
@@ -134,6 +144,21 @@ class TorchNode(SmartNode):
 
         except Exception as e:
             self.debug_print(f"handle_data: Error handling data: {e}")
+
+    def handle_requests(self, request=None):
+        """Handles interactions between model and node instances"""
+        if request is None:
+            request = self.request_queue.get()
+
+        if request["type"] == "get_connection":
+            node_id = request["args"]
+            node = self.nodes[node_id]
+            self.response_queue.put({"status": "SUCCESS", "return": node})
+        elif request["type"] == "send_model":
+            model, worker_id = request["args"]
+            node = self.nodes[worker_id]
+            self.send_module(model, node)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def send_forward(self, node: Connection, args, context):
         """Send forward pass to node, must contain args (module args) and context (module + epoch id)"""
@@ -160,3 +185,24 @@ class TorchNode(SmartNode):
         module_bytes = pickle.dumps(module)
         self.debug_print(f"Sending module: {len(module_bytes)} to worker: {node.node_id}")
         self.send_to_node(node, b"MODULE" + module_bytes)
+
+    def run(self):
+        # Listening for and accepting new connections
+        listener = threading.Thread(target=self.listen, daemon=True)
+        listener.start()
+
+        while not self.terminate_flag.is_set():
+            self.handle_requests()
+
+        print("Node stopping...")
+        for node in self.nodes.values():
+            node.stop()
+
+        for node in self.nodes.values():
+            node.join()
+
+        listener.join()
+
+        self.sock.settimeout(None)
+        self.sock.close()
+        print("Node stopped")

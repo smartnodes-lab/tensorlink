@@ -915,27 +915,6 @@ class SmartNode(threading.Thread):
             self.endpoint_thread.join()
         self.stop_upnp()
 
-    def run(self):
-        # Listening for and accepting new connections
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-
-        while not self.terminate_flag.is_set():
-            pass
-
-        print("Node stopping...")
-        for node in self.nodes.values():
-            node.stop()
-
-        for node in self.nodes.values():
-            node.join()
-
-        listener.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
-
     # Methods to interact with Flask endpoints
     def get_self_info(self):
         data = {

@@ -110,44 +110,41 @@ class Connection(threading.Thread):
         while not self.terminate_flag.is_set():
             chunk = b""
 
+            file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
                 chunk = self.sock.recv(1_000_000)
             except socket.timeout:
-                self.main_node.debug_print(f"connection timeout")
+                self.main_node.debug_print("connection timeout")
+                continue
             except Exception as e:
                 self.terminate_flag.set()
                 self.main_node.debug_print(f"unexpected error: {e}")
+                break
 
-            if chunk != b"":
-                eot_pos = chunk.find(self.EOT_CHAR)
-                file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
+            if chunk:
+                buffer += chunk
+                eot_pos = buffer.find(self.EOT_CHAR)
 
-                # We have reached the end of one nodes processing
-                if eot_pos > 0:
-                    packet = buffer + chunk[:eot_pos]
+                if eot_pos >= 0:
+                    packet = buffer[:eot_pos]
                     try:
                         with open(file_name, "ab") as f:
                             f.write(packet)
-                            buffer = b""
-                            b_size = 0
-
-                        self.main_node.handle_message(self, b"DONE STREAM")
-
                     except Exception as e:
-                        raise e
+                        self.main_node.debug_print(f"file writing error: {e}")
+                    buffer = buffer[eot_pos + len(self.EOT_CHAR):]
+                    self.main_node.handle_message(self, b"DONE STREAM")
 
                 elif len(buffer) > 40_000_000:
                     try:
                         with open(file_name, "ab") as f:
-                            b_size += len(buffer)
                             f.write(buffer)
-                            buffer = chunk
-
                     except Exception as e:
-                        raise e
+                        self.main_node.debug_print(f"file writing error: {e}")
+                    buffer = b""
 
-                else:
-                    buffer += chunk
+            else:
+                buffer += chunk
 
         self.sock.settimeout(None)
         self.sock.close()
