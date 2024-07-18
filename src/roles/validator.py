@@ -28,6 +28,8 @@ def assert_job_req(job_req: dict):
 class Validator(TorchNode):
     def __init__(
         self,
+        request_queue,
+        response_queue,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
@@ -35,6 +37,8 @@ class Validator(TorchNode):
         private_key=None,
     ):
         super(Validator, self).__init__(
+            request_queue,
+            response_queue,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
@@ -42,7 +46,6 @@ class Validator(TorchNode):
         )
 
         # Additional attributes specific to the Validator class
-        self.jobs = []
         self.role = b"V"
 
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
@@ -50,11 +53,15 @@ class Validator(TorchNode):
 
         self.debug_colour = "\033[92m"
         self.debug_print(f"Launching Validator: {self.rsa_key_hash} ({self.host}:{self.port})")
+        self.active_jobs = []
+        self.last_loaded_job = 0
 
         if not off_chain_test:
             self.chain.eth.default_account = self.account.address
             if private_key:
                 self.account = self.chain.eth.account.from_key(private_key)
+
+
 
     def handle_data(self, data, node: Connection):
         """
@@ -335,3 +342,59 @@ class Validator(TorchNode):
 
     def update_worker(self):
         pass
+
+    def share_info(self):
+        for validator_ids in self.validators:
+            node = self.nodes[validator_ids]
+            self.send_
+
+    def get_jobs(self):
+        current_block = self.chain.eth.block_number
+        event_filter = self.chain.eth.filter({
+            "fromBlock": self.last_loaded_job,
+            "toBlock": current_block,
+            "address": self.contract_address,
+            "topics": [
+                self.sno_events["JobRequest"],
+                self.sno_events["JobComplete"],
+            ]
+        })
+
+        self.last_loaded_job = current_block
+
+        events = event_filter.get_all_entries()
+        for event in events:
+            print(event)
+
+    def run(self):
+        # Accept users and back-check history
+        # Get proposees from SC and send our state to them
+        # If we are the next proposee, accept info from validators and only add info to the final state if there are
+        # 2 or more of the identical info
+        listener = threading.Thread(target=self.listen, daemon=True)
+        listener.start()
+        
+        mp_comms = threading.Thread(target=self.handle_requests, daemon=True)
+        mp_comms.start()
+
+        while not self.terminate_flag.is_set():
+            # Handle job oversight, and inspect other jobs (includes job verification and reporting)
+            # Get active validators listed on SC
+            # Get active jobs listed on SC: cross check info between user and validators
+            # Submit json to selected proposers/validators
+            # Aggregate incoming json if we are selected validator
+            pass
+
+        print("Node stopping...")
+        for node in self.nodes.values():
+            node.stop()
+
+        for node in self.nodes.values():
+            node.join()
+
+        listener.join()
+        mp_comms.join()
+
+        self.sock.settimeout(None)
+        self.sock.close()
+        print("Node stopped")

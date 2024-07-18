@@ -1,2 +1,2 @@
-from .roles.user import User
-from .ml.distributed import DistributedModel
+from src.roles.user import User
+from src.ml.distributed import DistributedModel

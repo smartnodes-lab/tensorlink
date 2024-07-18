@@ -1,4 +1,4 @@
-from src.roles.validator import Validator
+from src.coordinator import setup_distributed_environment
 
 
 if __name__ == "__main__":

@@ -1,23 +1,35 @@
 from src.ml.model_analyzer import *
-from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 
+from multiprocessing import shared_memory
 from types import GeneratorType
 from torch.nn import Parameter
 from typing import Iterator
 import torch.optim as optim
+
+from copy import deepcopy
 import torch.nn as nn
-import multiprocessing
 import threading
 import hashlib
+import pickle
 import random
 import torch
 import queue
 import time
 
 
-MAX_WAIT_TIME = 3
+MAX_WAIT_TIME = 300
 THREAD_STORAGE = threading.local()
+
+
+def get_tensor_from_shared_memory(shape, size, dtype, name):
+    shm = shared_memory.SharedMemory(name=name)
+    buffer = shm.buf[:size]
+    tensor = pickle.loads(buffer.tobytes())
+    copied_tensor = deepcopy(tensor)
+    del buffer
+    shm.close()
+    return copied_tensor
 
 
 def contains_offloaded(module: nn.Module):
@@ -35,56 +47,21 @@ def contains_offloaded(module: nn.Module):
     return exists
 
 
-# Create offloaded module data structure for config file
-def create_offloaded(module: nn.Module, module_index: list, module_size: int):
-    module_id = (
-        hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
-    )
-    data = {
-        "type": "offloaded",
-        "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                  :-1
-                  ],  # class name
-        "mod_id": module_index,
-        "size": module_size,
-        "workers": [],
-    }
-    return module_id, data
-
-
-# Create user-loaded module data structure for config file
-def create_loaded(module: nn.Module, module_index: list, module_size: int):
-    module_id = (
-        hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
-    )
-    data = {
-        "type": "loaded",
-        "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                  :-1
-                  ],  # class name
-        "mod_id": module_index,
-        "size": module_size,
-        "workers": [],
-    }
-    return module_id, data
-
-
 class DistributedModel(nn.Module):
     """
     DistributedModel:
         Is able to host offloaded submodules along with local operations. Can be spawned
         by a Worker or a User. Host is referred to as the 'master' node.
     """
-
     def __init__(
         self,
+        node_requests,
+        node_responses,
         model: nn.Module,
-        node_requests: multiprocessing.Queue,
-        node_responses: multiprocessing.Queue,
         batch_size: int,
         micro_batch_size: int,
         config=None,
-        device=None,
+        device=None
     ):
         super(DistributedModel, self).__init__()
 
@@ -98,6 +75,10 @@ class DistributedModel(nn.Module):
 
         self.model = model
         self.user_memory = get_gpu_memory()
+
+        self.batch_size = batch_size
+        self.micro_batch_size = micro_batch_size
+
         self.model.n_batch = 0
         self.model.forward_queues = {}
         self.model.backward_queues = {}
@@ -114,11 +95,11 @@ class DistributedModel(nn.Module):
         self.spawn_workers = []
 
     def request_job(
-            self,
-            minibatch_size=1,
-            microbatch_size=1,
-            max_module_size=4e9,
-            handle_layers=True,
+        self,
+        minibatch_size=1,
+        microbatch_size=1,
+        max_module_size=4e9,
+        handle_layers=True,
     ):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
@@ -129,7 +110,7 @@ class DistributedModel(nn.Module):
 
         assert(
             not minibatch_size % microbatch_size,
-           "Minibatch size must be divisible by microbatch size!"
+            "Minibatch size must be divisible by microbatch size!"
         )
 
         n_pipelines = minibatch_size // microbatch_size
@@ -137,9 +118,9 @@ class DistributedModel(nn.Module):
         # Get offloaded GPU usage for network
         capacity = (sum(v["size"] for v in self.distributed_graph.values()) * n_pipelines)
 
-        job_info = (n_pipelines, capacity)
-        self.send_request("request_job", job_info)
-
+        job_info = (n_pipelines, capacity, self.distributed_graph)
+        config = self.send_request("request_job", job_info)
+        self.distribute_model(config)
 
     def forward(self, *args, **kwargs):
         """
@@ -164,7 +145,7 @@ class DistributedModel(nn.Module):
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
         for micro, batch in enumerate(micro_batches):
-            self.perform_micro_forward(micro, batch)
+            # self.perform_micro_forward(micro, batch)
             t = threading.Thread(
                 target=self.perform_micro_forward, args=(micro, batch), kwargs=kwargs
             )
@@ -176,6 +157,11 @@ class DistributedModel(nn.Module):
             t.join()
 
         return self.model.outputs
+
+    def perform_micro_forward(self, micro, *args, **kwargs):
+        THREAD_STORAGE.micro = micro
+        x = self.model(*args, **kwargs)
+        self.model.outputs[micro] = x
 
     def backward(self, loss):
         """
@@ -262,17 +248,13 @@ class DistributedModel(nn.Module):
             else:
                 raise "Expect vals to be of length 2 or 3."
 
-    def perform_micro_forward(self, micro, *args, **kwargs):
-        THREAD_STORAGE.micro = micro
-        x = self.model(*args, **kwargs)
-        self.model.outputs[micro] = x
-
     def train(self, mode: bool = True):
         """
         Sets the training mode for the model and sends requests to offloaded modules to update their training state.
         """
         if not isinstance(mode, bool):
             raise ValueError("training mode is expected to be boolean")
+
         self.training = mode
         threads = []
 
@@ -373,9 +355,11 @@ class DistributedModel(nn.Module):
         # and ensure they are ready to receive the model / train
 
         if config is None:
-            config = self.parse_model(self.model,)
+            config = self.parse_model(self.model, self.max_module_size)
 
-        for mod_id, worker_id in config.items():
+        for mod_info in config.values():
+            mod_id = mod_info["mod_id"]
+            worker_id = mod_info["workers"][0]
             self.wrap_module(mod_id, worker_id)
 
         return 0, 0
@@ -384,33 +368,78 @@ class DistributedModel(nn.Module):
         self,
         model,
         max_module_size,
+        config: dict = None,
         ids: list = None,
-        handle_layers=False,
-        handled_layer=False
-    ):
+        handle_layers=True,
+        handled_layer=False,
+    ) -> dict:
         """
         Parse model based on some minimum submodule size and return a config file containing the
         distributed model configuration.
         # TODO update memory of semi-offloaded modules
         """
-        config = {}
+
+        if config is None:
+            config = {}
         if ids is None:
             ids = []
+
+        # Create offloaded module data structure for config file
+        def create_offloaded(module: nn.Module, module_index: list, module_size: int):
+            module_id = (
+                hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
+            )
+            data = {
+                "type": "offloaded",
+                "id_hash": module_id,
+                "module": f"{type(module)}".split(".")[-1].split(">")[0][
+                    :-1
+                ],  # class name
+                "mod_id": module_index,
+                "size": module_size,
+                "workers": [],
+            }
+            return module_id, data
+
+        # Create user-loaded module data structure for config file
+        def create_loaded(module: nn.Module, module_index: list, module_size: int):
+            module_id = (
+                hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
+            )
+            data = {
+                "type": "loaded",
+                "id_hash": module_id,
+                "module": f"{type(module)}".split(".")[-1].split(">")[0][
+                    :-1
+                ],  # class name
+                "mod_id": module_index,
+                "size": module_size,
+                "workers": [],
+            }
+            return module_id, data
 
         named_children = list(model.named_children())
         model_size = estimate_memory(model)
 
-        # If an entire model can fit on worker and we do not want to break it down further
+        # If we do not want to handle initial layers and model can fit on worker
         if handle_layers is False and model_size <= max_module_size:
             k, v = create_offloaded(model, [-1], model_size)
+            config[k] = v
 
+        # Break first model into children
         for i in range(len(named_children)):
+            # Unpack module info
             name, submodule = named_children[i]
             module_memory = estimate_memory(submodule)
+
+            # Update current module id
             new_ids = ids + [i]
+
             module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
+            # Try to handle on user if specified
             if handle_layers:
+                # If user can handle the layer
                 if self.user_memory >= module_memory:
                     self.user_memory -= module_memory
                     k, v = create_loaded(submodule, new_ids, module_memory)
@@ -418,16 +447,27 @@ class DistributedModel(nn.Module):
                     handled_layer = True
                     continue
 
+                # Break down model further if we haven't handled first layer
                 elif handled_layer is False:
-                    sub_config = self.parse_model(submodule, max_module_size, config, new_ids, True, False)
+                    sub_config = self.parse_model(
+                        submodule,
+                        max_module_size,
+                        config,
+                        new_ids,
+                        True,
+                        False,
+                    )
                     k, v = create_loaded(submodule, new_ids, module_memory)
                     v["subconfig"] = sub_config
                     config[k] = v
                     continue
 
-            elif module_memory <= max_module_size:
+            # Append module id to offloaded config if meets the minimum size
+            if module_memory <= max_module_size:
                 k, v = create_offloaded(submodule, new_ids, module_memory)
+                config[k] = v
 
+            # Recursively break down model if too large
             else:
                 sub_config = self.parse_model(
                     submodule, max_module_size, config, new_ids, True, True
@@ -446,7 +486,7 @@ class DistributedModel(nn.Module):
             else self.model
         )
 
-        offloaded_module = OffloadedModule(self.master_node, worker_id)
+        offloaded_module = OffloadedModule(self, worker_id)
 
         # Remove offloaded module from main model optimizer
         child_params = set(
@@ -513,13 +553,7 @@ class OffloadedModule(nn.Module):
         self.module_id = str(module_id).encode()
         module.id = self.module_id
 
-        self.distributed_graph[self.module_id] = None
         self.parent_model.send_request("send_model", (module, self.worker_id))
-
-        # Wait for the worker node to confirm module loading
-        while self.distributed_graph[self.module_id] is None:
-            # TODO accept timeout and request new worker
-            time.sleep(0.01)
 
         # # Module loaded successfully
         # except TimeoutError:
@@ -531,7 +565,7 @@ class OffloadedModule(nn.Module):
         #     timer.cancel()
 
     def handle_timeout(self):
-        # Timeout occurred, switch to another worker
+        # Timeout occurred, switch to another worker TODO
         new_worker_node = self.master_node.select_candidate_worker()
         if new_worker_node:
             self.worker_node = new_worker_node["connection"]
@@ -541,38 +575,47 @@ class OffloadedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         start_time = time.time()
-        n_iter = self.master_node.modules["Master"].n_batch
+        n_iter = self.parent_model.model.n_batch
         n_micro = getattr(THREAD_STORAGE, "micro", None)
-        n_queued = self.master_node.modules["Master"].forward_queues[n_micro].qsize()
+        n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
         tag = [n_iter, n_micro, self.module_id]
 
         # Store the intermediate tensor for backwards pass
-        self.master_node.modules["Master"].intermediates[n_micro][-1].extend(
+        self.parent_model.model.intermediates[n_micro][-1].extend(
             [handle_output(args), self.module_id]
         )
 
+        detached_args = handle_output(args).clone().detach()
+
         # Relay forward pass to next node
-        self.master_node.send_forward(self.worker_node, (args, kwargs), context=tag)
+        self.parent_model.send_request("send_forward", (self.worker_id, (detached_args, kwargs, tag)))
 
         # Wait for response, change to appending waiting thread to list in master
-        while (
-            self.master_node.modules["Master"].forward_queues[n_micro].qsize()
-            <= n_queued
-        ):
+        waiting = True
+        while waiting:
+            time.sleep(0.5)
+            key = (n_iter, n_micro, self.module_id)
+            args = self.parent_model.send_request("check_queue", key)
+
+            if args is not None:
+                waiting = False
+                shape, size, dtype, name = args
+                output = get_tensor_from_shared_memory(shape, size, dtype, name)
+
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
-                pass
+                waiting = False
 
-        # Grab returned tensor
-        _, output = self.master_node.modules["Master"].forward_queues[n_micro].get()
+            time.sleep(0.1)
 
+        self.parent_model.send_request("release_memory", key)
         inter_storage = [
             self.module_id,
             handle_output(output),
         ]  # Store associated output
 
         # Store intermediates and connection for backwards pass
-        self.master_node.modules["Master"].intermediates[n_micro].append(inter_storage)
+        # self.master_node.modules["Master"].intermediates[n_micro].append(inter_storage)
 
         return output

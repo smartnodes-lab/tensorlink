@@ -1,24 +1,21 @@
-from src.ml.distributed import DistributedModel
-from src.ml.model_analyzer import *
 from src.p2p.connection import Connection
 from src.p2p.torch_node import TorchNode
 from src.p2p.node_api import *
 from src.cryptography.rsa import get_rsa_pub_key
 
-from web3.exceptions import ContractLogicError
-import torch.nn as nn
 import threading
-import requests
 import hashlib
 import pickle
 import random
+import queue
 import time
-import os
 
 
 class User(TorchNode):
     def __init__(
         self,
+        request_queue,
+        response_queue,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
@@ -26,6 +23,8 @@ class User(TorchNode):
         private_key=None,
     ):
         super(User, self).__init__(
+            request_queue,
+            response_queue,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
@@ -97,11 +96,14 @@ class User(TorchNode):
                                 self.modules[mod_id]["workers"].append(
                                     worker_info["id"]
                                 )
+
                                 self.requests[node.node_id].remove(job_id)
+
                     else:
                         ghost += 1
                 else:
                     ghost += 1
+
             if ghost > 0:
                 self.update_node_stats(node.node_id, "GHOST")
                 # TODO: potentially some form of reporting mechanism via ip and port
@@ -118,8 +120,21 @@ class User(TorchNode):
 
         if req["type"] == "request_job":
             assert self.role == b"U", "Must be user to request a job!"
-            n_pipelines, capacity = req["args"]
-            self.request_job(capacity, n_pipelines)
+            n_pipelines, distribution = req["args"]
+            dist_config = self.request_job(n_pipelines, distribution)
+            self.response_queue.put({"status": "SUCCESS", "return": dist_config})
+
+        elif req["type"] == "check_queue":
+            n_iter, n_micro, module_id = req["args"]
+            module_hash = self.get_module_hash_from_id(module_id)
+            return_val = None
+
+            if module_hash in self.modules:
+                if req["args"] in self.modules[module_hash]["forward_queue"]:
+                    return_val = self.modules[module_hash]["forward_queue"][req["args"]]
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
         else:
             super().handle_requests(req)
 
@@ -128,8 +143,8 @@ class User(TorchNode):
 
     def request_job(
         self,
-        capacity,
-        n_pipelines
+        n_pipelines,
+        distribution
     ):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
@@ -177,6 +192,16 @@ class User(TorchNode):
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
 
         validator_ids = [random.choice(self.validators)]
+        distribution = {k: v for k, v in distribution.items() if v["type"] == "offloaded"}
+
+        # Update required network capacity TODO must account for batch size
+        capacity = (
+                sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
+        )
+
+        for mod_id, mod_info in distribution.items():
+            if mod_info["type"] == "offloaded":
+                self.modules[mod_id] = mod_info
 
         # Connect to seed validators
         for validator_id in validator_ids:
@@ -254,7 +279,10 @@ class User(TorchNode):
             job_request["workers"][0][
                 worker_id
             ] = mod_id  # TODO 0 hardcoded and must be replaced with n_pipelines
-            dist_model_config[mod_id] = worker_id
+            dist_model_config[mod_id] = module.copy()
+
+            self.modules[mod_id]["forward_queue"] = {}
+            self.modules[mod_id]["backward_queue"] = {}
 
         # TODO Send activation message to validators
         # for validator in validators:
@@ -262,11 +290,7 @@ class User(TorchNode):
 
         self.jobs[-1] = job_request
 
-        dist_model = DistributedModel(
-            model, minibatch_size, microbatch_size, config=dist_model_config
-        )
-
-        return dist_model
+        return dist_model_config
 
     def send_job_req(self, validator: Connection, job_info):
         """Send a request to a validator to oversee our job"""
@@ -312,3 +336,32 @@ class User(TorchNode):
             data["job"] = {"capacity": job["id"]}
 
         return data
+
+    def run(self):
+        # Accept users and back-check history
+        # Get proposees from SC and send our state to them
+        # If we are the next proposee, accept info from validators and only add info to the final state if there are
+        # 2 or more of the identical info
+        listener = threading.Thread(target=self.listen, daemon=True)
+        listener.start()
+
+        mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
+        mp_comms.start()
+
+        while not self.terminate_flag.is_set():
+            # Handle job oversight, and inspect other jobs (includes job verification and reporting)
+            pass
+
+        print("Node stopping...")
+        for node in self.nodes.values():
+            node.stop()
+
+        for node in self.nodes.values():
+            node.join()
+
+        listener.join()
+        mp_comms.join()
+
+        self.sock.settimeout(None)
+        self.sock.close()
+        print("Node stopped")
