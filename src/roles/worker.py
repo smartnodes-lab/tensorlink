@@ -227,7 +227,7 @@ class Worker(TorchNode):
 
                         # self.request_statistics()
                         self.modules[module.id] = module
-                        # self.optimizers[module.id] = optim.Adam(module.parameters())
+                        self.optimizers[module.id] = optim.Adam(module.parameters())
 
                         self.debug_print(f"Loaded distributed module!")
                         self.send_to_node(node, b"LOADED" + module.id)
@@ -300,8 +300,8 @@ class Worker(TorchNode):
 
                     # Pass along backwards pass to next node
                     self.send_backward(self.nodes[next_node], dvalues, tag)
-                    # self.optimizers[module_id].zero_grad()
-                    # self.optimizers[module_id].step()
+                    self.optimizers[module_id].zero_grad()
+                    self.optimizers[module_id].step()
 
                 if module.forward_queues.empty() is False:
                     next_node = module.host

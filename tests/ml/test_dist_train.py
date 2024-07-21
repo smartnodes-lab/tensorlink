@@ -16,6 +16,8 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import numpy as np
 from tqdm import tqdm
+from multiprocessing import shared_memory
+
 
 # https://huggingface.co/datasets/zeroshot/twitter-financial-news-sentiment
 # https://mccormickml.com/2019/07/22/BERT-fine-tuning/
@@ -52,7 +54,7 @@ def preprocess_data(dataset, tokenizer, split):
 
 
 def train(model, tokenizer, device):
-    batch_size = 1
+    batch_size = 32
     epochs = 2
     set_seed(42)
 
@@ -60,8 +62,8 @@ def train(model, tokenizer, device):
     dataset = load_dataset("zeroshot/twitter-financial-news-sentiment")
 
     # temporarily truncating for testing purposes
-    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(25))
-    dataset["validation"] = dataset["validation"].shuffle(seed=42).select(range(5))
+    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(256))
+    dataset["validation"] = dataset["validation"].shuffle(seed=42).select(range(64))
     train_dataset = preprocess_data(dataset, tokenizer, "train")
     val_dataset = preprocess_data(dataset, tokenizer, "validation")
 
@@ -175,11 +177,11 @@ def train(model, tokenizer, device):
 
 if __name__ == "__main__":
     # Launch Nodes
-    user = DistributedCoordinator(debug=False)
+    user = DistributedCoordinator(debug=True)
     time.sleep(0.2)
-    worker = WorkerCoordinator(debug=False)
+    worker = WorkerCoordinator(debug=True)
     time.sleep(0.2)
-    validator = ValidatorCoordinator(debug=False)
+    validator = ValidatorCoordinator(debug=True)
 
     # Bootstrap nodes
     val_key, val_host, val_port = validator.send_request("info", None)

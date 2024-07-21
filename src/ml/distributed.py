@@ -31,7 +31,9 @@ def get_from_shared_memory(size, name):
     tensor = pickle.loads(buffer.tobytes())
     copied_tensor = deepcopy(tensor)
     del buffer
+    del tensor
     shm.close()
+    shm.unlink()
     return copied_tensor
 
 
@@ -287,7 +289,7 @@ class DistributedModel(nn.Module):
 
                         time.sleep(0.1)
 
-                    self.send_request("release_memory", tag)
+                    self.send_request("release_memory", ("backward_queue", module_id_bytes, tuple(tag)))
 
             elif len(vals) == 1:
                 assoc_input = vals[0]
@@ -689,7 +691,8 @@ class OffloadedModule(nn.Module):
 
             time.sleep(0.1)
 
-        self.parent_model.send_request("release_memory", key)
+        self.parent_model.send_request("release_memory", ("forward_queue", self.module_id, key))
+
         inter_storage = [
             self.module_id,
             handle_output(output),

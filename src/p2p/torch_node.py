@@ -144,7 +144,7 @@ class TorchNode(SmartNode):
                     module.host = node.node_id
 
                     self.modules[module.id] = module
-                    # self.optimizers[module.id] = optim.Adam(module.parameters())
+                    self.optimizers[module.id] = optim.Adam(module.parameters())
 
                     self.debug_print(f"Loaded distributed module!")
                     self.send_to_node(node, b"LOADED" + module.id)
@@ -259,14 +259,16 @@ class TorchNode(SmartNode):
             key = b"P" + module_id
 
             if key in self.memory_manager:
-                return_val = self.memory_manager[key].name
+                return_val = self.memory_manager[key]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
         elif req_type == "release_memory":
-            key = tuple(request["args"])
-            self.memory_manager[key].close()
-            self.memory_manager[key].unlink()
+            data_type, module_id, key = tuple(request["args"])
+            del self.memory_manager[key]
+            if key in self.modules[module_id][data_type]:
+                del self.modules[module_id][data_type][key]
+
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "connect_node":
@@ -304,7 +306,9 @@ class TorchNode(SmartNode):
         queue = "forward_queue" if not backward else "backward_queue"
 
         self.modules[id_hash][queue][key] = (tensor_shape, size, tensor_dtype, shm.name)
-        self.memory_manager[key] = shm
+        self.memory_manager[key] = shm.name
+        del buffer
+        shm.close()
 
     def store_parameters_in_shared_memory(self, key, parameters):
         module_id = key[1:]
@@ -316,7 +320,7 @@ class TorchNode(SmartNode):
         buffer[:] = parameters
 
         self.modules[module_id]["parameters"][key] = (size, shm.name)
-        self.memory_manager[key] = shm
+        self.memory_manager[key] = shm.name
 
     def send_backward(self, node: Connection, args, context):
         """Send backward pass to node, must contain args (module args) and context (module + epoch id)"""
