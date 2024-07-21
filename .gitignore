@@ -1,4 +1,4 @@
-# Ignore build artifacts from the local tests sub-crate.
+# Ignore build artifacts from the local testing sub-crate.
 target/
 venv/
 keys/

@@ -3,7 +3,6 @@ from src.p2p.connection import Connection
 
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import load_dotenv
-from typing import Callable
 from miniupnpc import UPnP
 from web3 import Web3
 import threading
@@ -39,6 +38,15 @@ logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.INFO)
 STATE_FILE = "./dht_state.json"
 BASE_PORT = 38751
+
+
+SNO_EVENT_SIGNATURES = {
+    "JobRequest": "JobRequested(uint256,uint256,address[])",
+    "JobComplete": "JobCompleted(uint256,uint256)",
+    "JobDispute": "JobDisputed(uint256,uint256)",
+    "ProposalCreated": "ProposalCreated(uint256,bytes)",
+    "ProposalExecuted": "ProposalExecuted(uint256)"
+}
 
 
 def hash_key(key: bytes, number=False):
@@ -98,6 +106,7 @@ class Bucket:
 class SmartNode(threading.Thread):
     """
     A P2P node secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
+    Combines smart contract queries and a kademlia-like DHT implementation for data storage and access.
     """
 
     def __init__(
@@ -152,10 +161,12 @@ class SmartNode(threading.Thread):
         self.id = 0
 
         # Stores key of stored values
-        self.workers = []
         self.validators = []
+        self.workers = []
         self.users = []
         self.jobs = []
+
+        self.sno_events = {name: Web3.keccak(text=sig).hex() for name, sig in SNO_EVENT_SIGNATURES.items()}
 
         if upnp:
             self.init_upnp()
@@ -173,6 +184,7 @@ class SmartNode(threading.Thread):
                 self.contract = self.chain.eth.contract(
                     address=self.contract_address, abi=ABI
                 )
+
 
             except Exception as e:
                 self.debug_print(f"Could not retrieve contract: {e}")
@@ -519,23 +531,6 @@ class SmartNode(threading.Thread):
         else:
             return False
 
-    def get_validator_count(self):
-        """Get number of listed validators on Smart Nodes"""
-        num_validators = self.contract.functions.getValidatorCount().call()
-        return num_validators
-
-    def get_validator_info(self, validator_ind: int):
-        """Get validator info from Smart Nodes"""
-        validator_state = self.contract.functions.getValidatorInfo(validator_ind).call()
-
-        # If validator was active at last state update, retrieve id and request connection info
-        if validator_state:
-            # Get validator information from smart contract
-            return validator_state[0], validator_state[1]
-
-        else:
-            return None
-
     def bootstrap(self):
         """Bootstrap node to existing validators"""
         if self.off_chain_test is True:
@@ -730,12 +725,17 @@ class SmartNode(threading.Thread):
     def request_store_value(self):
         pass
 
-    def store_request(self, node_id: bytes, key_hash: bytes):
+    def store_request(self, node_id: bytes, key: bytes):
         """Stores a log of the request we have made to a node and for what value"""
+        if node_id in self.nodes.keys():
+            if node_id in self.requests:
+                self.requests[node_id].append(key)
+            else:
+                self.requests[node_id] = [key]
+
+    def remove_request(self, node_id: bytes, key: bytes):
         if node_id in self.requests:
-            self.requests[node_id].append(key_hash)
-        else:
-            self.requests[node_id] = [key_hash]
+            self.requests[node_id].remove(key)
 
     def delete(self, key: bytes):
         """
@@ -915,27 +915,6 @@ class SmartNode(threading.Thread):
             self.endpoint_thread.join()
         self.stop_upnp()
 
-    def run(self):
-        # Listening for and accepting new connections
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-
-        while not self.terminate_flag.is_set():
-            pass
-
-        print("Node stopping...")
-        for node in self.nodes.values():
-            node.stop()
-
-        for node in self.nodes.values():
-            node.join()
-
-        listener.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
-
     # Methods to interact with Flask endpoints
     def get_self_info(self):
         data = {
@@ -965,3 +944,20 @@ class SmartNode(threading.Thread):
                     raise e
             else:
                 port += 1
+
+    def get_validator_count(self):
+        """Get number of listed validators on Smart Nodes"""
+        num_validators = self.contract.functions.getValidatorCount().call()
+        return num_validators
+
+    def get_validator_info(self, validator_ind: int):
+        """Get validator info from Smart Nodes"""
+        validator_state = self.contract.functions.getValidatorInfo(validator_ind).call()
+
+        # If validator was active at last state update, retrieve id and request connection info
+        if validator_state:
+            # Get validator information from smart contract
+            return validator_state[0], validator_state[1]
+
+        else:
+            return None

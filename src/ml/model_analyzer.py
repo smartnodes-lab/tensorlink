@@ -109,7 +109,7 @@ def find_module(module: nn.Module, target_name: str, ids: list = []):
 def access_module(module: nn.Module, indices: list):
     """Access a module from a model based on its integer ID (depth)"""
     if len(indices) <= 0:
-        # First module selecrted
+        # First module selected
         return module, "root"
 
     current_module = module

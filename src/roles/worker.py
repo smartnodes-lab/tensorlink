@@ -27,6 +27,8 @@ class Worker(TorchNode):
 
     def __init__(
         self,
+        request_queue,
+        response_queue,
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
@@ -34,6 +36,8 @@ class Worker(TorchNode):
         public_key=None,
     ):
         super(Worker, self).__init__(
+            request_queue,
+            response_queue,
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
@@ -204,7 +208,7 @@ class Worker(TorchNode):
                 #         if node in self.inbound:
                 #             self.forward_relays.put(tensor)
                 #         elif node in self.outbound:
-                #             self.backward_relays.put(tensor)
+                #             self.backward_relays.put(tensor)2
 
                 # Handle receiving module from master node
                 elif b"MODULE" == data[:6]:
@@ -223,7 +227,7 @@ class Worker(TorchNode):
 
                         # self.request_statistics()
                         self.modules[module.id] = module
-                        self.optimizers[module.id] = optim.Adam(module.parameters())
+                        # self.optimizers[module.id] = optim.Adam(module.parameters())
 
                         self.debug_print(f"Loaded distributed module!")
                         self.send_to_node(node, b"LOADED" + module.id)
@@ -243,51 +247,32 @@ class Worker(TorchNode):
             self.debug_print(f"worker:stream_data:{e}")
             raise e
 
-    # def run(self):
-    #     # Thread for handling incoming connections
-    #     listener = threading.Thread(target=self.listen, daemon=True)
-    #     listener.start()
-    #
-    #     # Thread for periodic worker statistics updates
-    #     # stats_updater = threading.Thread(target=self.request_worker_stats, daemon=True)
-    #     # stats_updater.start()
-    #
-    #     # time.sleep(5)
-    #     # self.updater_flag.set()
-    #
-    #     # # Thread for handling incoming tensors from connected nodes (just an idea)
-    #     # data_stream = threading.Thread(target=self.stream_data, daemo=True)
-    #     # data_stream.start()
-    #
-    #     # Main worker loop
-    #     while not self.terminate_flag.is_set():
-    #         if (
-    #             self.training and self.port != 5026
-    #         ):  # Port included for master testing without master class
-    #             self.train_loop()
-    #
-    #         # Include the following steps:
-    #         # 1. Broadcast GPU memory statistics
-    #         # self.broadcast_statistics()
-    #
-    #         # 5. Handle requests for proof of training
-    #         # For example, you can call self.proof_of_optimization(), self.proof_of_output(), etc.
-    #
-    #         # self.reconnect_nodes()
-    #         time.sleep(1)
-    #
-    #     print("Node stopping...")
-    #     for node in self.connections:
-    #         node.stop()
-    #
-    #     time.sleep(1)
-    #
-    #     for node in self.connections:
-    #         node.join()
-    #
-    #     self.sock.settimeout(None)
-    #     self.sock.close()
-    #     print("Node stopped")
+    def run(self):
+        # Accept users and back-check history
+        # Get proposees from SC and send our state to them
+        listener = threading.Thread(target=self.listen, daemon=True)
+        listener.start()
+
+        mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
+        mp_comms.start()
+
+        while not self.terminate_flag.is_set():
+            # Handle job oversight, and inspect other jobs (includes job verification and reporting)
+            self.train_loop()
+
+        print("Node stopping...")
+        for node in self.nodes.values():
+            node.stop()
+
+        for node in self.nodes.values():
+            node.join()
+
+        listener.join()
+        mp_comms.join()
+
+        self.sock.settimeout(None)
+        self.sock.close()
+        print("Node stopped")
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
@@ -298,9 +283,7 @@ class Worker(TorchNode):
             for module_id, module in self.modules.items():
                 # Complete any outstanding back propagations
                 if module.backward_queues.empty() is False:
-                    next_node = list(self.nodes.values())[
-                        0
-                    ]  # Placeholder for the connecting node
+                    next_node = module.host
 
                     # Grab backwards pass from forward node and our associated input/output from forward pass
                     tag, loss_relay = module.backward_queues.get()
@@ -316,14 +299,12 @@ class Worker(TorchNode):
                     tag.append(module_id)
 
                     # Pass along backwards pass to next node
-                    self.send_backward(next_node["connection"], dvalues, tag)
-                    self.optimizers[module_id].zero_grad()
-                    self.optimizers[module_id].step()
+                    self.send_backward(self.nodes[next_node], dvalues, tag)
+                    # self.optimizers[module_id].zero_grad()
+                    # self.optimizers[module_id].step()
 
                 if module.forward_queues.empty() is False:
-                    next_node = list(self.nodes.values())[
-                        0
-                    ]  # Placeholder for the appropriate node
+                    next_node = module.host
 
                     tag, tensor = module.forward_queues.get()
 
@@ -347,7 +328,7 @@ class Worker(TorchNode):
                     module.intermediates[inter_tag] = [inp, handle_output(out)]
 
                     # Relay forward pass to the next node
-                    self.send_forward(next_node["connection"], out, tag)
+                    self.send_forward(self.nodes[next_node], out, tag)
 
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {
