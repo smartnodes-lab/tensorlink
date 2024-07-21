@@ -1,6 +1,4 @@
-from src.cryptography.rsa import get_rsa_pub_key
-from src.roles.worker import Worker
-from src.ml.distributed import DistributedModel
+from src.coordinator import DistributedCoordinator, WorkerCoordinator, ValidatorCoordinator
 import torch
 import json
 import copy
@@ -100,7 +98,7 @@ def train(model, tokenizer, device):
 
         losses = []
         print(f"Training Epoch {epoch_i + 1}")
-        for step, batch in enumerate(tqdm(train_dataloader)):
+        for step, batch in enumerate(tqdm(train_dataloader, position=0, leave=True)):
 
             b_input_ids = batch[0].to(device)
             b_input_mask = batch[1].to(device)
@@ -176,6 +174,18 @@ def train(model, tokenizer, device):
 
 
 if __name__ == "__main__":
+    # Launch Nodes
+    user = DistributedCoordinator(debug=False)
+    time.sleep(0.2)
+    worker = WorkerCoordinator(debug=False)
+    time.sleep(0.2)
+    validator = ValidatorCoordinator(debug=False)
+
+    # Bootstrap nodes
+    val_key, val_host, val_port = validator.send_request("info", None)
+    worker.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (val_key, val_host, val_port))
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model = BertForSequenceClassification.from_pretrained(
@@ -183,36 +193,5 @@ if __name__ == "__main__":
     ).to(device)
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-    ip = "127.0.0.1"
-    port = 5026
-
-    # Spawn 3 workers on their own ports + threads
-    worker1 = Worker(
-        host=ip,
-        port=port,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=True,
-    )
-    worker2 = Worker(
-        host=ip,
-        port=port + 1,
-        wallet_address="5HDxH5ntpmr7U3RjEz5g84Rikr93kmtqUWKQum3p3Kdot4Qh",
-        debug=True,
-    )
-
-    worker1.master = True  # We must omit this
-    worker2.training = True
-
-    worker1.start()
-    worker2.start()
-
-    worker1.connect_dht_node(ip, port + 1)
-    config = {"encoder": worker1.key_hash}
-
-    time.sleep(6)
-
-    model = DistributedModel(model, worker1, batch_size=1, micro_batch_size=1)
-    train(model, tokenizer, device)
-
-    worker1.stop()
-    worker2.stop()
+    distributed_model = user.create_distributed_model(model, 1, 1.4e9)
+    train(distributed_model, tokenizer, device)

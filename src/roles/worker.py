@@ -208,7 +208,7 @@ class Worker(TorchNode):
                 #         if node in self.inbound:
                 #             self.forward_relays.put(tensor)
                 #         elif node in self.outbound:
-                #             self.backward_relays.put(tensor)
+                #             self.backward_relays.put(tensor)2
 
                 # Handle receiving module from master node
                 elif b"MODULE" == data[:6]:

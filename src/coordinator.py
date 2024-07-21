@@ -10,13 +10,14 @@ import atexit
 class BaseCoordinator:
     _instance = None
 
-    def __new__(cls):
+    def __new__(cls, *args, **kwargs):
         if cls._instance is None:
             cls._instance = super(BaseCoordinator, cls).__new__(cls)
             cls._instance._initialized = False
+            cls._instance._init_kwargs = kwargs
         return cls._instance
 
-    def __init__(self):
+    def __init__(self, *args, **kwargs):
         if self._initialized:
             return
 
@@ -58,12 +59,16 @@ class BaseCoordinator:
 
 class DistributedCoordinator(BaseCoordinator):
     def run_role(self):
+        kwargs = self._init_kwargs.copy()
+        kwargs.update({
+            'debug': kwargs.get('debug', True),
+            'upnp': kwargs.get('upnp', False),
+            'off_chain_test': kwargs.get('off_chain_test', True)
+        })
         role_instance = User(
             self.node_requests,
             self.node_responses,
-            debug=True,
-            upnp=False,
-            off_chain_test=True,
+            **kwargs
         )
         role_instance.start()
 
@@ -77,24 +82,32 @@ class DistributedCoordinator(BaseCoordinator):
 
 class ValidatorCoordinator(BaseCoordinator):
     def run_role(self):
+        kwargs = self._init_kwargs.copy()
+        kwargs.update({
+            'debug': kwargs.get('debug', True),
+            'upnp': kwargs.get('upnp', False),
+            'off_chain_test': kwargs.get('off_chain_test', True)
+        })
         role_instance = Validator(
             self.node_requests,
             self.node_responses,
-            debug=True,
-            upnp=False,
-            off_chain_test=True
+            **kwargs
         )
         role_instance.start()
 
 
 class WorkerCoordinator(BaseCoordinator):
     def run_role(self):
+        kwargs = self._init_kwargs.copy()
+        kwargs.update({
+            'debug': kwargs.get('debug', True),
+            'upnp': kwargs.get('upnp', False),
+            'off_chain_test': kwargs.get('off_chain_test', True)
+        })
         role_instance = Worker(
             self.node_requests,
             self.node_responses,
-            debug=True,
-            upnp=False,
-            off_chain_test=True
+            **kwargs
         )
         role_instance.start()
         role_instance.activate()

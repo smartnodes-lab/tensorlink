@@ -124,17 +124,6 @@ class User(TorchNode):
             dist_config = self.request_job(n_pipelines, distribution)
             self.response_queue.put({"status": "SUCCESS", "return": dist_config})
 
-        elif req["type"] == "check_queue":
-            n_iter, n_micro, module_id = req["args"]
-            module_hash = self.get_module_hash_from_id(module_id)
-            return_val = None
-
-            if module_hash in self.modules:
-                if req["args"] in self.modules[module_hash]["forward_queue"]:
-                    return_val = self.modules[module_hash]["forward_queue"][req["args"]]
-
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
         else:
             super().handle_requests(req)
 

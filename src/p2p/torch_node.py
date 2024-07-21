@@ -101,11 +101,12 @@ class TorchNode(SmartNode):
                     )
 
                     # Master-specific handling (ie for DistributedModel)
-                    if self.master:
+                    if self.role == b"U":
                         [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
-                        self.modules["Master"].backward_queues[n_micro].put(
-                            ([n_iter, n_micro, module_id], tensor)
-                        )
+                        key = (n_iter, n_micro, module_id)
+
+                        # Create shared memory block and store tensor
+                        self.store_tensor_in_shared_memory(key, tensor, backward=True)
 
                     # Module-specific handling (ie for OffloadedModule / nn.Module)
                     elif self.modules:
@@ -124,13 +125,12 @@ class TorchNode(SmartNode):
                         node, self.modules[module_id].parameters(), module_id
                     )
 
-                    return True
-
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
-                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+                    self.debug_print(f"RECEIVED PARAMS")
                     module_id, parameters = pickle.loads(data[10:])
-                    self.parameters[module_id] = parameters
+                    key = b"P" + module_id
+                    self.store_parameters_in_shared_memory(key, parameters)
 
                 elif b"MODULE" == data[:6]:
                     self.debug_print(
@@ -148,6 +148,18 @@ class TorchNode(SmartNode):
 
                     self.debug_print(f"Loaded distributed module!")
                     self.send_to_node(node, b"LOADED" + module.id)
+
+                elif b"UPDATE-TRAIN" == data[:12]:
+                    mode = False if data[12:13] == b"0" else True
+                    module_id = data[13:]
+                    self.modules[module_id].training = mode
+                    self.send_train_updated(node, mode, module_id)
+
+                elif b"TRAIN-UPDATED" == data[:13]:
+                    mode = False if data[13:14] == b"0" else True
+                    module_id = data[14:]
+                    if module_id in self.modules:
+                        self.modules[module_id]["training"] = mode
 
                 else:
                     # We do not log a ghost here since SmartNode is meant to be a super class and this should
@@ -191,8 +203,68 @@ class TorchNode(SmartNode):
             self.send_forward(node, (args, kwargs), tag)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
+        elif req_type == "send_backward":
+            worker_id, (args, kwargs, tag) = request["args"]
+            node = self.nodes[worker_id]
+            self.send_backward(node, (args, kwargs), tag)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
+        elif req_type == "check_forward":
+            n_iter, n_micro, module_id = request["args"]
+            return_val = None
+
+            if module_id in self.modules:
+                if request["args"] in self.modules[module_id]["forward_queue"]:
+                    return_val = self.modules[module_id]["forward_queue"][request["args"]]
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "check_backward":
+            args = request["args"]
+            n_iter, n_micro, module_hash, module_id = args
+            key = (n_iter, n_micro, module_id)
+            return_val = None
+
+            if module_hash in self.modules:
+                if key in self.modules[module_hash]["backward_queue"]:
+                    return_val = self.modules[module_hash]["backward_queue"][key]
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "request_parameters":
+            worker_id, module_id = request["args"]
+            node = self.nodes[worker_id]
+            self.send_parameters_req(node, module_id)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
+        elif req_type == "update_train":
+            worker_id, mode, module_id = request["args"]
+            mode = b"0" if mode is False else b"1"
+            node = self.nodes[worker_id]
+            self.send_to_node(node, b"UPDATE-TRAIN" + mode + module_id)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
+        elif req_type == "check_train":
+            module_id = request["args"]
+            return_val = None
+
+            if module_id in self.modules:
+                return_val = self.modules[module_id]["training"]
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "check_parameters":
+            module_id = request["args"]
+            return_val = None
+            key = b"P" + module_id
+
+            if key in self.memory_manager:
+                return_val = self.memory_manager[key].name
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
         elif req_type == "release_memory":
-            key = request["args"]
+            key = tuple(request["args"])
             self.memory_manager[key].close()
             self.memory_manager[key].unlink()
             self.response_queue.put({"status": "SUCCESS", "return": None})
@@ -215,8 +287,8 @@ class TorchNode(SmartNode):
         # self.store_request(node.node_id, )
         self.send_to_node(node, pickled_data)
 
-    def store_tensor_in_shared_memory(self, key, tensor):
-        id_hash = self.get_module_hash_from_id(key[2])
+    def store_tensor_in_shared_memory(self, key, tensor, backward=False):
+        id_hash = key[2]
         tensor_out = handle_output(tensor)
         tensor_shape = tensor_out.shape
         tensor_dtype = tensor_out.dtype
@@ -229,7 +301,21 @@ class TorchNode(SmartNode):
         buffer = shm.buf[:size]
         buffer[:] = tensor
 
-        self.modules[id_hash]["forward_queue"][key] = (tensor_shape, size, tensor_dtype, shm.name)
+        queue = "forward_queue" if not backward else "backward_queue"
+
+        self.modules[id_hash][queue][key] = (tensor_shape, size, tensor_dtype, shm.name)
+        self.memory_manager[key] = shm
+
+    def store_parameters_in_shared_memory(self, key, parameters):
+        module_id = key[1:]
+        parameters = pickle.dumps(parameters)
+        size = len(parameters)
+
+        shm = shared_memory.SharedMemory(create=True, size=size)
+        buffer = shm.buf[:size]
+        buffer[:] = parameters
+
+        self.modules[module_id]["parameters"][key] = (size, shm.name)
         self.memory_manager[key] = shm
 
     def send_backward(self, node: Connection, args, context):
@@ -247,6 +333,10 @@ class TorchNode(SmartNode):
     def send_parameters_req(self, node: Connection, module_id):
         """Request parameters from a specific worker"""
         self.send_to_node(node, b"PARAMS-REQ" + module_id)
+
+    def send_train_updated(self, node: Connection, mode: bool, module_id: bytes):
+        mode = b"0" if mode is False else b"1"
+        self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
     def send_module(self, module: nn.Module, node: Connection):
         module_bytes = pickle.dumps(module)
