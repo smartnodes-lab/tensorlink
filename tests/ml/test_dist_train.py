@@ -1,14 +1,10 @@
-from src.coordinator import DistributedCoordinator, WorkerCoordinator, ValidatorCoordinator
+from src.mpc.coordinator import DistributedCoordinator, WorkerCoordinator, ValidatorCoordinator
 import torch
-import json
-import copy
 import time
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import TensorDataset
 from transformers import (
     BertForSequenceClassification,
     BertTokenizer,
-    TrainingArguments,
-    Trainer,
     set_seed,
     get_linear_schedule_with_warmup,
 )
@@ -16,7 +12,6 @@ from datasets import load_dataset
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 import numpy as np
 from tqdm import tqdm
-from multiprocessing import shared_memory
 
 
 # https://huggingface.co/datasets/zeroshot/twitter-financial-news-sentiment
@@ -187,6 +182,7 @@ if __name__ == "__main__":
     val_key, val_host, val_port = validator.send_request("info", None)
     worker.send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (b'58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e', "192.168.2.64", 38752))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

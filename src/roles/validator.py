@@ -255,7 +255,7 @@ class Validator(TorchNode):
         data = b"JOB-REQ" + data
         found = False
 
-        # Cycle through workers finding the closest free memory to required memory
+        # Cycle through workers finding the closest free mpc to required mpc
         while not found:
             selected_worker = None
             closest_mem_diff = float("inf")
@@ -264,7 +264,7 @@ class Validator(TorchNode):
                 worker_stats = self.nodes[worker_id].stats
 
                 if worker_stats:
-                    worker_mem = worker_stats["memory"]
+                    worker_mem = worker_stats["mpc"]
 
                     if worker_mem >= module_size:
                         memory_diff = worker_mem - module_size
@@ -273,7 +273,7 @@ class Validator(TorchNode):
                             closest_mem_diff = memory_diff
                             selected_worker = worker_stats["id"]
 
-            # If we can no longer find a worker with the required memory
+            # If we can no longer find a worker with the required mpc
             if not selected_worker:
                 return False
 
@@ -295,7 +295,7 @@ class Validator(TorchNode):
             if not_found:
                 continue
             else:
-                node.stats["memory"] -= module_size
+                node.stats["mpc"] -= module_size
                 job = self.query_dht(job_id)
                 job["distribution"][module_id]["worker"] = node.node_id
                 return True

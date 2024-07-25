@@ -3,6 +3,7 @@ from src.p2p.connection import Connection
 from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
 from src.cryptography.rsa import get_rsa_pub_key
 
+from multiprocessing import shared_memory
 import torch.nn as nn
 import torch.optim as optim
 import threading
@@ -20,7 +21,7 @@ class Worker(TorchNode):
         - convert pickling to json for security (?)
         - process other jobs/batches while waiting for worker response (?)
         - link workers to database or download training data for complete offloading
-        - different subclasses of Worker for memory requirements to designate memory-specific
+        - different subclasses of Worker for mpc requirements to designate mpc-specific
             tasks, ie distributing a model too large to handle on a single computer / user
         - function that detaches the huggingface wrapped outputs tensor without modifying the rest
     """
@@ -70,98 +71,8 @@ class Worker(TorchNode):
 
             # Try worker-related tags if not found in parent class
             if not handled:
-                # Handle incoming forward pass request
-                if b"FORWARD" == data[:7]:
-                    self.debug_print(
-                        f"RECEIVED FORWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                    )
-                    # Master-specific handling (ie for DistributedModel)
-                    if self.master:
-                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
-                        self.modules["Master"].forward_queues[n_micro].put(
-                            ([n_iter, n_micro, module_id], tensor)
-                        )
-
-                        return True
-
-                    # Module-specific handling (ie for OffloadedModule / nn.Module)
-                    elif self.training and len(self.modules) > 0:
-                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
-                        self.modules[module_id].forward_queues.put(
-                            ([n_iter, n_micro], tensor)
-                        )
-
-                        return True
-
-                # Handle incoming backward pass request
-                elif b"BACKWARD" == data[:8]:
-                    self.debug_print(
-                        f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                    )
-
-                    # Master-specific handling (ie for DistributedModel)
-                    if self.master:
-                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
-                        self.modules["Master"].backward_queues[n_micro].put(
-                            ([n_iter, n_micro, module_id], tensor)
-                        )
-
-                        return True
-
-                    # Module-specific handling (ie for OffloadedModule / nn.Module)
-                    elif self.training and self.modules:
-                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
-                        self.modules[module_id].backward_queues.put(
-                            ([n_iter, n_micro], tensor)
-                        )
-
-                        return True
-
-                # Handle requests for module parameters
-                elif b"PARAMSREQ" == data[:9]:
-                    self.debug_print(f"RECEIVED PARAMS REQUEST")
-                    if self.training:
-                        # Must ensure requesting node is indeed the master or an overseeing validator
-                        module_id = data[9:]
-                        self.send_parameters(
-                            node, self.modules[module_id].parameters(), module_id
-                        )
-
-                        return True
-
-                # Handle and store responses from a parameters request
-                elif b"PARAMETERS" == data[:10]:
-                    self.debug_print(f"RECEIVED PARAMS REQUEST")
-                    module_id, parameters = pickle.loads(data[10:])
-                    self.parameters[module_id] = parameters
-
-                    return True
-
-                # Handle update .train parameter request
-                elif b"UT-REQ" == data[:6]:
-                    # self.debug_print()
-                    if self.training:
-                        # Must ensure requesting node is the master
-                        mode = False if data[6:7] == b"0" else True
-                        module_id = data[7:]
-                        self.modules[module_id].training = mode
-                        self.send_train_updated(node, mode, module_id)
-
-                        return True
-
-                # Handle update .train parameter change request from master node
-                elif b"TU-REQ" == data[:6]:
-                    if self.master or self.training:
-                        mode = False if data[6:7] == b"0" else True
-                        module_id = data[7:]
-                        if module_id in self.state_updates.keys():
-                            self.state_updates[module_id]["train"] = mode
-                        else:
-                            self.state_updates[module_id] = {"train": mode}
-
-                        return True
-
-                elif b"STATS-REQUEST" == data[:13]:
+                # Try worker-related tags
+                if b"STATS-REQUEST" == data[:13]:
                     self.debug_print(f"Received stats request from: {node.node_id}")
                     self.handle_statistics_request(node)
 
@@ -178,7 +89,7 @@ class Worker(TorchNode):
                             self.store_request(user_id + module_id, b"AWAIT-USER")
                             data = b"ACCEPT-JOB" + job_id + module_id
 
-                            # Update available memory
+                            # Update available mpc
                             self.available_memory -= module_size
 
                         else:
@@ -208,38 +119,15 @@ class Worker(TorchNode):
                 #         if node in self.inbound:
                 #             self.forward_relays.put(tensor)
                 #         elif node in self.outbound:
-                #             self.backward_relays.put(tensor)2
-
-                # Handle receiving module from master node
-                elif b"MODULE" == data[:6]:
-                    self.debug_print(
-                        f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                    )
-                    # Must confirm the model with a job on SC
-                    if self.training:
-                        # Load in model
-                        module = pickle.loads(data[6:])
-
-                        module.forward_queues = queue.Queue()
-                        module.backward_queues = queue.Queue()
-                        module.intermediates = {}
-                        # module.intermediates = queue.LifoQueue()
-
-                        # self.request_statistics()
-                        self.modules[module.id] = module
-                        self.optimizers[module.id] = optim.Adam(module.parameters())
-
-                        self.debug_print(f"Loaded distributed module!")
-                        self.send_to_node(node, b"LOADED" + module.id)
-
-                        return True
+                #             self.backward_relays.put(tensor)
 
                 else:
-                    return False
+                    ghost += 1
 
             if ghost > 0:
                 self.update_node_stats(node.node_id, "GHOST")
                 # TODO: potentially some form of reporting mechanism via ip and port
+                return False
 
             return True
 
@@ -258,7 +146,7 @@ class Worker(TorchNode):
 
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-            self.train_loop()
+            pass
 
         print("Node stopping...")
         for node in self.nodes.values():
@@ -277,63 +165,10 @@ class Worker(TorchNode):
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
 
-    def train_loop(self):
-        if self.training:
-            # Complete outstanding forward and backward passes
-            for module_id, module in self.modules.items():
-                # Complete any outstanding back propagations
-                if module.backward_queues.empty() is False:
-                    next_node = module.host
-
-                    # Grab backwards pass from forward node and our associated input/output from forward pass
-                    tag, loss_relay = module.backward_queues.get()
-                    inter_tag = tuple(tag)
-                    assoc_input, assoc_output = module.intermediates[inter_tag]
-
-                    # Continue backwards pass on our section of model
-                    assoc_output.backward(
-                        loss_relay, retain_graph=True
-                    )  # Do we need retain graph?
-                    dvalues = assoc_input.grad
-
-                    tag.append(module_id)
-
-                    # Pass along backwards pass to next node
-                    self.send_backward(self.nodes[next_node], dvalues, tag)
-                    self.optimizers[module_id].zero_grad()
-                    self.optimizers[module_id].step()
-
-                if module.forward_queues.empty() is False:
-                    next_node = module.host
-
-                    tag, tensor = module.forward_queues.get()
-
-                    # Unpack queued forward pass unpack values (eg. mask, stride...)
-                    if isinstance(tensor, tuple):
-                        args, kwargs = tensor
-                    else:
-                        args = tensor
-                        kwargs = {}
-
-                    # Clear tensor of any previous info, set up for custom backward pass
-                    inp = (
-                        handle_output(args).clone().detach().requires_grad_()
-                    )  # This should be done on sending node, not receiving
-                    out = module(inp, **kwargs)
-
-                    inter_tag = tuple(tag)
-                    tag.append(module_id)
-
-                    # Store output and input tensor for backward pass
-                    module.intermediates[inter_tag] = [inp, handle_output(out)]
-
-                    # Relay forward pass to the next node
-                    self.send_forward(self.nodes[next_node], out, tag)
-
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {
             "node_id": self.name,
-            "memory": self.available_memory,
+            "mpc": self.available_memory,
             "learning": self.training,
             "model": self.model,
         }
@@ -343,10 +178,10 @@ class Worker(TorchNode):
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
-        # memory = self.available_memory
+        # mpc = self.available_memory
         stats = {
             "id": self.rsa_key_hash,
-            "memory": self.available_memory,
+            "mpc": self.available_memory,
             "role": self.role,
             "training": self.training,
             # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
@@ -366,12 +201,12 @@ class Worker(TorchNode):
 
     """Key Methods to Implement"""
     # def request_worker(self, nodes, module_memory: int, module_type: int):
-    #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough memory
+    #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough mpc
     #     if module_type == 0:
-    #         candidate_node = max(nodes, key=lambda x: x["memory"])
+    #         candidate_node = max(nodes, key=lambda x: x["mpc"])
     #
     #     # module_type = 1 when model is not modular, select the new master based on both the minimum of a latency
-    #     # matrix (low latency to other good workers), and memory
+    #     # matrix (low latency to other good workers), and mpc
     #     elif module_type == 1:
     #         candidate_node = max(nodes, key=lambda x: x["latency"])
 

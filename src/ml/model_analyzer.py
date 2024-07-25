@@ -1,3 +1,5 @@
+from transformers.utils import ModelOutput
+from collections import defaultdict
 import torch.nn as nn
 import inspect
 import torch
@@ -8,7 +10,7 @@ distributed_module_ids = []
 
 
 def get_gpu_memory():
-    # Check how much available memory we can allocate to the node
+    # Check how much available mpc we can allocate to the node
     memory = 0
 
     if torch.cuda.is_available():
@@ -123,3 +125,62 @@ def access_module(module: nn.Module, indices: list):
         current_module = children[index][1]
         module_name = children[index][0]
     return current_module, module_name
+
+
+def detach_tensor(tensor):
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach()
+    elif isinstance(tensor, ModelOutput):
+        for key, value in tensor.items():
+            if isinstance(value, torch.Tensor):
+                tensor[key] = tensor[key].detach()
+
+        return tensor
+    else:
+        raise TypeError("Unsupported input type")
+
+
+def enable_grad(tensor):
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach()
+    elif isinstance(tensor, ModelOutput):
+        for key, value in tensor.items():
+            if isinstance(value, torch.Tensor):
+                tensor[key] = tensor[key].requires_grad_()
+
+        return tensor
+    else:
+        raise TypeError("Unsupported input type")
+
+
+def combine_micro_batches(micro_batches):
+    """
+    Combines the micro-batch outputs into a single output.
+    """
+    if isinstance(micro_batches[0], torch.Tensor):
+        # If outputs are tensors, concatenate them along the batch dimension
+        return torch.cat(micro_batches, dim=0)
+
+    elif isinstance(micro_batches[0], ModelOutput):
+        combined_output = defaultdict(list)
+
+        for output in micro_batches:
+            for key, value in output.items():
+                combined_output[key].append(value)
+
+        # Concatenate fields that are tensors
+        final_output = {}
+        for key, value in combined_output.items():
+            if isinstance(value[0], torch.Tensor):
+                # Handle zero-dimensional tensors
+                if value[0].dim() == 0:
+                    final_output[key] = torch.stack(value)
+                else:
+                    final_output[key] = torch.cat(value, dim=0)
+            else:
+                final_output[key] = value  # Leave as is if not a tensor
+
+        return type(micro_batches[0])(**final_output)
+
+    else:
+        raise TypeError("Unsupported output type")

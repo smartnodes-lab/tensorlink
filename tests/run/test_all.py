@@ -1,4 +1,4 @@
-from src.coordinator import WorkerCoordinator, ValidatorCoordinator, DistributedCoordinator
+from src.mpc.coordinator import WorkerCoordinator, ValidatorCoordinator, DistributedCoordinator
 
 from transformers import BertModel
 import torch

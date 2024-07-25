@@ -222,7 +222,7 @@ dag = DAG(model, dummy_in)
 #         return f.format(*args)
 #
 #
-# # Attempt to recursively forward pass individual layers to free up memory,
+# # Attempt to recursively forward pass individual layers to free up mpc,
 # # just testing ideas...
 # class DAG2:
 #     def __init__(self):

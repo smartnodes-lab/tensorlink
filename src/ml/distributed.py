@@ -1,40 +1,20 @@
 from src.ml.model_analyzer import *
-from src.p2p.connection import Connection
+from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from transformers.utils import ModelOutput
-from torch.nn import Parameter
-import torch.optim as optim
 import torch.nn as nn
 import torch
 
-from multiprocessing import shared_memory
 from collections import defaultdict
 from types import GeneratorType
-from typing import Iterator
-from copy import deepcopy
 import threading
 import hashlib
-import pickle
 import random
 import queue
 import time
-import json
-
 
 MAX_WAIT_TIME = 300
 THREAD_STORAGE = threading.local()
-
-
-def get_from_shared_memory(size, name):
-    shm = shared_memory.SharedMemory(name=name)
-    buffer = shm.buf[:size]
-    tensor = pickle.loads(buffer.tobytes())
-    copied_tensor = deepcopy(tensor)
-    del buffer
-    del tensor
-    shm.close()
-    shm.unlink()
-    return copied_tensor
 
 
 def contains_offloaded(module: nn.Module):
@@ -50,39 +30,6 @@ def contains_offloaded(module: nn.Module):
         exists = exists or contains_offloaded(child)
 
     return exists
-
-
-def combine_micro_batches(micro_batches):
-    """
-    Combines the micro-batch outputs into a single output.
-    """
-    if isinstance(micro_batches[0], torch.Tensor):
-        # If outputs are tensors, concatenate them along the batch dimension
-        return torch.cat(micro_batches, dim=0)
-
-    elif isinstance(micro_batches[0], ModelOutput):
-        combined_output = defaultdict(list)
-
-        for output in micro_batches:
-            for key, value in output.items():
-                combined_output[key].append(value)
-
-        # Concatenate fields that are tensors
-        final_output = {}
-        for key, value in combined_output.items():
-            if isinstance(value[0], torch.Tensor):
-                # Handle zero-dimensional tensors
-                if value[0].dim() == 0:
-                    final_output[key] = torch.stack(value)
-                else:
-                    final_output[key] = torch.cat(value, dim=0)
-            else:
-                final_output[key] = value  # Leave as is if not a tensor
-
-        return type(micro_batches[0])(**final_output)
-
-    else:
-        raise TypeError("Unsupported output type")
 
 
 class DistributedModel(nn.Module):
@@ -243,7 +190,8 @@ class DistributedModel(nn.Module):
                 loss = assoc_input.grad
                 worker_id = self.distributed_graph[module_id]
 
-                self.send_request("send_backward", (worker_id, loss, tag))
+                size, shm_name = store_in_shared_memory((loss, None))
+                self.send_request("send_backward", (worker_id, size, shm_name, tag))
 
                 if self.model.backward_relays.not_empty:
                     loss = self.model.backward_relays.get()
@@ -270,24 +218,23 @@ class DistributedModel(nn.Module):
                     worker_id = self.distributed_graph[module_id_bytes]["workers"][micro]
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
-                    self.send_request("send_backward", (worker_id, (loss, None, tag)))
+                    size, shm_name = store_in_shared_memory((detach_tensor(loss), None))
+                    self.send_request("send_backward", (worker_id, size, shm_name, tag))
 
                     # Wait for response, change to appending waiting thread to list in master
                     waiting = True
                     while waiting:
-                        time.sleep(0.5)
+                        time.sleep(0.1)
                         args = self.send_request("check_backward", key)
 
                         if args is not None:
                             waiting = False
-                            shape, size, dtype, name = args
+                            size, name = args
                             loss = get_from_shared_memory(size, name)
 
                         if time.time() - start_time >= MAX_WAIT_TIME:
                             # Logic here to request another worker take his place
                             waiting = False
-
-                        time.sleep(0.1)
 
                     self.send_request("release_memory", ("backward_queue", module_id_bytes, tuple(tag)))
 
@@ -408,7 +355,7 @@ class DistributedModel(nn.Module):
         start_time = time.time()
         waiting = True
         while waiting:
-            time.sleep(0.25)
+            time.sleep(0.1)
             args = self.send_request("check_train", module_id)
 
             if args is not None:
@@ -420,11 +367,11 @@ class DistributedModel(nn.Module):
                 waiting = False
 
     def get_node_most_memory(self):
-        # gets node with most memory, returns key and memory
+        # gets node with most mpc, returns key and mpc
         key = max(
-            self.master_node.nodes, key=lambda x: self.master_node.nodes[x]["memory"]
+            self.master_node.nodes, key=lambda x: self.master_node.nodes[x]["mpc"]
         )
-        return key, self.master_node.nodes[key]["memory"]
+        return key, self.master_node.nodes[key]["mpc"]
 
     def distribute_model(self, config=None):
         # Retrieve model names and assign workers to offload. Contact candidate workers
@@ -454,7 +401,7 @@ class DistributedModel(nn.Module):
         """
         Parse model based on some minimum submodule size and return a config file containing the
         distributed model configuration.
-        # TODO update memory of semi-offloaded modules
+        # TODO update mpc of semi-offloaded modules
         """
 
         if config is None:
@@ -635,16 +582,22 @@ class OffloadedModule(nn.Module):
         self.module_id = module_id
         module.id = self.module_id
 
-        self.parent_model.send_request("send_model", (module, self.worker_id))
+        size, name = store_in_shared_memory(module)
+        self.parent_model.send_request("send_model", (size, name, self.worker_id, self.module_id))
 
-        # # Module loaded successfully
-        # except TimeoutError:
-        #     # Timeout occurred, handle it
-        #     self.handle_timeout()
-        #
-        # finally:
-        #     # Stop the timer as loading completed (or failed)
-        #     timer.cancel()
+        # Wait for the module to be loaded on worker
+        waiting = True
+        start_time = time.time()
+        while waiting:
+            time.sleep(0.5)
+            args = self.parent_model.send_request("check_loaded", self.worker_id)
+
+            if args is True:
+                waiting = False
+
+            if time.time() - start_time >= MAX_WAIT_TIME:
+                # Logic here to request another worker take his place
+                waiting = False
 
     def handle_timeout(self):
         # Timeout occurred, switch to another worker TODO
@@ -670,26 +623,27 @@ class OffloadedModule(nn.Module):
 
         detached_args = handle_output(args).clone().detach()
 
+        size, shm_name = store_in_shared_memory((detached_args, kwargs))
         # Relay forward pass to next node
-        self.parent_model.send_request("send_forward", (self.worker_id, (detached_args, kwargs, tag)))
+        self.parent_model.send_request("send_forward", (self.worker_id, size, shm_name, tag))
 
         # Wait for response, change to appending waiting thread to list in master
         waiting = True
         while waiting:
-            time.sleep(0.5)
+            time.sleep(0.1)
             key = (n_iter, n_micro, self.module_id)
             args = self.parent_model.send_request("check_forward", key)
 
             if args is not None:
                 waiting = False
-                shape, size, dtype, name = args
+                size, name = args
                 output = get_from_shared_memory(size, name)
 
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
                 waiting = False
 
-            time.sleep(0.1)
+        output = enable_grad(output)
 
         self.parent_model.send_request("release_memory", ("forward_queue", self.module_id, key))
 

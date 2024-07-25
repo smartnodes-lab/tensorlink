@@ -1,8 +1,9 @@
 from src.ml.model_analyzer import get_gpu_memory, handle_output
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
+from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
-from multiprocessing import shared_memory, Lock
+from multiprocessing import shared_memory
 import torch.optim as optim
 import torch.nn as nn
 import threading
@@ -43,7 +44,7 @@ class TorchNode(SmartNode):
             off_chain_test=off_chain_test,
         )
 
-        # Available GPU memory estimation
+        # Available GPU mpc estimation
         self.available_memory = get_gpu_memory()
 
         self.request_queue = request_queue
@@ -75,45 +76,32 @@ class TorchNode(SmartNode):
 
                 elif b"FORWARD" == data[:7]:
                     # Received a forward pass
-                    size = data.__sizeof__() - 5
+                    eos = data.find(b"::")
+                    size = int(data[7:eos])
                     formatted_size = format_size(size)
                     self.debug_print(f"RECEIVED FORWARD: {formatted_size}")
 
-                    if self.role == b"U":
-                        # TODO we must check that the forward received corresponds to a sent pass/specific module
-                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[7:])
-                        key = (n_iter, n_micro, module_id)
-
-                        # Create shared memory block and store tensor
-                        self.store_tensor_in_shared_memory(key, tensor)
-
                     # TODO we must check that the forward received corresponds to a sent pass/specific module
-                    elif self.modules:
-                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[7:])
-                        self.modules[module_id].forward_queues.put(
-                            ([n_iter, n_micro], tensor)
-                        )
+                    # must also do with backwards
+                    tensor = data[eos + 2: eos + 2 + size]
+                    key = tuple(pickle.loads(data[eos + 2 + size:]))
+
+                    # Create shared mpc block and store tensor
+                    self.store_tensor_in_shared_memory(key, tensor)
 
                 elif b"BACKWARD" == data[:8]:
-                    # TODO same with backwards pass
-                    self.debug_print(
-                        f"RECEIVED BACKWARD: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                    )
+                    eos = data.find(b"::")
+                    size = int(data[8:eos])
+                    formatted_size = format_size(size)
+                    self.debug_print(f"RECEIVED BACKWARD: {formatted_size}")
 
-                    # Master-specific handling (ie for DistributedModel)
-                    if self.role == b"U":
-                        [n_iter, n_micro, module_id], tensor = pickle.loads(data[8:])
-                        key = (n_iter, n_micro, module_id)
+                    # TODO we must check that the forward received corresponds to a sent pass/specific module
+                    # must also do with backwards
+                    tensor = data[eos + 2: eos + 2 + size]
+                    key = tuple(pickle.loads(data[eos + 2 + size:]))
 
-                        # Create shared memory block and store tensor
-                        self.store_tensor_in_shared_memory(key, tensor, backward=True)
-
-                    # Module-specific handling (ie for OffloadedModule / nn.Module)
-                    elif self.modules:
-                        (n_iter, n_micro, module_id), tensor = pickle.loads(data[8:])
-                        self.modules[module_id].backward_queues.put(
-                            ([n_iter, n_micro], tensor)
-                        )
+                    # Create shared mpc block and store tensor
+                    self.store_tensor_in_shared_memory(key, tensor, backward=True)
 
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
@@ -136,23 +124,20 @@ class TorchNode(SmartNode):
                     self.debug_print(
                         f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
                     )
-
-                    module = pickle.loads(data[6:])
-                    module.forward_queues = queue.Queue()
-                    module.backward_queues = queue.Queue()
-                    module.intermediates = {}
-                    module.host = node.node_id
-
-                    self.modules[module.id] = module
-                    self.optimizers[module.id] = optim.Adam(module.parameters())
-
+                    module_id = data[6:70]
+                    size, name = store_in_shared_memory(data[70:], encoded=True)
+                    self.modules[module_id] = {
+                        "mem_info": (size, name),
+                        "host": node.node_id,
+                        "forward_queue": {},
+                        "backward_queue": {},
+                    }
                     self.debug_print(f"Loaded distributed module!")
-                    self.send_to_node(node, b"LOADED" + module.id)
 
                 elif b"UPDATE-TRAIN" == data[:12]:
                     mode = False if data[12:13] == b"0" else True
                     module_id = data[13:]
-                    self.modules[module_id].training = mode
+                    self.modules[module_id]["training"] = mode
                     self.send_train_updated(node, mode, module_id)
 
                 elif b"TRAIN-UPDATED" == data[:13]:
@@ -183,51 +168,124 @@ class TorchNode(SmartNode):
         req_type = request["type"]
 
         if req_type == "get_connection":
+            # Get connection info from a node id
             node_id = request["args"]
             node = self.nodes[node_id]
             self.response_queue.put({"status": "SUCCESS", "return": node})
 
         elif req_type == "send_model":
-            model, worker_id = request["args"]
+            # Send module that is stored in shared mpc to another node
+            size, name, worker_id, module_id = request["args"]
             node = self.nodes[worker_id]
-            self.send_module(model, node)
+            model_bytes = get_from_shared_memory(size, name, encoded=True)
+            self.send_module(module_id, model_bytes, node)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
 
-            while b"MODULE" in self.requests[node.node_id]:
-                time.sleep(1)
+        elif req_type == "check_loaded":
+            # Check if sent module has been received and loaded on the other node
+            worker_id = request["args"]
+            return_val = False
 
+            if b"MODULE" not in self.requests[worker_id]:
+                return_val = True
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "module_loaded":
+            # Send module loaded message to node
+            module_id = request["args"]
+            node_id = self.modules[module_id]["host"]
+            node = self.nodes[node_id]
+            self.send_to_node(node, b"LOADED" + module_id)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_forward":
-            worker_id, (args, kwargs, tag) = request["args"]
+            # Send forward pass tensor from shared mpc to a node
+            worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
-            self.send_forward(node, (args, kwargs), tag)
+            forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+            self.send_forward(node, forward_bytes, tag)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_backward":
-            worker_id, (args, kwargs, tag) = request["args"]
+            # Send backwards pass from shared mpc to a node
+            worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
-            self.send_backward(node, (args, kwargs), tag)
+            backward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+            self.send_backward(node, backward_bytes, tag)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
+        elif req_type == "check_module":
+            # Check if module has been received and is loaded in shared mpc
+            return_val = False
+            for module_id, module in self.modules.items():
+                if "mem_info" in module:
+                    size, name = module["mem_info"]
+                    return_val = (size, name, module_id, module["host"])
+                    del module["mem_info"]
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
         elif req_type == "check_forward":
-            n_iter, n_micro, module_id = request["args"]
+            # Check if forward pass has been received and is loaded in shared mpc
             return_val = None
 
-            if module_id in self.modules:
-                if request["args"] in self.modules[module_id]["forward_queue"]:
-                    return_val = self.modules[module_id]["forward_queue"][request["args"]]
+            if self.role == b"W":
+                module_id = request["args"]
+
+                if module_id in self.modules:
+                    module = self.modules[module_id]
+                    min_iter, min_micro = 0, 0
+                    for (n_iter, n_micro, module_id) in module["forward_queue"].keys():
+                        if n_iter <= min_iter:
+                            min_iter = n_iter
+                        if n_micro <= min_micro:
+                            min_micro = n_micro
+
+                    key = (min_iter, min_micro, module_id)
+
+                    if key in module["forward_queue"]:
+                        return_val = (key, module["forward_queue"][key])
+                        del module["forward_queue"][key]
+
+            else:
+                n_iter, n_micro, module_id = request["args"]
+
+                if module_id in self.modules:
+                    if request["args"] in self.modules[module_id]["forward_queue"]:
+                        return_val = self.modules[module_id]["forward_queue"][request["args"]]
+                        del self.modules[module_id]["forward_queue"][request["args"]]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
         elif req_type == "check_backward":
+            # Check if backward pass has been received and is loaded in shared mpc
             args = request["args"]
-            n_iter, n_micro, module_hash, module_id = args
-            key = (n_iter, n_micro, module_id)
             return_val = None
 
-            if module_hash in self.modules:
-                if key in self.modules[module_hash]["backward_queue"]:
-                    return_val = self.modules[module_hash]["backward_queue"][key]
+            if self.role == b"W":
+                module_hash = args
+                module = self.modules[module_hash]
+                min_iter, min_micro = 0, 0
+                for (n_iter, n_micro, module_id) in module["backward_queue"].keys():
+                    if n_iter <= min_iter:
+                        min_iter = n_iter
+                    if n_micro <= min_micro:
+                        min_micro = n_micro
+
+                key = (min_iter, min_micro, module_hash)
+
+                if key in module["backward_queue"]:
+                    return_val = (key, module["backward_queue"][key])
+                    del module["backward_queue"][key]
+
+            else:
+                n_iter, n_micro, module_hash, module_id = args
+                key = (n_iter, n_micro, module_id)
+                if module_hash in self.modules:
+                    if key in self.modules[module_hash]["backward_queue"]:
+                        return_val = self.modules[module_hash]["backward_queue"][key]
+                        del self.modules[module_id]["backward_queue"][key]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -283,20 +341,15 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": None})
             self.stop()
 
-    def send_forward(self, node: Connection, args, context):
+    def send_forward(self, node: Connection, forward_bytes, context):
         """Send forward pass to node, must contain args (module args) and context (module + epoch id)"""
-        pickled_data = b"FORWARD" + pickle.dumps((context, args))
+        size = str(len(forward_bytes)).encode() + b"::"
+        pickled_data = b"FORWARD" + size + forward_bytes + pickle.dumps(context)
         # self.store_request(node.node_id, )
         self.send_to_node(node, pickled_data)
 
-    def store_tensor_in_shared_memory(self, key, tensor, backward=False):
+    def store_tensor_in_shared_memory(self, key, tensor: bytes, backward=False):
         id_hash = key[2]
-        tensor_out = handle_output(tensor)
-        tensor_shape = tensor_out.shape
-        tensor_dtype = tensor_out.dtype
-        del tensor_out
-
-        tensor = pickle.dumps(tensor)
         size = len(tensor)
 
         shm = shared_memory.SharedMemory(create=True, size=size)
@@ -305,7 +358,7 @@ class TorchNode(SmartNode):
 
         queue = "forward_queue" if not backward else "backward_queue"
 
-        self.modules[id_hash][queue][key] = (tensor_shape, size, tensor_dtype, shm.name)
+        self.modules[id_hash][queue][key] = (size, shm.name)
         self.memory_manager[key] = shm.name
         del buffer
         shm.close()
@@ -322,9 +375,11 @@ class TorchNode(SmartNode):
         self.modules[module_id]["parameters"][key] = (size, shm.name)
         self.memory_manager[key] = shm.name
 
-    def send_backward(self, node: Connection, args, context):
+    def send_backward(self, node: Connection, backward_bytes, context):
         """Send backward pass to node, must contain args (module args) and context (module + epoch id)"""
-        pickled_data = b"BACKWARD" + pickle.dumps((context, args))
+        size = str(len(backward_bytes)).encode() + b"::"
+        pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
+        # self.store_request(node.node_id, )
         self.send_to_node(node, pickled_data)
 
     def send_parameters(self, node: Connection, parameters, module_id):
@@ -342,11 +397,10 @@ class TorchNode(SmartNode):
         mode = b"0" if mode is False else b"1"
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
-    def send_module(self, module: nn.Module, node: Connection):
-        module_bytes = pickle.dumps(module)
-        self.debug_print(f"Sending module: {len(module_bytes)} to worker: {node.node_id}")
+    def send_module(self, model_id: bytes, module: bytes, node: Connection):
+        self.debug_print(f"Sending module: {format_size(len(module))} to worker: {node.node_id}")
         self.store_request(node.node_id, b"MODULE")
-        self.send_to_node(node, b"MODULE" + module_bytes)
+        self.send_to_node(node, b"MODULE" + model_id + module)
 
     def listen_requests(self):
         while not self.terminate_flag.is_set():

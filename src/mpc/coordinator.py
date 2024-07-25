@@ -2,8 +2,10 @@ from src.roles.user import User
 from src.roles.validator import Validator
 from src.roles.worker import Worker
 from src.ml.distributed import DistributedModel
+from src.ml.worker import DistributedWorker
 
 import multiprocessing
+import threading
 import atexit
 
 
@@ -71,6 +73,7 @@ class DistributedCoordinator(BaseCoordinator):
             **kwargs
         )
         role_instance.start()
+        self.node_process = role_instance
 
     def create_distributed_model(self, model, n_pipelines, max_module_size=4e9):
         dist_model = DistributedModel(self.node_requests, self.node_responses, model, 1, 1)
@@ -94,6 +97,7 @@ class ValidatorCoordinator(BaseCoordinator):
             **kwargs
         )
         role_instance.start()
+        self.node_process = role_instance
 
 
 class WorkerCoordinator(BaseCoordinator):
@@ -111,6 +115,8 @@ class WorkerCoordinator(BaseCoordinator):
         )
         role_instance.start()
         role_instance.activate()
+        self.node_process = role_instance
 
-    def run(self):
-        self.run_role()
+        distributed_worker = DistributedWorker(self.node_requests, self.node_responses)
+        distributed_worker.run()
+        self.distributed_worker = distributed_worker

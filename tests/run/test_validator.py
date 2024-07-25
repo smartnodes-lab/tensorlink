@@ -1,6 +1,3 @@
-from src.coordinator import setup_distributed_environment
-
-
 if __name__ == "__main__":
 
     validator = Validator(
