@@ -18,59 +18,75 @@ class DistributedWorker:
         self.terminate = False
         self.lock = threading.Lock()
 
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     def train_loop(self):
         while not self.terminate:
             # Complete outstanding forward and backward passes
             for module_id, module in self.modules.items():
-                # Complete any outstanding back propagations
-                if module.backward_queue.empty() is False:
-
+                if not module.backward_queue.empty():
                     next_node = module.host
-                    # self.optimizers[module_id].zero_grad()
 
-                    # Grab backwards pass from forward node and our associated input/output from forward pass
-                    tag, loss_relay = module.backward_queue.get()
-                    loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
-                    inter_tag = tuple(tag)
-                    assoc_input, assoc_output = module.intermediates[inter_tag]
+                    # Clear gradients and perform optimizer step only if training
+                    if self.modules[module_id].training:
+                        with self.lock:
+                            # self.optimizers[module_id].zero_grad()
 
-                    # Continue backwards pass on our section of model
-                    assoc_output.backward(
-                        loss, retain_graph=True
-                    )  # Do we need retain graph?
-                    dvalues = assoc_input.grad
+                            # Grab backward pass from forward node and associated input/output from forward pass
+                            tag, loss_relay = module.backward_queue.get()
+                            loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
 
-                    # Pass along backwards pass to next node
-                    size, name = store_in_shared_memory(dvalues)
-                    self.send_request("send_backward", (next_node, size, name, tag))
+                            if isinstance(loss, tuple):
+                                # If loss is a tuple, it contains args and kwargs
+                                loss = tuple([l.to(self.device) for l in loss if isinstance(l, torch.Tensor)])
+                                # Handle loss_kwargs as needed
+                            else:
+                                # Single tensor case
+                                loss = loss.to(self.device)
 
-                    # self.optimizers[module_id].step()
+                            inter_tag = tuple(tag)
+                            assoc_input, assoc_output = module.intermediates[inter_tag]
 
-                if module.forward_queue.empty() is False:
+                            # Move tensors to the specified device
+                            assoc_input = assoc_input.to(self.device)
+                            assoc_output = assoc_output.to(self.device)
 
-                    key, (size, name) = module.forward_queue.get()
-                    tensor = get_from_shared_memory(size, name)
+                            # Continue backward pass
+                            assoc_output.backward(loss, retain_graph=True)
 
-                    # Unpack queued forward pass unpack values (eg. mask, stride...)
-                    if isinstance(tensor, tuple):
-                        args, kwargs = tensor
-                    else:
-                        args = tensor
-                        kwargs = {}
+                            dvalues = assoc_input.grad
 
-                    # Clear tensor of any previous info, set up for custom backward pass
-                    inp = (
-                        handle_output(args).clone().detach().requires_grad_()
-                    )  # This should be done on sending node, not receiving
-                    out = module(inp, **kwargs)
+                            # Pass along backward pass to next node
+                            size, name = store_in_shared_memory(dvalues)
+                            self.send_request("send_backward", (next_node, size, name, tag))
 
-                    # Store output and input tensor for backward pass
-                    module.intermediates[key] = [inp, handle_output(out)]
-                    detached_out = detach_tensor(out)
-                    size, name = store_in_shared_memory(detached_out)
+                            # self.optimizers[module_id].step()
 
-                    # Relay forward pass to the next node
+                if not module.forward_queue.empty():
                     with self.lock:
+                        key, (size, name) = module.forward_queue.get()
+                        tensor = get_from_shared_memory(size, name)
+
+                        # Unpack queued forward pass values (e.g., mask, stride...)
+                        # TODO kwargs to device
+                        if isinstance(tensor, tuple):
+                            args, kwargs = tensor
+                        else:
+                            args = tensor
+                            kwargs = {}
+
+                        # Clear tensor of any previous info, set up for custom backward pass
+                        inp = handle_output(args).clone().detach().requires_grad_().to(self.device)
+                        out = module(inp, **kwargs)
+
+                        # Store output and input tensor for backward pass only if training
+                        if self.modules[module_id].training:
+                            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
+
+                        detached_out = detach_tensor(out)
+                        size, name = store_in_shared_memory(detached_out)
+
+                        # Relay forward pass to the next node
                         self.send_request("send_forward", (module.host, size, name, key))
 
     def send_request(self, request_type, args):
@@ -88,11 +104,11 @@ class DistributedWorker:
             return {"error": str(e)}
 
     def check_node(self):
-        module_check_interval = 25
+        update_check_interval = 25
         counter = 0
 
         while not self.terminate:
-            if self.modules == {} and counter % module_check_interval == 0:
+            if counter % update_check_interval == 0 and self.modules == {}:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
@@ -111,13 +127,20 @@ class DistributedWorker:
 
             if self.modules:
                 for module_id in self.modules.keys():
-                    args = self.send_request("check_forward", module_id)
-                    if args:
-                        module.forward_queue.put(args)
+                    module = self.modules[module_id]
 
-                    args2 = self.send_request("check_backward", module_id)
+                    args = self.send_request("check_train", module_id)
+
+                    if isinstance(args, bool):
+                        module.training = args
+
+                    args2 = self.send_request("check_forward", module_id)
                     if args2:
-                        module.backward_queue.put(args2)
+                        module.forward_queue.put(args2)
+
+                    args3 = self.send_request("check_backward", module_id)
+                    if args3:
+                        module.backward_queue.put(args3)
 
             counter += 1
             time.sleep(0.1)

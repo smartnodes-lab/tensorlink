@@ -307,7 +307,8 @@ class TorchNode(SmartNode):
             return_val = None
 
             if module_id in self.modules:
-                return_val = self.modules[module_id]["training"]
+                if "training" in self.modules[module_id].keys():
+                    return_val = self.modules[module_id]["training"]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 

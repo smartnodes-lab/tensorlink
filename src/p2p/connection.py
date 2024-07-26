@@ -36,7 +36,7 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(60)
-        self.chunk_size = 131_072
+        self.chunk_size = 4_194_304
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
@@ -112,7 +112,7 @@ class Connection(threading.Thread):
 
             file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
-                chunk = self.sock.recv(1_000_000)
+                chunk = self.sock.recv(self.chunk_size)
             except socket.timeout:
                 self.main_node.debug_print("connection timeout")
                 continue
@@ -135,7 +135,7 @@ class Connection(threading.Thread):
                     buffer = buffer[eot_pos + len(self.EOT_CHAR):]
                     self.main_node.handle_message(self, b"DONE STREAM")
 
-                elif len(buffer) > 40_000_000:
+                elif len(buffer) > 20_000_000:
                     try:
                         with open(file_name, "ab") as f:
                             f.write(buffer)
