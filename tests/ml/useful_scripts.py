@@ -41,7 +41,7 @@ def preprocess_data(dataset, tokenizer, split, logger):
 
 
 def train(model, tokenizer, device, logger):
-    batch_size = 64
+    batch_size = 128
     epochs = 1
     set_seed(42)
 

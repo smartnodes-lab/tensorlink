@@ -235,11 +235,11 @@ class TorchNode(SmartNode):
 
                 if module_id in self.modules:
                     module = self.modules[module_id]
-                    min_iter, min_micro = 0, 0
+                    min_iter, min_micro = -1, -1
                     for (n_iter, n_micro, module_id) in module["forward_queue"].keys():
-                        if n_iter <= min_iter:
+                        if n_iter <= min_iter or min_iter == -1:
                             min_iter = n_iter
-                        if n_micro <= min_micro:
+                        if n_micro <= min_micro or min_micro == -1:
                             min_micro = n_micro
 
                     key = (min_iter, min_micro, module_id)
@@ -266,11 +266,11 @@ class TorchNode(SmartNode):
             if self.role == b"W":
                 module_hash = args
                 module = self.modules[module_hash]
-                min_iter, min_micro = 0, 0
+                min_iter, min_micro = -1, -1
                 for (n_iter, n_micro, module_id) in module["backward_queue"].keys():
-                    if n_iter <= min_iter:
+                    if n_iter <= min_iter or min_iter == -1:
                         min_iter = n_iter
-                    if n_micro <= min_micro:
+                    if n_micro <= min_micro or min_micro == -1:
                         min_micro = n_micro
 
                 key = (min_iter, min_micro, module_hash)

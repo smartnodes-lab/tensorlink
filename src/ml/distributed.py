@@ -43,9 +43,7 @@ class DistributedModel(nn.Module):
         node_requests,
         node_responses,
         model: nn.Module,
-        batch_size: int,
-        micro_batch_size: int,
-        config=None,
+        n_pipelines: int,
         device=None
     ):
         super(DistributedModel, self).__init__()
@@ -54,15 +52,11 @@ class DistributedModel(nn.Module):
         self.node_requests = node_requests
         self.node_responses = node_responses
 
-        assert (
-            batch_size % micro_batch_size == 0
-        ), "Micro-batch must be divisible by batch."
-
         self.model = model
         self.user_memory = get_gpu_memory()
 
-        self.batch_size = batch_size
-        self.micro_batch_size = micro_batch_size
+        self.n_pipelines = n_pipelines
+        self.n_micro_batch = 2
 
         self.model.n_batch = 0
         self.model.forward_queues = {}
@@ -81,8 +75,6 @@ class DistributedModel(nn.Module):
 
     def request_job(
         self,
-        minibatch_size=1,
-        microbatch_size=1,
         max_module_size=4e9,
         handle_layers=True,
     ):
@@ -93,17 +85,10 @@ class DistributedModel(nn.Module):
         # Get model distribution schematic
         self.distributed_graph = self.parse_model(self.model, max_module_size, handle_layers=handle_layers)
 
-        assert(
-            not minibatch_size % microbatch_size,
-            "Minibatch size must be divisible by microbatch size!"
-        )
-
-        n_pipelines = minibatch_size // microbatch_size
-
         # Get offloaded GPU usage for network
-        capacity = (sum(v["size"] for v in self.distributed_graph.values()) * n_pipelines)
+        capacity = (sum(v["size"] for v in self.distributed_graph.values()) * self.n_pipelines)
 
-        job_info = (n_pipelines, capacity, self.distributed_graph)
+        job_info = (self.n_pipelines, capacity, self.distributed_graph)
         config = self.send_request("request_job", job_info)
         self.distribute_model(config)
 
@@ -111,32 +96,40 @@ class DistributedModel(nn.Module):
         """
         Performs the forward pass through the model.
         - Splits input into micro-batches and runs them in parallel.
-        - TODO Creates multiple parallel streams of workers for model parallel acceleration
+        - Creates multiple parallel streams of workers for model parallel acceleration
         """
         if len(args) == 1:
             args = args[0]
 
-        n_micro_batches = self.batch_size // self.micro_batch_size
+        batch_size = get_batch_size(args)
 
-        # Split the input tensor into micro-batches
-        micro_batches = torch.chunk(args, n_micro_batches)
+        assert (
+            batch_size % self.n_micro_batch == 0
+        ), "Micro-batch must be divisible by batch."
+
+        micro_batch_size = batch_size // self.n_micro_batch
+
+        # Split the input tensor and kwargs into micro-batches
+        micro_batches_args = chunk(args, self.n_micro_batch)
+        micro_batches_kwargs = chunk(kwargs, self.n_micro_batch)
 
         # Create queues for forward and backward passes
-        self.model.forward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
-        self.model.backward_queues = {m: queue.Queue() for m in range(n_micro_batches)}
-        self.model.outputs = [None] * n_micro_batches
-        self.model.intermediates = {m: [[]] for m in range(n_micro_batches)}
+        self.model.forward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
+        self.model.backward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
+        self.model.outputs = [None] * self.n_micro_batch
+        self.model.intermediates = {m: [[]] for m in range(self.n_micro_batch)}
 
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
-        for micro, batch in enumerate(micro_batches):
-            # self.perform_micro_forward(micro, batch)
+        for micro in range(self.n_micro_batch):
+            batch_args = micro_batches_args[micro]
+            batch_kwargs = micro_batches_kwargs[micro]
             t = threading.Thread(
-                target=self._perform_micro_forward, args=(micro, batch), kwargs=kwargs
+                target=self._perform_micro_forward, args=(micro, batch_args), kwargs=batch_kwargs
             )
             t.start()
             threads.append(t)
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         for t in threads:
             t.join()
@@ -156,16 +149,16 @@ class DistributedModel(nn.Module):
         - TODO halt worker parameter updates until final micro-batch
         """
 
-        n_micro_batches = self.batch_size // self.micro_batch_size
+        loss = loss.micro_loss
 
         threads = []
-        for micro in range(n_micro_batches):
+        for micro in range(self.n_micro_batch):
             t = threading.Thread(
                 target=self._perform_micro_backward, args=(micro, loss[micro])
             )
             t.start()
             threads.append(t)
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         for t in threads:
             t.join()
@@ -215,7 +208,7 @@ class DistributedModel(nn.Module):
                         loss = assoc_input.grad
 
                     start_time = time.time()
-                    worker_id = self.distributed_graph[module_id_bytes]["workers"][micro]
+                    worker_id = self.distributed_graph[module_id_bytes]["workers"][-1]
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
                     size, shm_name = store_in_shared_memory((detach_tensor(loss), None))

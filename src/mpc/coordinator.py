@@ -12,19 +12,21 @@ import atexit
 class BaseCoordinator:
     _instance = None
 
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super(BaseCoordinator, cls).__new__(cls)
-            cls._instance._initialized = False
-            cls._instance._init_kwargs = kwargs
-        return cls._instance
+    # def __new__(cls, *args, **kwargs):
+    #     if cls._instance is None:
+    #         cls._instance = super(BaseCoordinator, cls).__new__(cls)
+    #         cls._instance._initialized = False
+    #         cls._instance._init_kwargs = kwargs
+    #     return cls._instance
 
-    def __init__(self, *args, **kwargs):
-        if self._initialized:
-            return
+    def __init__(self, **kwargs):
+        # if self._initialized:
+        #     return
 
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
+
+        self.init_kwargs = kwargs
 
         self.node_process = None
 
@@ -61,7 +63,7 @@ class BaseCoordinator:
 
 class DistributedCoordinator(BaseCoordinator):
     def run_role(self):
-        kwargs = self._init_kwargs.copy()
+        kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
             'upnp': kwargs.get('upnp', False),
@@ -75,8 +77,9 @@ class DistributedCoordinator(BaseCoordinator):
         role_instance.start()
         self.node_process = role_instance
 
-    def create_distributed_model(self, model, n_pipelines, max_module_size=4e9):
-        dist_model = DistributedModel(self.node_requests, self.node_responses, model, 1, 1)
+    def create_distributed_model(self, model, batch_size, n_pipelines, max_module_size=4e9, config=None):
+        dist_model = DistributedModel(self.node_requests, self.node_responses, model, batch_size, n_pipelines)
+
         distribution = dist_model.parse_model(model, max_module_size)
         distributed_config = self.send_request("request_job", (n_pipelines, distribution))
         dist_model.distribute_model(distributed_config)
@@ -85,7 +88,7 @@ class DistributedCoordinator(BaseCoordinator):
 
 class ValidatorCoordinator(BaseCoordinator):
     def run_role(self):
-        kwargs = self._init_kwargs.copy()
+        kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
             'upnp': kwargs.get('upnp', False),
@@ -102,7 +105,7 @@ class ValidatorCoordinator(BaseCoordinator):
 
 class WorkerCoordinator(BaseCoordinator):
     def run_role(self):
-        kwargs = self._init_kwargs.copy()
+        kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
             'upnp': kwargs.get('upnp', False),

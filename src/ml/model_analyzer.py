@@ -170,10 +170,18 @@ def combine_micro_batches(micro_batches):
 
         # Concatenate fields that are tensors
         final_output = {}
+        micro_loss = None
+
         for key, value in combined_output.items():
             if isinstance(value[0], torch.Tensor):
                 # Handle zero-dimensional tensors
-                if value[0].dim() == 0:
+                if key == 'loss':
+                    # Average the loss and store individual losses for backward pass
+                    averaged_loss = torch.mean(torch.stack(value))
+                    setattr(averaged_loss, "micro_loss", value)
+                    final_output[key] = averaged_loss
+
+                elif value[0].dim() == 0:
                     final_output[key] = torch.stack(value)
                 else:
                     final_output[key] = torch.cat(value, dim=0)
@@ -184,3 +192,59 @@ def combine_micro_batches(micro_batches):
 
     else:
         raise TypeError("Unsupported output type")
+
+
+def get_batch_size(inputs):
+    """
+    Returns the batch size from the inputs to the forward pass.
+    Handles both tensor and ModelOutput types.
+    """
+    if isinstance(inputs, torch.Tensor):
+        return inputs.size(0)
+    elif isinstance(inputs, ModelOutput):
+        for value in inputs.values():
+            if isinstance(value, torch.Tensor):
+                return value.size(0)
+    else:
+        raise ValueError("Unsupported input type")
+
+
+def chunk(inputs, chunks):
+    """
+    Chunks the inputs into the specified number of chunks.
+    Handles both tensor and ModelOutput types.
+    """
+    if isinstance(inputs, torch.Tensor):
+        return torch.chunk(inputs, chunks)
+
+    elif isinstance(inputs, ModelOutput):
+        chunked_outputs = []
+        for i in range(chunks):
+            chunked_outputs.append({})
+
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor):
+                value_chunks = torch.chunk(value, chunks)
+                for i in range(chunks):
+                    chunked_outputs[i][key] = value_chunks[i]
+
+        return [ModelOutput(**chunk) for chunk in chunked_outputs]
+
+    elif isinstance(inputs, dict):
+        chunked_dicts = [{} for _ in range(chunks)]
+
+        for key, value in inputs.items():
+            value_chunks = chunk(value, chunks)
+
+            if value is None:
+                for i in range(chunks):
+                    chunked_dicts[i][key] = None
+            else:
+                value_chunks = chunk(value, chunks)
+                for i in range(chunks):
+                    chunked_dicts[i][key] = value_chunks[i]
+
+        return chunked_dicts
+
+    else:
+        return inputs

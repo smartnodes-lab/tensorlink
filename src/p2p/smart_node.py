@@ -185,7 +185,6 @@ class SmartNode(threading.Thread):
                     address=self.contract_address, abi=ABI
                 )
 
-
             except Exception as e:
                 self.debug_print(f"Could not retrieve contract: {e}")
                 self.stop()

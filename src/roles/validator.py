@@ -61,8 +61,6 @@ class Validator(TorchNode):
             if private_key:
                 self.account = self.chain.eth.account.from_key(private_key)
 
-
-
     def handle_data(self, data, node: Connection):
         """
         Callback function to receive streamed data from worker nodes.
@@ -190,6 +188,7 @@ class Validator(TorchNode):
         # We receive a minimum job information data structure from user
         modules = job_data["distribution"].copy()
         job_id = job_data["id"]
+        dp_factor = job_data["dp_factor"]
         self.store_value(job_id, job_data)
 
         # Query SC for user id and reputation?
@@ -209,18 +208,18 @@ class Validator(TorchNode):
         # Cycle thru offloaded modules and send request to workers for offloading
         recruitment_threads = []
         for module_id, module in modules.items():
-
-            t = threading.Thread(
-                target=self.recruit_worker,
-                args=(
-                    job_data["author"],
-                    job_id,
-                    module_id,
-                    module["size"],
-                ),
-            )
-            t.start()
-            recruitment_threads.append(t)
+            for stream in range(dp_factor):
+                t = threading.Thread(
+                    target=self.recruit_worker,
+                    args=(
+                        job_data["author"],
+                        job_id,
+                        module_id,
+                        module["size"],
+                    ),
+                )
+                t.start()
+                recruitment_threads.append(t)
 
         for t in recruitment_threads:
             t.join()
