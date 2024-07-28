@@ -140,15 +140,36 @@ def detach_tensor(tensor):
         raise TypeError("Unsupported input type")
 
 
-def enable_grad(tensor):
+def attach_tensor(tensor, device):
     if isinstance(tensor, torch.Tensor):
-        return tensor.detach()
+        return tensor.to(device)
     elif isinstance(tensor, ModelOutput):
         for key, value in tensor.items():
             if isinstance(value, torch.Tensor):
-                tensor[key] = tensor[key].requires_grad_()
+                tensor[key] = tensor[key].to(device)
 
         return tensor
+    elif isinstance(tensor, (list, tuple)):
+        return type(tensor)(attach_tensor(t, device) if isinstance(t, torch.Tensor) else t for t in tensor)
+    elif isinstance(tensor, dict):
+        return {key: attach_tensor(value, device) if isinstance(value, torch.Tensor) else value for key, value in
+                tensor.items()}
+    else:
+        raise TypeError("Unsupported input type")
+
+
+def enable_grad(tensor):
+    if isinstance(tensor, torch.Tensor):
+        return tensor.detach().requires_grad_()
+    elif isinstance(tensor, ModelOutput):
+        for key, value in tensor.items():
+            if isinstance(value, torch.Tensor):
+                tensor[key] = value.detach().requires_grad_()
+        return tensor
+    elif isinstance(tensor, (list, tuple)):
+        return type(tensor)(enable_grad(t) if isinstance(t, (torch.Tensor, ModelOutput)) else t for t in tensor)
+    elif isinstance(tensor, dict):
+        return {key: enable_grad(value) if isinstance(value, (torch.Tensor, ModelOutput)) else value for key, value in tensor.items()}
     else:
         raise TypeError("Unsupported input type")
 

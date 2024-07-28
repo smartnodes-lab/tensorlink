@@ -1,7 +1,7 @@
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
-from src.ml.model_analyzer import estimate_memory, handle_output, get_gpu_memory
-from src.cryptography.rsa import get_rsa_pub_key
+from src.ml.utils import estimate_memory, handle_output, get_gpu_memory
+from src.crypto.rsa import get_rsa_pub_key
 
 from multiprocessing import shared_memory
 import torch.nn as nn

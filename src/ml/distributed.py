@@ -1,4 +1,4 @@
-from src.ml.model_analyzer import *
+from src.ml.utils import *
 from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from transformers.utils import ModelOutput

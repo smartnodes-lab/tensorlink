@@ -1,6 +1,6 @@
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
-from src.cryptography.rsa import get_rsa_pub_key
+from src.crypto.rsa import get_rsa_pub_key
 
 import threading
 import hashlib

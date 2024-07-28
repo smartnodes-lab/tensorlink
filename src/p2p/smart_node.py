@@ -1,4 +1,4 @@
-from src.cryptography.rsa import *
+from src.crypto.rsa import *
 from src.p2p.connection import Connection
 
 from logging.handlers import TimedRotatingFileHandler
@@ -22,7 +22,10 @@ load_dotenv()
 CHAIN_URL = os.getenv("CHAIN_URL")
 CONTRACT = os.getenv("CONTRACT")
 
-with open("./config/SmartNodes.json", "r") as f:
+base_dir = os.path.dirname(os.path.abspath(__file__))
+config_path = os.path.join(base_dir, '..', 'config', 'SmartNodes.json')
+
+with open(config_path, "r") as f:
     METADATA = json.load(f)
 
 ABI = METADATA["abi"]
@@ -300,7 +303,8 @@ class SmartNode(threading.Thread):
             if self.debug_colour is None:
                 print(f"{self.host}:{self.port} -> {message}")
             else:
-                print(f"{self.debug_colour}{self.host}:{self.port} -> {message}")
+                reset_colour = "\033[0m"
+                print(f"{self.debug_colour}{self.host}:{self.port} -> {message}{reset_colour}")
 
     def listen(self):
         """Listen for incoming connections and initialize custom handshake"""

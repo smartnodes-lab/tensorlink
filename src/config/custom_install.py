@@ -1,5 +1,5 @@
 from setuptools.command.install import install
-from src.cryptography.rsa import generate_rsa_key_pair
+from src.crypto.rsa import generate_rsa_key_pair
 import os
 
 

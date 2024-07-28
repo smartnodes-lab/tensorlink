@@ -7,17 +7,19 @@ import time
 
 if __name__ == "__main__":
 
-    user = DistributedCoordinator()
-    time.sleep(0.2)
+    # user = DistributedCoordinator()
+    # time.sleep(0.2)
     worker = WorkerCoordinator()
     time.sleep(0.2)
     validator = ValidatorCoordinator()
 
-    time.sleep(3)
+    val_key, val_host, val_port = validator.send_request("info", None)
 
-    # val_key, val_host, val_port = validator.send_request("info", None)
-    #
-    # worker.send_request("connect_node", (val_key, val_host, val_port))
+    worker.send_request("connect_node", (val_key, val_host, val_port))
+
+    while True:
+        pass
+
     # user.send_request("connect_node", (val_key, val_host, val_port))
     #
     # model = BertModel.from_pretrained("bert-base-uncased")

@@ -1,7 +1,7 @@
 from src.p2p.connection import Connection
 from src.p2p.torch_node import TorchNode
 from src.p2p.node_api import *
-from src.cryptography.rsa import get_rsa_pub_key
+from src.crypto.rsa import get_rsa_pub_key
 
 import threading
 import hashlib
@@ -37,7 +37,7 @@ class User(TorchNode):
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
 
-        self.debug_colour = "\033[96m"
+        self.debug_colour = "\033[93m"
         self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         self.endpoint = create_endpoint(self)

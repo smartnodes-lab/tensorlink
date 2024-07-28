@@ -2,7 +2,7 @@ import torch
 import queue
 import time
 
-from src.ml.model_analyzer import *
+from src.ml.utils import *
 from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 import threading
@@ -75,8 +75,11 @@ class DistributedWorker:
                             args = tensor
                             kwargs = {}
 
-                        # Clear tensor of any previous info, set up for custom backward pass
-                        inp = handle_output(args).clone().detach().requires_grad_().to(self.device)
+                        # Move args and kwargs to the device using attach_tensor
+                        inp = enable_grad(attach_tensor(args, self.device))
+                        kwargs = enable_grad(attach_tensor(kwargs, self.device))
+
+                        # Forward pass through the module
                         out = module(inp, **kwargs)
 
                         # Store output and input tensor for backward pass only if training

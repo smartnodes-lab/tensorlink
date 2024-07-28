@@ -1,4 +1,4 @@
-from src.ml.model_analyzer import get_gpu_memory, handle_output
+from src.ml.utils import get_gpu_memory, handle_output
 from src.p2p.smart_node import SmartNode
 from src.p2p.connection import Connection
 from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory

@@ -34,15 +34,16 @@ PIPELINES = 2
 if __name__ == "__main__":
     # Launch Nodes
     user = DistributedCoordinator(debug=True)
-    # time.sleep(0.2)
-    # worker = WorkerCoordinator(debug=True)
+    time.sleep(0.2)
+    worker = WorkerCoordinator(debug=True)
     # time.sleep(0.2)
     # worker2 = WorkerCoordinator(debug=True)
-    # time.sleep(0.2)
-    # validator = ValidatorCoordinator(debug=True)
+    time.sleep(0.2)
+    validator = ValidatorCoordinator(debug=True)
+
     # Bootstrap nodes
-    # val_key, val_host, val_port = validator.send_request("info", None)
-    # worker.send_request("connect_node", (val_key, val_host, val_port))
+    val_key, val_host, val_port = validator.send_request("info", None)
+    worker.send_request("connect_node", (val_key, val_host, val_port))
     # worker2 .send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
 
