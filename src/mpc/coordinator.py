@@ -9,6 +9,10 @@ import threading
 import atexit
 
 
+# Set the start method to 'spawn'
+multiprocessing.set_start_method('spawn', force=True)
+
+
 class BaseCoordinator:
     _instance = None
 
@@ -35,7 +39,6 @@ class BaseCoordinator:
         atexit.register(self.cleanup)
 
     def setup(self):
-        multiprocessing.set_start_method("spawn", force=True)
         self.node_process = multiprocessing.Process(target=self.run_role)
         self.node_process.start()
 

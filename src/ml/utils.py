@@ -15,13 +15,12 @@ def get_gpu_memory():
 
     if torch.cuda.is_available():
         devices = list(range(torch.cuda.device_count()))
-        memory += torch.cuda.memory
 
         for device in devices:
             torch.cuda.set_device(device)
-            memory_stats = torch.cuda.memory_stats(device)
-            device_memory = memory_stats["allocated_bytes.all.peak"] / 1024 / 1024
-            memory += device_memory
+            free, total = torch.cuda.memory.mem_get_info(device)
+            memory += free
+
     else:
         # TODO CPU should be able to handle 1 GB (temporary fix)
         memory += 1.37e9
@@ -129,15 +128,30 @@ def access_module(module: nn.Module, indices: list):
 
 def detach_tensor(tensor):
     if isinstance(tensor, torch.Tensor):
-        return tensor.detach()
+        detached_tensor = tensor.detach().cpu()
+        del tensor
+        torch.cuda.empty_cache()
+        return detached_tensor
     elif isinstance(tensor, ModelOutput):
         for key, value in tensor.items():
             if isinstance(value, torch.Tensor):
-                tensor[key] = tensor[key].detach()
-
+                tensor[key] = value.detach().cpu()
+                del value
+                torch.cuda.empty_cache()
         return tensor
+    elif isinstance(tensor, (list, tuple)):
+        detached_list = type(tensor)(detach_tensor(t) if isinstance(t, (ModelOutput, torch.Tensor)) else t for t in tensor)
+        del tensor
+        torch.cuda.empty_cache()
+        return detached_list
+    elif isinstance(tensor, dict):
+        detached_dict = {key: detach_tensor(value) if isinstance(value, (ModelOutput, torch.Tensor)) else value for key, value in tensor.items()}
+        del tensor
+        torch.cuda.empty_cache()
+        return detached_dict
     else:
         raise TypeError("Unsupported input type")
+
 
 
 def attach_tensor(tensor, device):

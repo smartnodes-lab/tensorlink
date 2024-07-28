@@ -1,11 +1,10 @@
+from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
+from src.ml.utils import *
+
+import threading
 import torch
 import queue
 import time
-
-from src.ml.utils import *
-from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
-
-import threading
 
 
 class DistributedWorker:
@@ -30,7 +29,7 @@ class DistributedWorker:
                     # Clear gradients and perform optimizer step only if training
                     if self.modules[module_id].training:
                         with self.lock:
-                            # self.optimizers[module_id].zero_grad()
+                            self.optimizers[module_id].zero_grad()
 
                             # Grab backward pass from forward node and associated input/output from forward pass
                             tag, loss_relay = module.backward_queue.get()
@@ -54,13 +53,17 @@ class DistributedWorker:
                             # Continue backward pass
                             assoc_output.backward(loss, retain_graph=True)
 
-                            dvalues = assoc_input.grad
+                            dvalues = detach_tensor(assoc_input.grad)
+
+                            # Free memory
+                            del assoc_input, assoc_output
+                            torch.cuda.empty_cache()
 
                             # Pass along backward pass to next node
                             size, name = store_in_shared_memory(dvalues)
                             self.send_request("send_backward", (next_node, size, name, tag))
 
-                            # self.optimizers[module_id].step()
+                            self.optimizers[module_id].step()
 
                 if not module.forward_queue.empty():
                     with self.lock:
@@ -92,6 +95,9 @@ class DistributedWorker:
                         # Relay forward pass to the next node
                         self.send_request("send_forward", (module.host, size, name, key))
 
+                        del inp, out, detached_out  # Free memory
+                        torch.cuda.empty_cache()
+
     def send_request(self, request_type, args):
         """
         Sends a request to the node and waits for the response.
@@ -117,13 +123,13 @@ class DistributedWorker:
                 if isinstance(args, tuple):
                     size, name, module_id, node_id = args
 
-                    module = get_from_shared_memory(size, name)
+                    module = get_from_shared_memory(size, name).to(self.device)
                     module.forward_queue = queue.Queue()
                     module.backward_queue = queue.Queue()
                     module.intermediates = {}
                     module.host = node_id
 
-                    # self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
+                    self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
 
                     self.modules[module_id] = module
                     self.send_request("module_loaded", module_id)

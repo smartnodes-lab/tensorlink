@@ -27,26 +27,26 @@ logger.addHandler(file_handler)
 logger.setLevel(logging.INFO)
 
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 PIPELINES = 1
 
 
 if __name__ == "__main__":
     # Launch Nodes
-    user = DistributedCoordinator(debug=True)
+    user = DistributedCoordinator(debug=False)
     time.sleep(0.2)
-    worker = WorkerCoordinator(debug=True)
+    worker = WorkerCoordinator(debug=False)
     time.sleep(0.2)
     # worker2 = WorkerCoordinator(debug=True)
     # time.sleep(0.2)
-    validator = ValidatorCoordinator(debug=True)
+    validator = ValidatorCoordinator(debug=False)
 
     # Bootstrap nodes
     val_key, val_host, val_port = validator.send_request("info", None)
     worker.send_request("connect_node", (val_key, val_host, val_port))
     # worker2 .send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
-    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38751))
+    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38752))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
