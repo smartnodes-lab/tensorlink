@@ -40,8 +40,7 @@ def preprocess_data(dataset, tokenizer, split, logger):
     return TensorDataset(input_ids, attention_masks, labels)
 
 
-def train(model, tokenizer, device, logger):
-    batch_size = 128
+def train(model, tokenizer, device, logger, batch_size):
     epochs = 1
     set_seed(42)
 

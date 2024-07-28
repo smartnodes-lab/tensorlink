@@ -12,6 +12,7 @@ if __name__ == "__main__":
     worker = WorkerCoordinator()
     time.sleep(0.2)
     validator = ValidatorCoordinator()
+    time.sleep(0.2)
 
     val_key, val_host, val_port = validator.send_request("info", None)
 

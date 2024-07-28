@@ -27,8 +27,8 @@ logger.addHandler(file_handler)
 logger.setLevel(logging.INFO)
 
 
-BATCH_SIZE = 128
-PIPELINES = 2
+BATCH_SIZE = 32
+PIPELINES = 1
 
 
 if __name__ == "__main__":
@@ -36,9 +36,9 @@ if __name__ == "__main__":
     user = DistributedCoordinator(debug=True)
     time.sleep(0.2)
     worker = WorkerCoordinator(debug=True)
-    # time.sleep(0.2)
-    # worker2 = WorkerCoordinator(debug=True)
     time.sleep(0.2)
+    # worker2 = WorkerCoordinator(debug=True)
+    # time.sleep(0.2)
     validator = ValidatorCoordinator(debug=True)
 
     # Bootstrap nodes
@@ -46,6 +46,7 @@ if __name__ == "__main__":
     worker.send_request("connect_node", (val_key, val_host, val_port))
     # worker2 .send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
+    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38751))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -54,5 +55,5 @@ if __name__ == "__main__":
     ).to(device)
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-    distributed_model = user.create_distributed_model(model, BATCH_SIZE, PIPELINES, 1.4e9)
-    train(distributed_model, tokenizer, device, logger)
+    distributed_model = user.create_distributed_model(model, PIPELINES, 1.4e9)
+    train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

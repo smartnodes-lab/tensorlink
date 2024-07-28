@@ -18,6 +18,8 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 logger.setLevel(logging.INFO)
 
+BATCH_SIZE = 32
+
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -27,4 +29,4 @@ if __name__ == "__main__":
     ).to(device)
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-    train(model, tokenizer, device, logger)
+    train(model, tokenizer, device, logger, BATCH_SIZE)

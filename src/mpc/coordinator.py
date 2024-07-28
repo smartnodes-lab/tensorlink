@@ -77,8 +77,8 @@ class DistributedCoordinator(BaseCoordinator):
         role_instance.start()
         self.node_process = role_instance
 
-    def create_distributed_model(self, model, batch_size, n_pipelines, max_module_size=4e9, config=None):
-        dist_model = DistributedModel(self.node_requests, self.node_responses, model, batch_size, n_pipelines)
+    def create_distributed_model(self, model, n_pipelines, max_module_size=4e9, config=None):
+        dist_model = DistributedModel(self.node_requests, self.node_responses, model, n_pipelines)
 
         distribution = dist_model.parse_model(model, max_module_size)
         distributed_config = self.send_request("request_job", (n_pipelines, distribution))

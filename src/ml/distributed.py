@@ -56,7 +56,7 @@ class DistributedModel(nn.Module):
         self.user_memory = get_gpu_memory()
 
         self.n_pipelines = n_pipelines
-        self.n_micro_batch = 2
+        self.n_micro_batch = n_pipelines
 
         self.model.n_batch = 0
         self.model.forward_queues = {}
