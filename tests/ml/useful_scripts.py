@@ -47,8 +47,8 @@ def train(model, tokenizer, device, logger, batch_size):
     optimizer = torch.optim.Adam(model.parameters(), lr=2e-5)
     dataset = load_dataset("zeroshot/twitter-financial-news-sentiment")
 
-    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(256))
-    dataset["validation"] = dataset["validation"].shuffle(seed=42).select(range(64))
+    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(512))
+    dataset["validation"] = dataset["validation"].shuffle(seed=42).select(range(128))
     train_dataset = preprocess_data(dataset, tokenizer, "train", logger)
     val_dataset = preprocess_data(dataset, tokenizer, "validation", logger)
 

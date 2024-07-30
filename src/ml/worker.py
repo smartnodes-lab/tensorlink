@@ -29,7 +29,7 @@ class DistributedWorker:
                     # Clear gradients and perform optimizer step only if training
                     if self.modules[module_id].training:
                         with self.lock:
-                            self.optimizers[module_id].zero_grad()
+                            # self.optimizers[module_id].zero_grad()
 
                             # Grab backward pass from forward node and associated input/output from forward pass
                             tag, loss_relay = module.backward_queue.get()
@@ -44,14 +44,14 @@ class DistributedWorker:
                                 loss = loss.to(self.device)
 
                             inter_tag = tuple(tag)
-                            assoc_input, assoc_output = module.intermediates[inter_tag]
+                            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
 
                             # Move tensors to the specified device
                             assoc_input = assoc_input.to(self.device)
                             assoc_output = assoc_output.to(self.device)
 
                             # Continue backward pass
-                            assoc_output.backward(loss, retain_graph=True)
+                            assoc_output.backward(loss)
 
                             dvalues = detach_tensor(assoc_input.grad)
 
@@ -63,7 +63,7 @@ class DistributedWorker:
                             size, name = store_in_shared_memory(dvalues)
                             self.send_request("send_backward", (next_node, size, name, tag))
 
-                            self.optimizers[module_id].step()
+                            # self.optimizers[module_id].step()
 
                 if not module.forward_queue.empty():
                     with self.lock:
@@ -129,10 +129,10 @@ class DistributedWorker:
                     module.intermediates = {}
                     module.host = node_id
 
-                    self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
-
-                    self.modules[module_id] = module
-                    self.send_request("module_loaded", module_id)
+                    with self.lock:
+                        # self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
+                        self.modules[module_id] = module
+                        self.send_request("module_loaded", module_id)
 
             if self.modules:
                 for module_id in self.modules.keys():

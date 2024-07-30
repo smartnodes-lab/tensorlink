@@ -27,26 +27,27 @@ logger.addHandler(file_handler)
 logger.setLevel(logging.INFO)
 
 
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 PIPELINES = 1
+DP_FACTOR = 2
 
 
 if __name__ == "__main__":
     # Launch Nodes
     user = DistributedCoordinator(debug=False)
     time.sleep(0.2)
-    worker = WorkerCoordinator(debug=False)
+    worker = WorkerCoordinator(debug=True)
     time.sleep(0.2)
     # worker2 = WorkerCoordinator(debug=True)
     # time.sleep(0.2)
-    validator = ValidatorCoordinator(debug=False)
+    validator = ValidatorCoordinator(debug=True)
 
     # Bootstrap nodes
     val_key, val_host, val_port = validator.send_request("info", None)
     worker.send_request("connect_node", (val_key, val_host, val_port))
-    # worker2 .send_request("connect_node", (val_key, val_host, val_port))
+    # worker2.send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
-    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38752))
+    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38753))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -55,5 +56,5 @@ if __name__ == "__main__":
     ).to(device)
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-    distributed_model = user.create_distributed_model(model, PIPELINES, 1.4e9)
+    distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR, 1.4e9)
     train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

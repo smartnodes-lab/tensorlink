@@ -153,7 +153,6 @@ def detach_tensor(tensor):
         raise TypeError("Unsupported input type")
 
 
-
 def attach_tensor(tensor, device):
     if isinstance(tensor, torch.Tensor):
         return tensor.to(device)

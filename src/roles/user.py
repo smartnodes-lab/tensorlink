@@ -120,8 +120,8 @@ class User(TorchNode):
 
         if req["type"] == "request_job":
             assert self.role == b"U", "Must be user to request a job!"
-            n_pipelines, distribution = req["args"]
-            dist_config = self.request_job(n_pipelines, distribution)
+            n_pipelines, dp_factor, distribution = req["args"]
+            dist_config = self.request_job(n_pipelines, dp_factor, distribution)
             self.response_queue.put({"status": "SUCCESS", "return": dist_config})
 
         else:
@@ -133,6 +133,7 @@ class User(TorchNode):
     def request_job(
         self,
         n_pipelines,
+        dp_factor,
         distribution
     ):
         """Request job through smart contract and set up the relevant connections for a distributed model.
@@ -229,7 +230,8 @@ class User(TorchNode):
         job_request = {
             "author": self.rsa_key_hash,
             "capacity": capacity,
-            "dp_factor": n_pipelines,
+            "n_pipelines": n_pipelines,
+            "dp_factor": dp_factor,
             "distribution": distribution,
             # "job_number": self,
             "n_workers": n_pipelines * len(distribution),

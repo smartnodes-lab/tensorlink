@@ -18,7 +18,7 @@ logger.addHandler(console_handler)
 logger.addHandler(file_handler)
 logger.setLevel(logging.INFO)
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 
 
 if __name__ == "__main__":

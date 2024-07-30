@@ -13,6 +13,7 @@ def assert_job_req(job_req: dict):
     required_keys = [
         "author",
         "capacity",
+        "n_pipelines",
         "dp_factor",
         "distribution",
         "id",
@@ -188,7 +189,7 @@ class Validator(TorchNode):
         # We receive a minimum job information data structure from user
         modules = job_data["distribution"].copy()
         job_id = job_data["id"]
-        dp_factor = job_data["dp_factor"]
+        n_pipelines = job_data["n_pipelines"]
         self.store_value(job_id, job_data)
 
         # Query SC for user id and reputation?
@@ -208,7 +209,7 @@ class Validator(TorchNode):
         # Cycle thru offloaded modules and send request to workers for offloading
         recruitment_threads = []
         for module_id, module in modules.items():
-            for stream in range(dp_factor):
+            for stream in range(n_pipelines):
                 t = threading.Thread(
                     target=self.recruit_worker,
                     args=(
@@ -230,6 +231,7 @@ class Validator(TorchNode):
             (k, self.query_dht(values["worker"]))
             for k, values in job_data["distribution"].items()
         ]
+
         self.send_to_node(requesting_node, b"ACCEPT-JOB" + job_id + pickle.dumps(worker_info))
 
         # job = {
