@@ -47,7 +47,7 @@ if __name__ == "__main__":
     worker.send_request("connect_node", (val_key, val_host, val_port))
     # worker2.send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
-    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38753))
+    # user.send_request("connect_node", (b"test-val-node", "192.168.2.64", 38754))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -24,16 +24,21 @@ class DistributedWorker:
             # Complete outstanding forward and backward passes
             for module_id, module in self.modules.items():
                 if not module.backward_queue.empty():
+                    n_micro_batch = module.n_micro_batch
+
                     next_node = module.host
 
                     # Clear gradients and perform optimizer step only if training
                     if self.modules[module_id].training:
                         with self.lock:
-                            # self.optimizers[module_id].zero_grad()
-
                             # Grab backward pass from forward node and associated input/output from forward pass
                             tag, loss_relay = module.backward_queue.get()
                             loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
+                            microbatch = tag[1]
+
+                            # Zero gradients only for the first micro-batch
+                            if microbatch == 0:
+                                self.optimizers[module_id].zero_grad()
 
                             if isinstance(loss, tuple):
                                 # If loss is a tuple, it contains args and kwargs
@@ -63,7 +68,9 @@ class DistributedWorker:
                             size, name = store_in_shared_memory(dvalues)
                             self.send_request("send_backward", (next_node, size, name, tag))
 
-                            # self.optimizers[module_id].step()
+                            # Update gradients if it is last part of the backwards pipeline
+                            if n_micro_batch - 1 == microbatch:
+                                self.optimizers[module_id].step()
 
                 if not module.forward_queue.empty():
                     with self.lock:
@@ -130,7 +137,7 @@ class DistributedWorker:
                     module.host = node_id
 
                     with self.lock:
-                        # self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
+                        self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
                         self.modules[module_id] = module
                         self.send_request("module_loaded", module_id)
 

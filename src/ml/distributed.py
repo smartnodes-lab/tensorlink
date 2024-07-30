@@ -574,6 +574,7 @@ class OffloadedModule(nn.Module):
         # Send the module to the worker node
         self.module_id = module_id
         module.id = self.module_id
+        module.n_micro_batch = self.parent_model.n_micro_batch
 
         size, name = store_in_shared_memory(module)
         self.parent_model.send_request("send_model", (size, name, self.worker_id, self.module_id))
