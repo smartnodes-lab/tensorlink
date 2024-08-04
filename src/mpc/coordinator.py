@@ -7,7 +7,7 @@ from src.ml.worker import DistributedWorker
 import multiprocessing
 import threading
 import atexit
-
+import time
 
 # Set the start method to 'spawn'
 multiprocessing.set_start_method('spawn', force=True)
@@ -80,10 +80,14 @@ class DistributedCoordinator(BaseCoordinator):
         role_instance.start()
         self.node_process = role_instance
 
-    def create_distributed_model(self, model, n_pipelines, dp_factor, max_module_size=4e9, config=None):
+    def create_distributed_model(self, model, n_pipelines, dp_factor, config=None):  # TODO Max module size etc?
         dist_model = DistributedModel(self.node_requests, self.node_responses, model, dp_factor)
 
-        distribution = dist_model.parse_model(model, max_module_size)
+        self.send_request("request_workers", None)
+        time.sleep(1)
+        workers = self.send_request("check_workers", None)
+        dist_model.worker_info = workers
+        distribution = dist_model.parse_model(model)
         distributed_config = self.send_request("request_job", (n_pipelines, dp_factor, distribution))
         dist_model.distribute_model(distributed_config)
         return dist_model

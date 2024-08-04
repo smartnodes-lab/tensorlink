@@ -33,6 +33,7 @@ class User(TorchNode):
 
         self.role = b"U"
         self.distributed_graph = {}
+        self.worker_stats = {}
 
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
@@ -101,6 +102,13 @@ class User(TorchNode):
 
                     else:
                         ghost += 1
+
+                elif b"WORKERS" == data[:7]:
+                    self.debug_print(f"Received workers from: {node.node_id}")
+                    workers = pickle.loads(data[7:])
+                    for worker, stats in workers.items():
+                        self.worker_stats[worker] = stats
+
                 else:
                     ghost += 1
 
@@ -123,6 +131,14 @@ class User(TorchNode):
             n_pipelines, dp_factor, distribution = req["args"]
             dist_config = self.request_job(n_pipelines, dp_factor, distribution)
             self.response_queue.put({"status": "SUCCESS", "return": dist_config})
+
+        elif req["type"] == "request_workers":
+            self.request_worker_info()
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
+        elif req["type"] == "check_workers":
+            workers = self.worker_stats
+            self.response_queue.put({"status": "SUCCESS", "return": workers})
 
         else:
             super().handle_requests(req)
@@ -327,6 +343,11 @@ class User(TorchNode):
             data["job"] = {"capacity": job["id"]}
 
         return data
+
+    def request_worker_info(self):
+        for validator in self.validators:
+            node = self.nodes[validator]
+            self.send_to_node(node, b"USER-GET-WORKERS")
 
     def run(self):
         # Accept users and back-check history

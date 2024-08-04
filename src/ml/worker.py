@@ -19,6 +19,9 @@ class DistributedWorker:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        torch._dynamo.config.suppress_errors = True
+        torch.set_num_threads(8)
+
     def train_loop(self):
         while not self.terminate:
             # Complete outstanding forward and backward passes

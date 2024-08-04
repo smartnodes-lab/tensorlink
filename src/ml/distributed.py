@@ -55,6 +55,8 @@ class DistributedModel(nn.Module):
         self.model = model
         self.user_memory = get_gpu_memory()
 
+        self.worker_info = {}
+
         self.n_pipelines = n_pipelines
         self.n_micro_batch = n_pipelines
 
@@ -76,14 +78,13 @@ class DistributedModel(nn.Module):
     def request_job(
         self,
         max_module_size=4e9,
-        handle_layers=True,
     ):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
         # TODO Auto micro batch (data pipelines) selection based on job request (free = 2 max, paid is maximized to 16?)
 
         # Get model distribution schematic
-        self.distributed_graph = self.parse_model(self.model, max_module_size, handle_layers=handle_layers)
+        self.distributed_graph = self.parse_model(self.model, max_module_size)
 
         # Get offloaded GPU usage for network
         capacity = (sum(v["size"] for v in self.distributed_graph.values()) * self.n_pipelines)
@@ -385,10 +386,8 @@ class DistributedModel(nn.Module):
     def parse_model(
         self,
         model,
-        max_module_size,
         config: dict = None,
         ids: list = None,
-        handle_layers=True,
         handled_layer=False,
     ) -> dict:
         """
@@ -441,9 +440,11 @@ class DistributedModel(nn.Module):
 
         named_children = list(model.named_children())
         model_size = estimate_memory(model)
+        max_worker = max(self.worker_info.items(), key=lambda x: x[1]["mpc"])
+        max_worker_mem = max_worker[1]["mpc"]
 
         # If we do not want to handle initial layers and model can fit on worker
-        if handle_layers is False and model_size <= max_module_size:
+        if handled_layer is True and model_size <= max_worker_mem:
             k, v = create_offloaded(model, [-1], model_size)
             config[k] = v
 
@@ -459,40 +460,40 @@ class DistributedModel(nn.Module):
             module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
             # Try to handle on user if specified
-            if handle_layers:
+            if self.user_memory >= module_memory:
                 # If user can handle the layer
-                if self.user_memory >= module_memory:
-                    self.user_memory -= module_memory
-                    k, v = create_loaded(submodule, new_ids, module_memory)
-                    config[k] = v
-                    handled_layer = True
-                    continue
 
-                # Break down model further if we haven't handled first layer
-                elif handled_layer is False:
-                    sub_config = self.parse_model(
-                        submodule,
-                        max_module_size,
-                        config,
-                        new_ids,
-                        True,
-                        False,
-                    )
-                    k, v = create_loaded(submodule, new_ids, module_memory)
-                    v["subconfig"] = sub_config
-                    config[k] = v
-                    continue
+                self.user_memory -= module_memory
+                k, v = create_loaded(submodule, new_ids, module_memory)
+                config[k] = v
+                handled_layer = True
+                continue
+
+            # Break down model further if we haven't handled first layer
+            elif handled_layer is False:
+                sub_config = self.parse_model(
+                    submodule,
+                    config=config.copy(),
+                    ids=new_ids,
+                    handled_layer=handled_layer,
+                )
+                handled_layer = True
+                k, v = create_loaded(submodule, new_ids, module_memory)
+                v["subconfig"] = sub_config
+                config[k] = v
+                continue
 
             # Append module id to offloaded config if meets the minimum size
-            if module_memory <= max_module_size:
+            elif module_memory <= max_worker_mem:
                 k, v = create_offloaded(submodule, new_ids, module_memory)
                 config[k] = v
 
             # Recursively break down model if too large
             else:
                 sub_config = self.parse_model(
-                    submodule, max_module_size, config, new_ids, True, True
+                    submodule, config=config.copy(), ids=new_ids, handled_layer=handled_layer
                 )
+
                 k, v = create_loaded(submodule, new_ids, module_memory)
                 v["subconfig"] = sub_config
                 config[k] = v

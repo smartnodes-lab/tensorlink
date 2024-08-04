@@ -23,57 +23,86 @@ def get_gpu_memory():
 
     else:
         # TODO CPU should be able to handle 1 GB (temporary fix)
-        memory += 1.37e9
+        memory += 4e9
 
     return memory
 
 
-def parameter_memory(module):
-    return sum(param.numel() * param.element_size() for param in module.parameters())
+def estimate_memory(module: nn.Module):
+    """Estimate the memory usage of a module."""
+    memory_usage = 0
+    for param in module.parameters():
+        memory_usage += param.numel() * param.element_size()
+
+    return memory_usage
 
 
-def activation_memory(output: torch.Tensor):
-    return output.element_size() * output.numel() if output.requires_grad else 0
-
-
-def gradient_memory(module):
-    gradients = [p.grad for p in module.parameters() if p.grad is not None]
-    return sum(g.numel() * g.element_size() for g in gradients) if gradients else 0
-
-
-def optimizer_memory(optimizer):
-    return sum(
-        state.numel() * state.element_size()
-        for group in optimizer.param_groups
-        for state in group["params"]
-    )
-
-
-def estimate_memory(module):
+def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
     """
-    Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy
-    forward pass and thus is preferred for now.
+    Profile a PyTorch model to estimate overhead in terms of memory usage and FLOPs.
+    Args:
+        model (nn.Module): The model to be profiled.
+        input_size (tuple): The input size for the model.
+    Returns:
+        dict: A dictionary containing the analysis of each layer.
     """
-    return 4 * sum(
-        param.numel() * param.element_size() for param in module.parameters()
-    )
+    # Dictionary to hold the analysis of each layer
+    analysis = {}
 
+    # Initialize dummy input to calculate FLOPs
+    dummy_input = torch.zeros(*input_size)
 
-def estimate_memory_requirement(layer, dummy_input: torch.Tensor, optimizer):
-    layer.eval()
-    output = handle_output(layer(dummy_input.detach()))
-    loss = output.sum()
+    # Total parameter count
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total Parameters: {total_params:,}")
 
-    optimizer = optimizer(layer.parameters())
-    optimizer.zero_grad()
-    loss.backward()
+    # Recursively analyze each layer
+    def analyze_layer(module: nn.Module, input_shape):
+        layer_info = {
+            "parameters": sum(p.numel() for p in module.parameters()),
+            "flops": 0,
+            "memory": 0
+        }
 
-    params_mem = parameter_memory(layer)
-    activations_mem = activation_memory(output)
-    gradient_mem = gradient_memory(layer)
-    optimizer_mem = optimizer_memory(optimizer)
+        # Estimate memory for parameters
+        for param in module.parameters():
+            layer_info["memory"] += estimate_memory(param)
 
-    return output, sum([params_mem, activations_mem, gradient_mem, optimizer_mem])
+        # Estimate FLOPs
+        if isinstance(module, nn.Linear):
+            layer_info["flops"] = 2 * module.in_features * module.out_features
+        elif isinstance(module, nn.Conv2d):
+            out_channels, in_channels, kh, kw = module.weight.shape
+            _, _, h, w = input_shape
+            flops_per_instance = 2 * in_channels * kh * kw * out_channels
+            layer_info["flops"] = flops_per_instance * h * w
+        elif isinstance(module, nn.MultiheadAttention):
+            embed_dim = module.embed_dim
+            num_heads = module.num_heads
+            seq_length = input_shape[0]  # assuming (seq_len, batch_size, embed_dim)
+            # Rough estimation for self-attention FLOPs
+            layer_info["flops"] = 4 * seq_length * embed_dim * embed_dim + seq_length * num_heads * embed_dim
+        elif isinstance(module, nn.Transformer):
+            # Estimating FLOPs for Transformer model
+            num_layers = module.encoder.num_layers
+            embed_dim = module.d_model
+            seq_length = input_shape[0]
+            # Each encoder layer typically involves two self-attention layers and one feed-forward layer
+            layer_info["flops"] = (4 * seq_length * embed_dim * embed_dim + seq_length * embed_dim) * num_layers
+
+        # Add the layer analysis to the global analysis dictionary
+        analysis[module] = layer_info
+
+        return layer_info
+
+    # Traverse the model and analyze each layer
+    for name, module in model.named_modules():
+        if len(list(module.children())) == 0:  # Leaf module
+            layer_input_shape = dummy_input.shape
+            layer_info = analyze_layer(module, layer_input_shape)
+            print(f"{name}: {layer_info}")
+
+    return analysis
 
 
 # Handle different wrapped outputs from huggingface models

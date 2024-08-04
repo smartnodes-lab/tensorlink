@@ -143,6 +143,16 @@ class Validator(TorchNode):
                     self.debug_print(f"Validator:user update job request")
                     self.update_job(data[10:])
 
+                elif b"USER-GET-WORKERS" == data[:16]:
+                    self.debug_print(f"User requested workers:")
+                    self.request_worker_stats()
+                    time.sleep(0.5)
+                    stats = {}
+                    for worker in self.workers:
+                        stats[worker] = self.nodes[worker].stats
+                    stats = pickle.dumps(stats)
+                    self.send_to_node(node, b"WORKERS" + stats)
+
                 else:
                     return False
 
@@ -344,10 +354,10 @@ class Validator(TorchNode):
     def update_worker(self):
         pass
 
-    def share_info(self):
-        for validator_ids in self.validators:
-            node = self.nodes[validator_ids]
-            self.send_
+    # def share_info(self):
+    #     for validator_ids in self.validators:
+    #         node = self.nodes[validator_ids]
+    #         self.send_
 
     def get_jobs(self):
         current_block = self.chain.eth.block_number
