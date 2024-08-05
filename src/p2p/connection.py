@@ -36,14 +36,14 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(60)
-        self.chunk_size = 16_777_216
+        self.chunk_size = 4096
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
 
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)  # 4MB receive buffer
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)  # 4MB send buffer
+        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 4 * 1024 * 1024)  # 4MB receive buffer
+        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 4 * 1024 * 1024)  # 4MB send buffer
 
     def compress(self, data):
         compressed = data
@@ -82,7 +82,6 @@ class Connection(threading.Thread):
                 for i in range(0, len(data), self.chunk_size):
                     chunk = data[i : i + self.chunk_size]
                     self.sock.sendall(chunk)
-                    self.main_node.debug_print(f"Sent chunk {i // self.chunk_size + 1} of {num_chunks}")
 
                 self.sock.sendall(self.EOT_CHAR)
         except Exception as e:
