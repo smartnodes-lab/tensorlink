@@ -456,7 +456,6 @@ class DistributedModel(nn.Module):
 
             # Update current module id
             new_ids = ids + [i]
-
             module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
             # Try to handle on user if specified

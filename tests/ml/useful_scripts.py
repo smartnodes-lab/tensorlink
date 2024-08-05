@@ -92,9 +92,9 @@ def train(model, tokenizer, device, logger, batch_size):
 
             output = model(
                 b_input_ids,
-                token_type_ids=None,
-                attention_mask=b_input_mask,
-                labels=b_labels,
+                # token_type_ids=None,
+                # attention_mask=b_input_mask,
+                # labels=b_labels,
             )
 
             loss = output.loss

@@ -23,7 +23,8 @@ def get_gpu_memory():
 
     else:
         # TODO CPU should be able to handle 1 GB (temporary fix)
-        memory += 4e9
+        # memory += 4e9
+        memory += 24e9
 
     return memory
 
