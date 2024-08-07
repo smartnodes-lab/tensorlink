@@ -208,11 +208,17 @@ class SmartNode(threading.Thread):
                     f"streamed_data_{node.host}_{node.port}_{self.host}_{self.port}"
                 )
 
-                with open(file_name, "rb") as file:
-                    streamed_bytes = file.read()
+                if len(data) > 16:
+                    if data[11:17] == b"MODULE":
+                        module_id = data[17:81]
+                        self.handle_data(b"MODULE" + module_id + file_name.encode(), node)
 
-                self.handle_data(streamed_bytes, node)
-                os.remove(file_name)
+                else:
+                    with open(file_name, "rb") as file:
+                        streamed_data = file.read()
+
+                    self.handle_data(streamed_data, node)
+                    os.remove(file_name)
 
             # We received a ping, send a pong
             elif b"PING" == data[:4]:
@@ -852,6 +858,12 @@ class SmartNode(threading.Thread):
         """Send data to a connected node"""
         if n in self.nodes.values():
             n.send(data, compression=compression)
+        else:
+            self.debug_print("send_to_node: node not found!")
+
+    def send_to_node_from_file(self, n: Connection, file, tag):
+        if n in self.nodes.values():
+            n.send_from_file(file, tag)
         else:
             self.debug_print("send_to_node: node not found!")
 

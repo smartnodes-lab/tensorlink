@@ -6,6 +6,8 @@ import threading
 import json
 import zlib
 import base64
+import os
+import gc
 
 
 class Connection(threading.Thread):
@@ -36,14 +38,14 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(60)
-        self.chunk_size = 4096
+        self.chunk_size = 1024 * 1024 * 4 * 4
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
 
-        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 4 * 1024 * 1024)  # 4MB receive buffer
-        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 4 * 1024 * 1024)  # 4MB send buffer
+        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
+        # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
 
     def compress(self, data):
         compressed = data
@@ -71,21 +73,68 @@ class Connection(threading.Thread):
                 data = self.compress(data)
                 if data is not None:
                     for i in range(0, len(data), self.chunk_size):
-                        chunk = data[i : i + self.chunk_size]
+                        chunk = data[i: i + self.chunk_size]
                         self.sock.sendall(chunk + self.COMPR_CHAR)
                     self.sock.sendall(self.EOT_CHAR)
+
             elif len(data) < self.chunk_size:
                 self.sock.sendall(data + self.EOT_CHAR)
+
             else:
                 num_chunks = (len(data) + self.chunk_size - 1) // self.chunk_size
+                data_view = memoryview(data)
+                data_size = len(data)
 
-                for i in range(0, len(data), self.chunk_size):
-                    chunk = data[i : i + self.chunk_size]
-                    self.sock.sendall(chunk)
+                for chunk_number, i in enumerate(range(0, data_size, self.chunk_size), start=1):
+                    self.sock.sendall(data_view[i: i + self.chunk_size])
+
+                    # Print debug information for every chunk, or you can choose an interval.
+                    if chunk_number % 100 == 0:
+                        self.main_node.debug_print(f"Sent chunk {chunk_number} of {num_chunks}")
 
                 self.sock.sendall(self.EOT_CHAR)
+
         except Exception as e:
             self.main_node.debug_print(f"connection send error: {e}")
+            self.stop()
+
+    def send_from_file(self, file_name: str, tag: bytes):
+        try:
+            # Data is a filename. Read from file in chunks.
+            with open(file_name, 'rb') as file:
+                self.sock.sendall(tag)
+
+                start_time = time.time()
+                # Get the total file size
+                total_size = os.fstat(file.fileno()).st_size
+                chunk_size = self.chunk_size
+                num_chunks = (total_size + chunk_size - 1) // chunk_size
+
+                chunk_number = 0
+
+                while True:
+                    current_position = file.tell()
+                    bytes_left = total_size - current_position
+
+                    # Optionally print or log the number of bytes left
+                    if chunk_number % 10 == 0:
+                        self.main_node.debug_print(f"Bytes left to send: {bytes_left}")
+                        self.main_node.debug_print(f"Sent chunk {chunk_number} of {num_chunks}")
+
+                    chunk = file.read(chunk_size)
+                    if not chunk:
+                        break
+
+                    self.sock.sendall(chunk)
+                    chunk_number += 1
+
+                    gc.collect()
+
+                self.sock.sendall(self.EOT_CHAR)
+                print(time.time() - start_time)
+
+        except Exception as e:
+            self.main_node.debug_print(f"Error sending file: {e}")
             self.stop()
 
     def stop(self) -> None:
@@ -111,6 +160,8 @@ class Connection(threading.Thread):
     def run(self):
         buffer = b""
         b_size = 0
+        shmlorp = b""
+        writing_threads = []
 
         while not self.terminate_flag.is_set():
             chunk = b""
@@ -127,7 +178,12 @@ class Connection(threading.Thread):
                 break
 
             if chunk:
-                buffer += chunk
+                if b"MODULE" == chunk[:6]:
+                    shmlorp = chunk[:70]
+                    buffer += chunk[70:]
+                else:
+                    buffer += chunk
+
                 eot_pos = buffer.find(self.EOT_CHAR)
 
                 if eot_pos >= 0:
@@ -138,21 +194,35 @@ class Connection(threading.Thread):
                     except Exception as e:
                         self.main_node.debug_print(f"file writing error: {e}")
                     buffer = buffer[eot_pos + len(self.EOT_CHAR):]
-                    self.main_node.handle_message(self, b"DONE STREAM")
+                    self.main_node.handle_message(self, b"DONE STREAM" + shmlorp)
+                    shmlorp = b""
+
+                    for t in writing_threads:
+                        t.join()
+
+                    writing_threads = []
 
                 elif len(buffer) > 20_000_000:
-                    try:
-                        with open(file_name, "ab") as f:
-                            f.write(buffer)
-                    except Exception as e:
-                        self.main_node.debug_print(f"file writing error: {e}")
+                    t = threading.Thread(target=self.write_to_file, args=(file_name, buffer))
+                    writing_threads.append(t)
+                    t.start()
+
                     buffer = b""
 
             else:
                 buffer += chunk
 
+            gc.collect()
+
         self.sock.settimeout(None)
         self.sock.close()
+
+    def write_to_file(self, file_name, buffer):
+        try:
+            with open(file_name, "ab") as f:
+                f.write(buffer)
+        except Exception as e:
+            self.main_node.debug_print(f"file writing error: {e}")
 
     """
     Connection thread between two nodes that are able to send/stream data from/to

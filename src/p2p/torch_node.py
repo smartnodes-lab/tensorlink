@@ -121,13 +121,11 @@ class TorchNode(SmartNode):
                     self.store_parameters_in_shared_memory(key, parameters)
 
                 elif b"MODULE" == data[:6]:
-                    self.debug_print(
-                        f"RECEIVED: {round((data.__sizeof__() - 5) / 1e6, 1)} MB"
-                    )
                     module_id = data[6:70]
-                    size, name = store_in_shared_memory(data[70:], encoded=True)
+                    file_name = data[70:].decode()
+
                     self.modules[module_id] = {
-                        "mem_info": (size, name),
+                        "mem_info": file_name,
                         "host": node.node_id,
                         "forward_queue": {},
                         "backward_queue": {},
@@ -175,10 +173,11 @@ class TorchNode(SmartNode):
 
         elif req_type == "send_model":
             # Send module that is stored in shared mpc to another node
-            size, name, worker_id, module_id = request["args"]
+            name, worker_id, module_id = request["args"]
             node = self.nodes[worker_id]
-            model_bytes = get_from_shared_memory(size, name, encoded=True)
-            self.send_module(module_id, model_bytes, node)
+            # model_bytes = get_from_shared_memory(size, name, encoded=True)
+            # self.send_module(module_id, model_bytes, node)
+            self.send_module(name, module_id, node)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "check_loaded":
@@ -220,8 +219,8 @@ class TorchNode(SmartNode):
             return_val = False
             for module_id, module in self.modules.items():
                 if "mem_info" in module:
-                    size, name = module["mem_info"]
-                    return_val = (size, name, module_id, module["host"])
+                    file_name = module["mem_info"]
+                    return_val = (file_name, module_id, module["host"])
                     del module["mem_info"]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
@@ -398,10 +397,10 @@ class TorchNode(SmartNode):
         mode = b"0" if mode is False else b"1"
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
-    def send_module(self, model_id: bytes, module: bytes, node: Connection):
-        self.debug_print(f"Sending module: {format_size(len(module))} to worker: {node.node_id}")
+    def send_module(self, file_name: bytes, module_id: bytes, node: Connection):
+        self.debug_print(f"Sending module: {module_id} to worker: {node.node_id}")
         self.store_request(node.node_id, b"MODULE")
-        self.send_to_node(node, b"MODULE" + model_id + module)
+        self.send_to_node_from_file(node, file_name, b"MODULE" + module_id)
 
     def listen_requests(self):
         while not self.terminate_flag.is_set():

@@ -1,3 +1,5 @@
+import os
+
 from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 from src.ml.utils import *
 
@@ -18,9 +20,6 @@ class DistributedWorker:
         self.lock = threading.Lock()
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-        torch._dynamo.config.suppress_errors = True
-        torch.set_num_threads(8)
 
     def train_loop(self):
         while not self.terminate:
@@ -131,9 +130,10 @@ class DistributedWorker:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
-                    size, name, module_id, node_id = args
+                    file_name, module_id, node_id = args
+                    module = torch.load(file_name).to(self.device)
+                    os.remove(file_name)
 
-                    module = get_from_shared_memory(size, name).to(self.device)
                     module.forward_queue = queue.Queue()
                     module.backward_queue = queue.Queue()
                     module.intermediates = {}
@@ -142,7 +142,8 @@ class DistributedWorker:
                     with self.lock:
                         self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
                         self.modules[module_id] = module
-                        self.send_request("module_loaded", module_id)
+
+                    self.send_request("module_loaded", module_id)
 
             if self.modules:
                 for module_id in self.modules.keys():
@@ -166,9 +167,6 @@ class DistributedWorker:
 
     def run(self):
         node_check_thread = threading.Thread(target=self.check_node)
-
         node_check_thread.start()
-
         self.train_loop()
-
         node_check_thread.join()
