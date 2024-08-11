@@ -77,6 +77,7 @@ def get_connection_info(node, main_port=None):
         "role": node.role,
         "id": node.node_id,
         "reputation": node.reputation,
+        "ping": node.ping
     }
     return info
 
@@ -139,6 +140,8 @@ class SmartNode(threading.Thread):
         self.debug = debug
         self.max_connections = max_connections
 
+        self.listener = None
+
         self.debug_colour = None
         if debug_colour:
             self.debug_colour = debug_colour
@@ -192,6 +195,7 @@ class SmartNode(threading.Thread):
                 self.debug_print(f"Could not retrieve contract: {e}")
                 self.stop()
 
+    """P2P Messaging & Interactions"""
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
         Handles incoming data from node connections and performs an appropriate response.
@@ -400,7 +404,7 @@ class SmartNode(threading.Thread):
 
                 elif role == b"U":
                     # TODO: user handling, to be done once users are required to register (post-alpha)
-                    pass
+                    self.query_node()
 
                 elif role == b"W":
                     # TODO: worker handling
@@ -588,6 +592,139 @@ class SmartNode(threading.Thread):
 
                 candidates.append(validator_id)
 
+
+    def init_sock(self) -> None:
+        """Initializes the main socket for handling incoming connections"""
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        port = self.get_next_port()
+        self.port = port
+        self.sock.bind((self.host, port))
+        self.sock.settimeout(10)
+        self.sock.listen(1)
+
+    def init_upnp(self) -> None:
+        """Enables UPnP on main socket to allow connections"""
+        # if self.upnp:
+        self.upnp = UPnP()
+        self.upnp.discoverdelay = 10_000
+        self.upnp.discover()
+        self.upnp.selectigd()
+
+    def add_port_mapping(self, external_port, internal_port):
+        result = self.upnp.addportmapping(
+            external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
+        )
+
+        if result:
+            self.debug_print(f"UPnP port forward successful on port {self.port}")
+        else:
+            self.debug_print("Failed to initialize UPnP.")
+
+    def get_external_ip(self):
+        """Get public IP address"""
+        return self.upnp.externalipaddress()
+
+    def create_connection(
+        self,
+        connection: socket.socket,
+        host: str,
+        port: int,
+        main_port: int,
+        node_id: bytes,
+        role: int,
+    ) -> Connection:
+        return Connection(self, connection, host, port, main_port, node_id, role)
+
+    def can_connect(self, host: str, port: int):
+        """Makes sure we are not trying to connect to ourselves or a connected node"""
+        # Check if trying to connect to self
+        if host == self.host and port == self.port:
+            self.debug_print("connect_with_node: cannot connect with yourself!")
+            return False
+
+        # Check if already connected
+        for node in self.nodes.values():
+            if node.host == host and node.port == port:
+                self.debug_print(
+                    f"connect_with_node: already connected with node: {node.node_id}"
+                )
+                return False
+
+        return True
+
+    def send_to_node(
+        self, n: Connection, data: bytes, compression: bool = False
+    ) -> None:
+        """Send data to a connected node"""
+        if n in self.nodes.values():
+            n.send(data, compression=compression)
+        else:
+            self.debug_print("send_to_node: node not found!")
+
+    def send_to_node_from_file(self, n: Connection, file, tag):
+        if n in self.nodes.values():
+            n.send_from_file(file, tag)
+        else:
+            self.debug_print("send_to_node: node not found!")
+
+    def update_node_stats(
+        self,
+        node_hash: bytes,
+        statistic_key: str,
+        additional_context=None,
+        decrement=False,
+    ):
+        """Updates node (connection) statistics, acts as an incrementer (default),
+        sets the value if context is specified."""
+        if additional_context is None:
+            if node_hash in self.node_stats.keys():
+                if decrement:
+                    self.node_stats[node_hash][statistic_key] -= 1
+                else:
+                    self.node_stats[node_hash][statistic_key] += 1
+            else:
+                self.node_stats[node_hash] = {statistic_key: 1}
+        else:
+            if node_hash in self.node_stats.keys():
+                self.node_stats[node_hash][statistic_key] = additional_context
+            else:
+                self.node_stats[node_hash] = {statistic_key: additional_context}
+
+    def close_connection(self, n: Connection) -> None:
+        n.stop()
+        self.debug_print(f"node {n.node_id} disconnected")
+
+    def handle_message(self, node: Connection, data) -> None:
+        """Callback method to handles incoming data from connections"""
+        self.debug_print(
+            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB"
+        )
+        self.handle_data(data, node)
+
+    def ping_node(self, n: Connection):
+        """Measure latency node latency"""
+        n.pinged = time.time()
+        self.send_to_node(n, b"PING")
+
+    def close_connection_socket(
+        self, n: socket.socket, additional_info: str = None
+    ) -> None:
+        message = "closing connection"
+        if additional_info:
+            message += f": {additional_info}"
+
+        self.debug_print(message)
+        n.close()
+
+    def stop_upnp(self) -> None:
+        """Shuts down UPnP on port"""
+        self.terminate_flag.set()
+
+        if self.upnp:
+            self.upnp.deleteportmapping(self.port, "TCP")
+            self.debug_print(f"stop_upnp: UPnP removed for port {self.port}")
+
+    """DHT Methods"""
     def query_dht(
         self, key_hash: bytes, requester: bytes = None, ids_to_exclude: list = None
     ):
@@ -793,144 +930,9 @@ class SmartNode(threading.Thread):
 
         return bucket_index
 
-    def init_sock(self) -> None:
-        """Initializes the main socket for handling incoming connections"""
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        port = self.get_next_port()
-        self.port = port
-        self.sock.bind((self.host, port))
-        self.sock.settimeout(10)
-        self.sock.listen(1)
+    # def node_heartbeat(self):
 
-    def init_upnp(self) -> None:
-        """Enables UPnP on main socket to allow connections"""
-        # if self.upnp:
-        self.upnp = UPnP()
-        self.upnp.discoverdelay = 10_000
-        self.upnp.discover()
-        self.upnp.selectigd()
-
-    def add_port_mapping(self, external_port, internal_port):
-        result = self.upnp.addportmapping(
-            external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
-        )
-
-        if result:
-            self.debug_print(f"UPnP port forward successful on port {self.port}")
-        else:
-            self.debug_print("Failed to initialize UPnP.")
-
-    def get_external_ip(self):
-        """Get public IP address"""
-        return self.upnp.externalipaddress()
-
-    def create_connection(
-        self,
-        connection: socket.socket,
-        host: str,
-        port: int,
-        main_port: int,
-        node_id: bytes,
-        role: int,
-    ) -> Connection:
-        return Connection(self, connection, host, port, main_port, node_id, role)
-
-    def can_connect(self, host: str, port: int):
-        """Makes sure we are not trying to connect to ourselves or a connected node"""
-        # Check if trying to connect to self
-        if host == self.host and port == self.port:
-            self.debug_print("connect_with_node: cannot connect with yourself!")
-            return False
-
-        # Check if already connected
-        for node in self.nodes.values():
-            if node.host == host and node.port == port:
-                self.debug_print(
-                    f"connect_with_node: already connected with node: {node.node_id}"
-                )
-                return False
-
-        return True
-
-    def send_to_node(
-        self, n: Connection, data: bytes, compression: bool = False
-    ) -> None:
-        """Send data to a connected node"""
-        if n in self.nodes.values():
-            n.send(data, compression=compression)
-        else:
-            self.debug_print("send_to_node: node not found!")
-
-    def send_to_node_from_file(self, n: Connection, file, tag):
-        if n in self.nodes.values():
-            n.send_from_file(file, tag)
-        else:
-            self.debug_print("send_to_node: node not found!")
-
-    def update_node_stats(
-        self,
-        node_hash: bytes,
-        statistic_key: str,
-        additional_context=None,
-        decrement=False,
-    ):
-        """Updates node (connection) statistics, acts as an incrementer (default),
-        sets the value if context is specified."""
-        if additional_context is None:
-            if node_hash in self.node_stats.keys():
-                if decrement:
-                    self.node_stats[node_hash][statistic_key] -= 1
-                else:
-                    self.node_stats[node_hash][statistic_key] += 1
-            else:
-                self.node_stats[node_hash] = {statistic_key: 1}
-        else:
-            if node_hash in self.node_stats.keys():
-                self.node_stats[node_hash][statistic_key] = additional_context
-            else:
-                self.node_stats[node_hash] = {statistic_key: additional_context}
-
-    def close_connection(self, n: Connection) -> None:
-        n.stop()
-        self.debug_print(f"node {n.node_id} disconnected")
-
-    def handle_message(self, node: Connection, data) -> None:
-        """Callback method to handles incoming data from connections"""
-        self.debug_print(
-            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB"
-        )
-        self.handle_data(data, node)
-
-    def ping_node(self, n: Connection):
-        """Measure latency node latency"""
-        n.pinged = time.time()
-        self.send_to_node(n, b"PING")
-
-    def close_connection_socket(
-        self, n: socket.socket, additional_info: str = None
-    ) -> None:
-        message = "closing connection"
-        if additional_info:
-            message += f": {additional_info}"
-
-        self.debug_print(message)
-        n.close()
-
-    def stop_upnp(self) -> None:
-        """Shuts down UPnP on port"""
-        if self.upnp:
-            self.upnp.deleteportmapping(self.port, "TCP")
-            self.debug_print(f"stop_upnp: UPnP removed for port {self.port}")
-
-    def stop(self) -> None:
-        """Shut down node and all associated connections/threads"""
-        self.debug_print(f"Node stopping.")
-        self.terminate_flag.set()
-        if self.role == b"U":
-            self.endpoint_thread.join()
-        self.stop_upnp()
-
-    # Methods to interact with Flask endpoints
+    """Methods to interact with smart contract"""
     def get_self_info(self):
         data = {
             "id": self.rsa_key_hash.decode(),
@@ -976,3 +978,15 @@ class SmartNode(threading.Thread):
 
         else:
             return None
+
+    def run(self):
+        self.listener = threading.Thread(target=self.listen, daemon=True)
+        self.listener.start()
+
+    def stop(self) -> None:
+        """Shut down node and all associated connections/threads"""
+        self.debug_print(f"Node stopping.")
+        self.terminate_flag.set()
+        # if self.role == b"U":
+        #     self.endpoint_thread.join()
+        self.stop_upnp()

@@ -144,9 +144,9 @@ class Validator(TorchNode):
                     self.update_job(data[10:])
 
                 elif b"USER-GET-WORKERS" == data[:16]:
-                    self.debug_print(f"User requested workers:")
+                    self.debug_print(f"User requested workers")
                     self.request_worker_stats()
-                    time.sleep(0.5)
+                    time.sleep(1)
                     stats = {}
                     for worker in self.workers:
                         stats[worker] = self.nodes[worker].stats
@@ -203,6 +203,7 @@ class Validator(TorchNode):
         self.store_value(job_id, job_data)
 
         # Query SC for user id and reputation?
+        # TODO if we cannot handle another job, or cant find enough workers, reroute request to others
 
         # Update connected workers stats
         self.request_worker_stats()
@@ -338,6 +339,13 @@ class Validator(TorchNode):
             self.store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
 
+    def get_worker_memories(self):
+        workers = [
+            self.nodes[worker_id].stats
+            for worker_id in self.workers
+            if self.nodes[worker_id].stats
+        ]
+
     def distribute_job(self):
         """Distribute job to a few other non-seed validators"""
         for validator in self.validators:
@@ -382,11 +390,7 @@ class Validator(TorchNode):
         # Get proposees from SC and send our state to them
         # If we are the next proposee, accept info from validators and only add info to the final state if there are
         # 2 or more of the identical info
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-        
-        mp_comms = threading.Thread(target=self.handle_requests, daemon=True)
-        mp_comms.start()
+        super().run()
 
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
@@ -396,16 +400,12 @@ class Validator(TorchNode):
             # Aggregate incoming json if we are selected validator
             pass
 
-        print("Node stopping...")
         for node in self.nodes.values():
             node.stop()
 
         for node in self.nodes.values():
             node.join()
 
-        listener.join()
-        mp_comms.join()
-
         self.sock.settimeout(None)
         self.sock.close()
-        print("Node stopped")
+        self.debug_print("Node stopped")

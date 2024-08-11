@@ -113,9 +113,10 @@ class DistributedWorker:
         """
         request = {"type": request_type, "args": args}
         try:
-            self.node_requests.put(request)
-            response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
+            with self.lock:
+                self.node_requests.put(request)
+                response = self.node_responses.get()  # Blocking call, waits for response
+                return response["return"]
 
         except Exception as e:
             print(f"Error sending request: {e}")
