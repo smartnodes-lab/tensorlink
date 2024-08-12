@@ -1,10 +1,7 @@
 from useful_scripts import *
 
 import torch
-from transformers import (
-    BertForSequenceClassification,
-    BertTokenizer
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 
 # Set up logging
@@ -24,9 +21,9 @@ BATCH_SIZE = 64
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = BertForSequenceClassification.from_pretrained(
-        "bert-base-uncased", num_labels=3
-    ).to(device)
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
+                                              token="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")
+    model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
+                                                 token="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")
 
     train(model, tokenizer, device, logger, BATCH_SIZE)
