@@ -29,6 +29,7 @@ class BaseCoordinator:
 
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
+        self.mpc_lock = multiprocessing.Lock()
 
         self.init_kwargs = kwargs
 
@@ -52,13 +53,20 @@ class BaseCoordinator:
         Sends a request to the node and waits for the response.
         """
         request = {"type": request_type, "args": args}
+
         try:
+            self.mpc_lock.acquire()  # Acquire the MPC lock
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
+
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"error": str(e)}
+
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
     def run_role(self):
         raise NotImplementedError("Subclasses must implement this method")
@@ -81,10 +89,10 @@ class DistributedCoordinator(BaseCoordinator):
         self.node_process = role_instance
 
     def create_distributed_model(self, model, n_pipelines, dp_factor, config=None):  # TODO Max module size etc?
-        dist_model = DistributedModel(self.node_requests, self.node_responses, model, dp_factor)
+        dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, dp_factor)
 
         self.send_request("request_workers", None)
-        time.sleep(1)
+        time.sleep(3)
         workers = self.send_request("check_workers", None)
         dist_model.worker_info = workers
         distribution = dist_model.parse_model(model)
@@ -127,6 +135,5 @@ class WorkerCoordinator(BaseCoordinator):
         role_instance.activate()
         self.node_process = role_instance
 
-        distributed_worker = DistributedWorker(self.node_requests, self.node_responses)
+        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
         distributed_worker.run()
-        self.distributed_worker = distributed_worker

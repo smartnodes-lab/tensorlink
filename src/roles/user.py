@@ -134,6 +134,7 @@ class User(TorchNode):
 
         elif req["type"] == "request_workers":
             self.request_worker_info()
+            time.sleep(1)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req["type"] == "check_workers":
@@ -349,16 +350,15 @@ class User(TorchNode):
             node = self.nodes[validator]
             self.send_to_node(node, b"USER-GET-WORKERS")
 
+    def request_new_worker(self, module_id):
+        pass
+
     def run(self):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         # If we are the next proposee, accept info from validators and only add info to the final state if there are
         # 2 or more of the identical info
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-
-        mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
-        mp_comms.start()
+        super().run()
 
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
@@ -370,9 +370,6 @@ class User(TorchNode):
 
         for node in self.nodes.values():
             node.join()
-
-        listener.join()
-        mp_comms.join()
 
         self.sock.settimeout(None)
         self.sock.close()

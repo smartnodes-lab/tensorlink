@@ -47,6 +47,7 @@ class TorchNode(SmartNode):
         # Available GPU mpc estimation
         self.available_memory = get_gpu_memory()
 
+        self.mpc = None
         self.request_queue = request_queue
         self.response_queue = response_queue
         self.memory_manager = {}
@@ -412,31 +413,8 @@ class TorchNode(SmartNode):
                 return mod_hash
         return None
 
-    # def run(self):
-    #     # Accept users and back-check history
-    #     # Get proposees from SC and send our state to them
-    #     # If we are the next proposee, accept info from validators and only add info to the final state if there are
-    #     # 2 or more of the identical info
-    #     listener = threading.Thread(target=self.listen, daemon=True)
-    #     listener.start()
-    #
-    #     mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
-    #     mp_comms.start()
-    #
-    #     while not self.terminate_flag.is_set():
-    #         # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-    #         pass
-    #
-    #     print("Node stopping...")
-    #     for node in self.nodes.values():
-    #         node.stop()
-    #
-    #     for node in self.nodes.values():
-    #         node.join()
-    #
-    #     listener.join()
-    #     mp_comms.join()
-    #
-    #     self.sock.settimeout(None)
-    #     self.sock.close()
-    #     print("Node stopped")
+    def run(self):
+        super().run()
+
+        self.mpc = threading.Thread(target=self.handle_requests, daemon=True)
+        self.mpc.start()

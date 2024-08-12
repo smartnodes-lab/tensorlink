@@ -138,11 +138,7 @@ class Worker(TorchNode):
     def run(self):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
-        listener = threading.Thread(target=self.listen, daemon=True)
-        listener.start()
-
-        mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
-        mp_comms.start()
+        super().run()
 
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
@@ -154,9 +150,6 @@ class Worker(TorchNode):
 
         for node in self.nodes.values():
             node.join()
-
-        listener.join()
-        mp_comms.join()
 
         self.sock.settimeout(None)
         self.sock.close()

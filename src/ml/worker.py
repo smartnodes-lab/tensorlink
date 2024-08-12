@@ -10,7 +10,7 @@ import time
 
 
 class DistributedWorker:
-    def __init__(self, node_requests, node_responses):
+    def __init__(self, node_requests, node_responses, mpc_lock):
         self.node_requests = node_requests
         self.node_responses = node_responses
 
@@ -18,6 +18,7 @@ class DistributedWorker:
         self.optimizers = {}
         self.terminate = False
         self.lock = threading.Lock()
+        self.mpc_lock = mpc_lock
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,14 +113,20 @@ class DistributedWorker:
         Sends a request to the node and waits for the response.
         """
         request = {"type": request_type, "args": args}
+
         try:
+            self.mpc_lock.acquire()  # Acquire the MPC lock
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
 
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"error": str(e)}
+
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
     def check_node(self):
         update_check_interval = 25

@@ -3,7 +3,7 @@ from typing import Union
 import socket
 import time
 import threading
-import json
+from datetime import datetime
 import zlib
 import base64
 import os
@@ -32,6 +32,7 @@ class Connection(threading.Thread):
         self.main_node = main_node
         self.sock = sock
         self.terminate_flag = threading.Event()
+        self.last_seen = None
         self.stats = {}
 
         self.node_key = node_key
@@ -178,6 +179,8 @@ class Connection(threading.Thread):
                 break
 
             if chunk:
+                self.last_seen = datetime.now()
+
                 if b"MODULE" == chunk[:6]:
                     shmlorp = chunk[:70]
                     buffer += chunk[70:]

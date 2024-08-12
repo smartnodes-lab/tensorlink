@@ -43,6 +43,7 @@ class DistributedModel(nn.Module):
         self,
         node_requests,
         node_responses,
+        mpc_lock,
         model: nn.Module,
         n_pipelines: int,
         device=None
@@ -52,6 +53,7 @@ class DistributedModel(nn.Module):
         # Node process communication params
         self.node_requests = node_requests
         self.node_responses = node_responses
+        self.mpc_lock = mpc_lock
 
         self.model = model
         self.user_memory = get_gpu_memory()
@@ -557,13 +559,20 @@ class DistributedModel(nn.Module):
         Sends a request to the node and waits for the response.
         """
         request = {"type": request_type, "args": args}
+
         try:
+            self.mpc_lock.acquire()  # Acquire the MPC lock
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
+
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"error": str(e)}
+
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
 
 class OffloadedModule(nn.Module):
