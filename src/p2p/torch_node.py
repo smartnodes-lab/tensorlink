@@ -47,7 +47,6 @@ class TorchNode(SmartNode):
         # Available GPU mpc estimation
         self.available_memory = get_gpu_memory()
 
-        self.mpc = None
         self.request_queue = request_queue
         self.response_queue = response_queue
         self.memory_manager = {}
@@ -122,11 +121,11 @@ class TorchNode(SmartNode):
                     self.store_parameters_in_shared_memory(key, parameters)
 
                 elif b"MODULE" == data[:6]:
+                    self.debug_print("RECEIVED MODULE")
                     module_id = data[6:70]
-                    file_name = data[70:].decode()
 
                     self.modules[module_id] = {
-                        "mem_info": file_name,
+                        "mem_info": module_id.decode(),
                         "host": node.node_id,
                         "forward_queue": {},
                         "backward_queue": {},
@@ -220,8 +219,8 @@ class TorchNode(SmartNode):
             return_val = False
             for module_id, module in self.modules.items():
                 if "mem_info" in module:
-                    file_name = module["mem_info"]
-                    return_val = (file_name, module_id, module["host"])
+                    name = module["mem_info"]
+                    return_val = (name, module_id, module["host"])
                     del module["mem_info"]
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
@@ -413,8 +412,31 @@ class TorchNode(SmartNode):
                 return mod_hash
         return None
 
-    def run(self):
-        super().run()
-
-        self.mpc = threading.Thread(target=self.handle_requests, daemon=True)
-        self.mpc.start()
+    # def run(self):
+    #     # Accept users and back-check history
+    #     # Get proposees from SC and send our state to them
+    #     # If we are the next proposee, accept info from validators and only add info to the final state if there are
+    #     # 2 or more of the identical info
+    #     listener = threading.Thread(target=self.listen, daemon=True)
+    #     listener.start()
+    #
+    #     mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
+    #     mp_comms.start()
+    #
+    #     while not self.terminate_flag.is_set():
+    #         # Handle job oversight, and inspect other jobs (includes job verification and reporting)
+    #         pass
+    #
+    #     print("Node stopping...")
+    #     for node in self.nodes.values():
+    #         node.stop()
+    #
+    #     for node in self.nodes.values():
+    #         node.join()
+    #
+    #     listener.join()
+    #     mp_comms.join()
+    #
+    #     self.sock.settimeout(None)
+    #     self.sock.close()
+    #     print("Node stopped")

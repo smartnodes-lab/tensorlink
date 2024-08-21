@@ -504,13 +504,12 @@ class DistributedModel(nn.Module):
 
     def wrap_module(self, module_id: list, worker_id):
         child_module, module_name = access_module(self.model, module_id)
-        module_hash = self.get_info_from_module_id(module_id)
-
         parent_module = (
             access_module(self.model, module_id[:-1])[0]
             if len(module_id) > 1
             else self.model
         )
+        module_hash = self.get_info_from_module_id(module_id)
 
         # Remove offloaded module from main model optimizer
         child_params = set(
@@ -519,16 +518,12 @@ class DistributedModel(nn.Module):
 
         child_module.id = module_hash
         child_module.n_micro_batch = self.n_micro_batch
-
         current_params = {name: param for name, param in self.named_parameters()}
 
         # Remove the parameters of the child_module from the current parameters
         for name, param in list(current_params.items()):
             if param in child_params:
                 del self.state_dict()[name]
-
-        # Load the updated parameters into the model
-        # self.load_state_dict(current_params)
 
         del current_params
 
@@ -559,9 +554,8 @@ class DistributedModel(nn.Module):
         Sends a request to the node and waits for the response.
         """
         request = {"type": request_type, "args": args}
-
         try:
-            self.mpc_lock.acquire()  # Acquire the MPC lock
+            self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
 

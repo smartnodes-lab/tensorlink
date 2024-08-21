@@ -1,5 +1,3 @@
-import os
-
 from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 from src.ml.utils import *
 
@@ -7,20 +5,24 @@ import threading
 import torch
 import queue
 import time
+import os
 
 
 class DistributedWorker:
     def __init__(self, node_requests, node_responses, mpc_lock):
         self.node_requests = node_requests
         self.node_responses = node_responses
+        self.mpc_lock = mpc_lock
 
         self.modules = {}
         self.optimizers = {}
         self.terminate = False
         self.lock = threading.Lock()
-        self.mpc_lock = mpc_lock
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        torch._dynamo.config.suppress_errors = True
+        torch.set_num_threads(8)
 
     def train_loop(self):
         while not self.terminate:
@@ -113,15 +115,14 @@ class DistributedWorker:
         Sends a request to the node and waits for the response.
         """
         request = {"type": request_type, "args": args}
-
         try:
-            self.mpc_lock.acquire()  # Acquire the MPC lock
+            self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
 
         except Exception as e:
             print(f"Error sending request: {e}")
-            response = {"error": str(e)}
+            response = {"response": str(e)}
 
         finally:
             self.mpc_lock.release()
@@ -149,8 +150,7 @@ class DistributedWorker:
                     with self.lock:
                         self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
                         self.modules[module_id] = module
-
-                    self.send_request("module_loaded", module_id)
+                        self.send_request("module_loaded", module_id)
 
             if self.modules:
                 for module_id in self.modules.keys():
@@ -175,5 +175,7 @@ class DistributedWorker:
     def run(self):
         node_check_thread = threading.Thread(target=self.check_node)
         node_check_thread.start()
+
         self.train_loop()
+
         node_check_thread.join()
