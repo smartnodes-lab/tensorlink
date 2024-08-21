@@ -5,12 +5,14 @@ import threading
 import torch
 import queue
 import time
+import os
 
 
 class DistributedWorker:
-    def __init__(self, node_requests, node_responses):
+    def __init__(self, node_requests, node_responses, mpc_lock):
         self.node_requests = node_requests
         self.node_responses = node_responses
+        self.mpc_lock = mpc_lock
 
         self.modules = {}
         self.optimizers = {}
@@ -114,13 +116,18 @@ class DistributedWorker:
         """
         request = {"type": request_type, "args": args}
         try:
+            self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
 
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"response": str(e)}
+
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
     def check_node(self):
         update_check_interval = 25
@@ -131,9 +138,10 @@ class DistributedWorker:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
-                    size, name, module_id, node_id = args
+                    file_name, module_id, node_id = args
+                    module = torch.load(file_name).to(self.device)
+                    os.remove(file_name)
 
-                    module = get_from_shared_memory(size, name).to(self.device)
                     module.forward_queue = queue.Queue()
                     module.backward_queue = queue.Queue()
                     module.intermediates = {}
@@ -166,7 +174,6 @@ class DistributedWorker:
 
     def run(self):
         node_check_thread = threading.Thread(target=self.check_node)
-
         node_check_thread.start()
 
         self.train_loop()

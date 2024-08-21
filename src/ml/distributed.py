@@ -12,6 +12,7 @@ import hashlib
 import random
 import queue
 import time
+import gc
 
 MAX_WAIT_TIME = 300
 THREAD_STORAGE = threading.local()
@@ -42,6 +43,7 @@ class DistributedModel(nn.Module):
         self,
         node_requests,
         node_responses,
+        mpc_lock,
         model: nn.Module,
         n_pipelines: int,
         device=None
@@ -51,6 +53,7 @@ class DistributedModel(nn.Module):
         # Node process communication params
         self.node_requests = node_requests
         self.node_responses = node_responses
+        self.mpc_lock = mpc_lock
 
         self.model = model
         self.user_memory = get_gpu_memory()
@@ -459,7 +462,7 @@ class DistributedModel(nn.Module):
             module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
             # Try to handle on user if specified
-            if self.user_memory >= module_memory:
+            if self.user_memory >= module_memory and handled_layer is False:
                 # If user can handle the layer
 
                 self.user_memory -= module_memory
@@ -506,13 +509,15 @@ class DistributedModel(nn.Module):
             if len(module_id) > 1
             else self.model
         )
-
-        offloaded_module = OffloadedModule(self, worker_id)
+        module_hash = self.get_info_from_module_id(module_id)
 
         # Remove offloaded module from main model optimizer
         child_params = set(
             child_module.parameters()
         )  # Using set for efficient membership check
+
+        child_module.id = module_hash
+        child_module.n_micro_batch = self.n_micro_batch
         current_params = {name: param for name, param in self.named_parameters()}
 
         # Remove the parameters of the child_module from the current parameters
@@ -520,18 +525,25 @@ class DistributedModel(nn.Module):
             if param in child_params:
                 del self.state_dict()[name]
 
-        # Load the updated parameters into the model
-        # self.load_state_dict(current_params)
+        del current_params
+
+        offloaded_module = OffloadedModule(self, worker_id, module_hash)
+        # size, name = store_in_shared_memory(child_module)
+        file_name = module_hash.decode() + worker_id.decode()
+        torch.save(child_module, file_name)
+
+        # Clear the module's parameters explicitly
+        del child_module
+        gc.collect()  # Force garbage collection
+
+        # Spawn a worker thread for the offloaded module
+        offloaded_module.spawn_worker(file_name)
 
         if isinstance(parent_module, nn.ModuleList):
             parent_module[module_id[-1]] = offloaded_module
         else:
             child_name = list(parent_module.named_children())[module_id[-1]][0]
             setattr(parent_module, child_name, offloaded_module)
-
-        # Spawn a worker thread for the offloaded module
-        module_hash = self.get_info_from_module_id(module_id)
-        offloaded_module.spawn_worker(child_module, module_hash)
 
         # spawn_worker = threading.Thread(target=offloaded_module.spawn_worker, args=(child_module, module_id))
         # spawn_worker.start()
@@ -543,12 +555,18 @@ class DistributedModel(nn.Module):
         """
         request = {"type": request_type, "args": args}
         try:
+            self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
+
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"error": str(e)}
+
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
 
 class OffloadedModule(nn.Module):
@@ -558,26 +576,21 @@ class OffloadedModule(nn.Module):
         pytorch model flow.
     """
 
-    def __init__(self, parent_model: DistributedModel, worker_id):
+    def __init__(self, parent_model: DistributedModel, worker_id, module_id: bytes):
         super(OffloadedModule, self).__init__()
 
         self.parent_model = parent_model
         self.worker_id = worker_id
-        self.module_id = None
+        self.module_id = module_id
 
-    def spawn_worker(self, module: nn.Module, module_id: bytes):
+    def spawn_worker(self, name):
         # # Initialize a threading Timer to monitor the loading process
         # timer = threading.Timer(MAX_WAIT_TIME, self.handle_timeout)
         # timer.start()
 
         # try:
         # Send the module to the worker node
-        self.module_id = module_id
-        module.id = self.module_id
-        module.n_micro_batch = self.parent_model.n_micro_batch
-
-        size, name = store_in_shared_memory(module)
-        self.parent_model.send_request("send_model", (size, name, self.worker_id, self.module_id))
+        self.parent_model.send_request("send_model", (name, self.worker_id, self.module_id))
 
         # Wait for the module to be loaded on worker
         waiting = True

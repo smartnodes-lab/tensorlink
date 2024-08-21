@@ -7,8 +7,8 @@ import time
 
 if __name__ == "__main__":
 
-    # user = DistributedCoordinator()
-    # time.sleep(0.2)
+    user = DistributedCoordinator()
+    time.sleep(0.2)
     worker = WorkerCoordinator()
     time.sleep(0.2)
     validator = ValidatorCoordinator()
@@ -17,6 +17,7 @@ if __name__ == "__main__":
     val_key, val_host, val_port = validator.send_request("info", None)
 
     worker.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (val_key, val_host, val_port))
 
     while True:
         pass

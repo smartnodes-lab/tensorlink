@@ -29,6 +29,7 @@ class BaseCoordinator:
 
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
+        self.mpc_lock = multiprocessing.Lock()
 
         self.init_kwargs = kwargs
 
@@ -53,12 +54,16 @@ class BaseCoordinator:
         """
         request = {"type": request_type, "args": args}
         try:
+            self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
-            return response["return"]
         except Exception as e:
             print(f"Error sending request: {e}")
-            return {"error": str(e)}
+            response = {"return": str(e)}
+        finally:
+            self.mpc_lock.release()
+
+        return response["return"]
 
     def run_role(self):
         raise NotImplementedError("Subclasses must implement this method")
@@ -81,7 +86,7 @@ class DistributedCoordinator(BaseCoordinator):
         self.node_process = role_instance
 
     def create_distributed_model(self, model, n_pipelines, dp_factor, config=None):  # TODO Max module size etc?
-        dist_model = DistributedModel(self.node_requests, self.node_responses, model, dp_factor)
+        dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, dp_factor)
 
         self.send_request("request_workers", None)
         time.sleep(1)
@@ -127,6 +132,9 @@ class WorkerCoordinator(BaseCoordinator):
         role_instance.activate()
         self.node_process = role_instance
 
-        distributed_worker = DistributedWorker(self.node_requests, self.node_responses)
+        self.run_distributed_worker()
+
+    def run_distributed_worker(self):
+        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
+        distributed_worker = multiprocessing.Process(target=distributed_worker.run)
         distributed_worker.run()
-        self.distributed_worker = distributed_worker
