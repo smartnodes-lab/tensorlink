@@ -4,6 +4,7 @@ venv/
 keys/
 .DS_Store
 .idea
+.env
 
 # Ignore backup files creates by cargo fmt.
 *.rs.bk

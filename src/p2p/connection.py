@@ -38,7 +38,7 @@ class Connection(threading.Thread):
         self.node_key = node_key
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
-        self.sock.settimeout(60)
+        self.sock.settimeout(5)
         self.chunk_size = 1024 * 1024 * 4 * 4
 
         # End of transmission + compression characters for the network messages.
@@ -229,7 +229,7 @@ class Connection(threading.Thread):
 
     """
     Connection thread between two nodes that are able to send/stream data from/to
-    the connected node.
+    the connected nodes.
 
     TODO
         Send message size before to prepare accordingly.

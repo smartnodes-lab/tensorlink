@@ -47,9 +47,10 @@ class TorchNode(SmartNode):
         # Available GPU mpc estimation
         self.available_memory = get_gpu_memory()
 
+        self.mpc_comms = None
+        self.memory_manager = {}
         self.request_queue = request_queue
         self.response_queue = response_queue
-        self.memory_manager = {}
 
         # Pointers to model parameters in DistributedModels
         self.modules = {}
@@ -107,7 +108,7 @@ class TorchNode(SmartNode):
                 elif b"PARAMS-REQ" == data[:10]:
                     self.debug_print(f"RECEIVED PARAMS REQUEST")
 
-                    # TODO Must ensure requesting node is indeed the master or an overseeing validator
+                    # TODO Must ensure requesting nodes is indeed the master or an overseeing validator
                     module_id = data[10:]
                     self.send_parameters(
                         node, self.modules[module_id].parameters(), module_id
@@ -159,29 +160,33 @@ class TorchNode(SmartNode):
             self.debug_print(f"handle_data: Error handling data: {e}")
 
     def handle_requests(self, request=None):
-        """Handles interactions between model and node processes"""
+        """Handles interactions between model and nodes processes"""
         if request is None:
-            request = self.request_queue.get()
+            try:
+                request = self.request_queue.get(timeout=3)
+
+            except queue.Empty:
+                return
 
         req_type = request["type"]
 
         if req_type == "get_connection":
-            # Get connection info from a node id
+            # Get connection info from a nodes id
             node_id = request["args"]
             node = self.nodes[node_id]
             self.response_queue.put({"status": "SUCCESS", "return": node})
 
         elif req_type == "send_model":
-            # Send module that is stored in shared mpc to another node
+            # Send module that is stored in shared mpc to another nodes
             name, worker_id, module_id = request["args"]
             node = self.nodes[worker_id]
             # model_bytes = get_from_shared_memory(size, name, encoded=True)
-            # self.send_module(module_id, model_bytes, node)
+            # self.send_module(module_id, model_bytes, nodes)
             self.send_module(name, module_id, node)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "check_loaded":
-            # Check if sent module has been received and loaded on the other node
+            # Check if sent module has been received and loaded on the other nodes
             worker_id = request["args"]
             return_val = False
 
@@ -191,7 +196,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
         elif req_type == "module_loaded":
-            # Send module loaded message to node
+            # Send module loaded message to nodes
             module_id = request["args"]
             node_id = self.modules[module_id]["host"]
             node = self.nodes[node_id]
@@ -199,7 +204,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_forward":
-            # Send forward pass tensor from shared mpc to a node
+            # Send forward pass tensor from shared mpc to a nodes
             worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
             forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
@@ -207,7 +212,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_backward":
-            # Send backwards pass from shared mpc to a node
+            # Send backwards pass from shared mpc to a nodes
             worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
             backward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
@@ -342,10 +347,10 @@ class TorchNode(SmartNode):
             self.stop()
 
     def send_forward(self, node: Connection, forward_bytes, context):
-        """Send forward pass to node, must contain args (module args) and context (module + epoch id)"""
+        """Send forward pass to nodes, must contain args (module args) and context (module + epoch id)"""
         size = str(len(forward_bytes)).encode() + b"::"
         pickled_data = b"FORWARD" + size + forward_bytes + pickle.dumps(context)
-        # self.store_request(node.node_id, )
+        # self.store_request(nodes.node_id, )
         self.send_to_node(node, pickled_data)
 
     def store_tensor_in_shared_memory(self, key, tensor: bytes, backward=False):
@@ -376,10 +381,10 @@ class TorchNode(SmartNode):
         self.memory_manager[key] = shm.name
 
     def send_backward(self, node: Connection, backward_bytes, context):
-        """Send backward pass to node, must contain args (module args) and context (module + epoch id)"""
+        """Send backward pass to nodes, must contain args (module args) and context (module + epoch id)"""
         size = str(len(backward_bytes)).encode() + b"::"
         pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
-        # self.store_request(node.node_id, )
+        # self.store_request(nodes.node_id, )
         self.send_to_node(node, pickled_data)
 
     def send_parameters(self, node: Connection, parameters, module_id):
@@ -412,31 +417,11 @@ class TorchNode(SmartNode):
                 return mod_hash
         return None
 
-    # def run(self):
-    #     # Accept users and back-check history
-    #     # Get proposees from SC and send our state to them
-    #     # If we are the next proposee, accept info from validators and only add info to the final state if there are
-    #     # 2 or more of the identical info
-    #     listener = threading.Thread(target=self.listen, daemon=True)
-    #     listener.start()
-    #
-    #     mp_comms = threading.Thread(target=self.listen_requests, daemon=True)
-    #     mp_comms.start()
-    #
-    #     while not self.terminate_flag.is_set():
-    #         # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-    #         pass
-    #
-    #     print("Node stopping...")
-    #     for node in self.nodes.values():
-    #         node.stop()
-    #
-    #     for node in self.nodes.values():
-    #         node.join()
-    #
-    #     listener.join()
-    #     mp_comms.join()
-    #
-    #     self.sock.settimeout(None)
-    #     self.sock.close()
-    #     print("Node stopped")
+    def run(self):
+        super().run()
+        self.mpc_comms = threading.Thread(target=self.listen_requests, daemon=True)
+        self.mpc_comms.start()
+
+    def stop(self):
+        super().stop()
+        self.mpc_comms.join()

@@ -46,17 +46,19 @@ if __name__ == "__main__":
     # worker2.send_request("connect_node", (val_key, val_host, val_port))
     user.send_request("connect_node", (val_key, val_host, val_port))
 
-    # user.send_request("connect_node", (b"test-val-node", "192.168.2.177", 38752))
+    # user.send_request("connect_node", (b"test-val-nodes", "192.168.2.177", 38752))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    time.sleep(1000)
 
     # tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
     #                                           token="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")
     # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
     #                                              token="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")
 
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
-
-    distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR)
-    train(distributed_model, tokenizer, device, logger, BATCH_SIZE)
+    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
+    #
+    # distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR)
+    # train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

@@ -10,7 +10,7 @@ distributed_module_ids = []
 
 
 def get_gpu_memory():
-    # Check how much available mpc we can allocate to the node
+    # Check how much available mpc we can allocate to the nodes
     memory = 0
 
     if torch.cuda.is_available():

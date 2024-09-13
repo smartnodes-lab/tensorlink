@@ -94,10 +94,10 @@ dag = DAG(model, dummy_in)
 # import re
 #
 #
-# def _node_get(node: torch._C.Node, key: str):
-#     """Gets attributes of a node which is polymorphic over return type."""
-#     sel = node.kindOf(key)
-#     return getattr(node, sel)(key)
+# def _node_get(nodes: torch._C.Node, key: str):
+#     """Gets attributes of a nodes which is polymorphic over return type."""
+#     sel = nodes.kindOf(key)
+#     return getattr(nodes, sel)(key)
 #
 #
 # torch._C.Node.__getitem__ = _node_get
@@ -142,14 +142,14 @@ dag = DAG(model, dummy_in)
 #     return shape
 #
 #
-# def torch_id(node):
-#     # op = node.kind()
+# def torch_id(nodes):
+#     # op = nodes.kind()
 #     # input_ids = [i.unique()]
-#     return node.scopeName() + "/outputs/" + "/".join(["{}".format(o.unique()) for o in node.outputs()])
+#     return nodes.scopeName() + "/outputs/" + "/".join(["{}".format(o.unique()) for o in nodes.outputs()])
 #
 #
-# def node_id(node):
-#     return node.id if hasattr(node, "id") else hash(node)
+# def node_id(nodes):
+#     return nodes.id if hasattr(nodes, "id") else hash(nodes)
 #
 #
 # class Node:
@@ -189,7 +189,7 @@ dag = DAG(model, dummy_in)
 #             if stride != 1:
 #                 title += "/s{}".format(str(stride))
 #         #         # Transposed
-#         #         if node.transposed:
+#         #         if nodes.transposed:
 #         #             name = "Transposed" + name
 #         return title
 #
@@ -230,9 +230,9 @@ dag = DAG(model, dummy_in)
 #         self.edges = []
 #         self.theme = THEMES["basic"]
 #
-#     def add_node(self, node):
-#         id = node_id(node)
-#         self.nodes[id] = node
+#     def add_node(self, nodes):
+#         id = node_id(nodes)
+#         self.nodes[id] = nodes
 #
 #     def add_edge(self, node1, node2, label=None):
 #         edge = (node_id(node1), node_id(node2), label)
@@ -242,28 +242,28 @@ dag = DAG(model, dummy_in)
 #     def add_edge_by_id(self, vid1, vid2, label=None):
 #         self.edges.append((vid1, vid2, label))
 #
-#     def outgoing(self, node):
-#         nodes = node if isinstance(node, list) else [node]
+#     def outgoing(self, nodes):
+#         nodes = nodes if isinstance(nodes, list) else [nodes]
 #         node_ids = [node_id(n) for n in nodes]
 #         outgoing = [self[e[1]] for e in self.edges if e[0] in node_ids
 #                     and e[1] not in node_ids]
 #         return outgoing
 #
-#     def incoming(self, node):
-#         nodes = node if isinstance(node, list) else [node]
+#     def incoming(self, nodes):
+#         nodes = nodes if isinstance(nodes, list) else [nodes]
 #         node_ids = [node_id(n) for n in nodes]
 #         incoming = [self[e[0]] for e in self.edges if e[1] in node_ids
 #                     and e[0] not in node_ids]
 #         return incoming
 #
-#     def siblings(self, node):
-#         incoming = self.incoming(node)
+#     def siblings(self, nodes):
+#         incoming = self.incoming(nodes)
 #         if len(incoming) == 1:
 #             incoming = incoming[0]
 #             siblings = self.outgoing(incoming)
 #             return siblings
 #         else:
-#             return [node]
+#             return [nodes]
 #
 #     def __getitem__(self, key):
 #         if isinstance(key, list):
@@ -272,32 +272,32 @@ dag = DAG(model, dummy_in)
 #             return self.nodes.get(key)
 #
 #     def remove(self, nodes):
-#         """Remove a node and its edges."""
+#         """Remove a nodes and its edges."""
 #         nodes = nodes if isinstance(nodes, list) else [nodes]
-#         for node in nodes:
-#             k = self.id(node)
+#         for nodes in nodes:
+#             k = self.id(nodes)
 #             self.edges = list(filter(lambda e: e[0] != k and e[1] != k, self.edges))
 #             del self.nodes[k]
 #
-#     def replace(self, nodes, node):
-#         """Replace nodes with node. Edges incoming to nodes[0] are connected to
-#         the new node, and nodes outgoing from nodes[-1] become outgoing from
-#         the new node."""
+#     def replace(self, nodes, nodes):
+#         """Replace nodes with nodes. Edges incoming to nodes[0] are connected to
+#         the new nodes, and nodes outgoing from nodes[-1] become outgoing from
+#         the new nodes."""
 #         nodes = nodes if isinstance(nodes, list) else [nodes]
-#         # Is the new node part of the replace nodes (i.e. want to collapse
+#         # Is the new nodes part of the replace nodes (i.e. want to collapse
 #         # a group of nodes into one of them)?
-#         collapse = node_id(node) in self.nodes
-#         # Add new node and edges
+#         collapse = node_id(nodes) in self.nodes
+#         # Add new nodes and edges
 #         if not collapse:
-#             self.add_node(node)
+#             self.add_node(nodes)
 #         for in_node in self.incoming(nodes):
 #             # TODO: check specifically for output_shape is not generic. Consider refactoring.
-#             self.add_edge(in_node, node, in_node.output_shape if hasattr(in_node, "output_shape") else None)
+#             self.add_edge(in_node, nodes, in_node.output_shape if hasattr(in_node, "output_shape") else None)
 #         for out_node in self.outgoing(nodes):
-#             self.add_edge(node, out_node, node.output_shape if hasattr(node, "output_shape") else None)
+#             self.add_edge(nodes, out_node, nodes.output_shape if hasattr(nodes, "output_shape") else None)
 #         # Remove the old nodes
 #         for n in nodes:
-#             if collapse and n == node:
+#             if collapse and n == nodes:
 #                 continue
 #             self.remove(n)
 #
@@ -305,8 +305,8 @@ dag = DAG(model, dummy_in)
 #         """Searches the graph for a sub-graph that matches the given pattern
 #         and returns the first match it finds.
 #         """
-#         for node in self.nodes.values():
-#             match, following = pattern.match(self, node)
+#         for nodes in self.nodes.values():
+#             match, following = pattern.match(self, nodes)
 #             if match:
 #                 return match, following
 #         return [], None
@@ -321,13 +321,13 @@ dag = DAG(model, dummy_in)
 #         for torch_node in torch_graph.nodes():
 #             op = torch_node.kind() + str(torch_node.output().type().sizes())
 #             params = {k: torch_node[k] for k in torch_node.attributeNames()}
-#             outputs = [o.unique() for o in torch_node.outputs()]  # TODO: inputs = [i.unique() for i in node.inputs()]
+#             outputs = [o.unique() for o in torch_node.outputs()]  # TODO: inputs = [i.unique() for i in nodes.inputs()]
 #
 #             # Get output shape
 #             output_shape = get_shape(torch_node)
 #             node_name = torch_id(torch_node)
 #
-#             # Add HL node
+#             # Add HL nodes
 #             hl_node = Node(uid=node_name, name=None, op=op,
 #                            output_shape=output_shape, params=params)
 #             # hl_node.memory_reqs = estimate_memory_requirement()
@@ -357,7 +357,7 @@ dag = DAG(model, dummy_in)
 #                  margin=self.theme["margin"],
 #                  rankdir="TD",
 #                  pad=self.theme["padding"])
-#         dot.attr("node", shape="box",
+#         dot.attr("nodes", shape="box",
 #                  style="filled", margin="0,0",
 #                  fillcolor=self.theme["fill_color"],
 #                  color=self.theme["outline_color"],
@@ -377,7 +377,7 @@ dag = DAG(model, dummy_in)
 #             if n.repeat > 1:
 #                 label += "<tr><td align='right' cellpadding='2'>x{}</td></tr>".format(n.repeat)
 #             label = "<<table border='0' cellborder='0' cellpadding='0'>" + label + "</table>>"
-#             dot.node(str(k), label)
+#             dot.nodes(str(k), label)
 #
 #         for a, b, label in self.edges:
 #             if isinstance(label, (list, tuple)):

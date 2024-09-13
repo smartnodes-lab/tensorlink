@@ -6,7 +6,7 @@ def create_endpoint(smart_node):
     app = Flask(__name__)
     CORS(app)
 
-    @app.route("/node", methods=["GET"])
+    @app.route("/nodes", methods=["GET"])
     def post_node_info():
         response = smart_node.get_self_info()
         return jsonify(response), 200

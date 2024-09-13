@@ -19,17 +19,23 @@ import os
 load_dotenv()
 
 # Grab smart contract information
-CHAIN_URL = os.getenv("CHAIN_URL")
-CONTRACT = os.getenv("CONTRACT")
-
 base_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(base_dir, '..', 'config', 'SmartNodes.json')
+config_path = os.path.join(base_dir, '..', 'config', 'SmartnodesCore.json')
+ms_config_path = os.path.join(base_dir, '..', 'config', 'SmartnodesMultiSig.json')
+
+with open(os.path.join(base_dir, "..", "config", "config.json"), "r") as f:
+    config = json.load(f)
+    CHAIN_URL = config["api"]["chain-url"]
+    CONTRACT = config["api"]["core"]
+    MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
 
 with open(config_path, "r") as f:
     METADATA = json.load(f)
-
 ABI = METADATA["abi"]
-PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+
+with open(ms_config_path, "r") as f:
+    MS_METADATA = json.load(f)
+MULTI_SIG_ABI = MS_METADATA["abi"]
 
 # Configure logging with TimedRotatingFileHandler
 log_handler = TimedRotatingFileHandler(
@@ -64,17 +70,26 @@ def hash_key(key: bytes, number=False):
 
 def calculate_xor(key_hash, node_id):
     """
-    Calculate the XOR distance between a key and a node ID.
+    Calculate the XOR distance between a key and a nodes ID.
     """
     return int(key_hash, 16) ^ int(node_id, 16)
 
 
 def get_connection_info(node, main_port=None):
     """Connection info for routing table storage"""
+    role_metadata = {}
+
+    if node.role == b"U":
+        role_metadata["active_job"] = None
+
+    elif node.role == b"V":
+        pass
+
     info = {
         "host": node.host,
         "port": node.port if not main_port else main_port,
         "role": node.role,
+        "role_metadata": role_metadata,
         "id": node.node_id,
         "reputation": node.reputation,
     }
@@ -82,7 +97,7 @@ def get_connection_info(node, main_port=None):
 
 
 def log_entry(node, metadata):
-    entry = {"timestamp": time.ctime(), "node": node.node_id, "metadata": metadata}
+    entry = {"timestamp": time.ctime(), "nodes": node.node_id, "metadata": metadata}
     logging.info(json.dumps(entry))
 
 
@@ -108,14 +123,12 @@ class Bucket:
 
 class SmartNode(threading.Thread):
     """
-    A P2P node secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
+    A P2P nodes secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
     Combines smart contract queries and a kademlia-like DHT implementation for data storage and access.
     """
 
     def __init__(
         self,
-        url: str = CHAIN_URL,
-        contract: str = CONTRACT,
         debug: bool = False,
         max_connections: int = 0,
         upnp: bool = True,
@@ -124,8 +137,11 @@ class SmartNode(threading.Thread):
     ):
         super(SmartNode, self).__init__()
 
-        # Node Parameters
+        # Node info
         self.terminate_flag = threading.Event()
+        self.connection_listener = None
+
+        # Connection info
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         # Get private ip
@@ -139,16 +155,16 @@ class SmartNode(threading.Thread):
         self.debug = debug
         self.max_connections = max_connections
 
+        # Connection Settings
+        self.upnp = None
+        self.nodes = {}  # nodes-hash: Connection
+        self.node_stats = (
+            {}
+        )  # nodes-hash: {message counts & other key stats to keep track of}
+
         self.debug_colour = None
         if debug_colour:
             self.debug_colour = debug_colour
-
-        self.upnp = None
-        self.off_chain_test = off_chain_test
-        self.nodes = {}  # node-hash: Connection
-        self.node_stats = (
-            {}
-        )  # node-hash: {message counts & other key stats to keep track of}
 
         # DHT Parameters
         self.replication_factor = 3
@@ -170,6 +186,7 @@ class SmartNode(threading.Thread):
         self.jobs = []
 
         self.sno_events = {name: Web3.keccak(text=sig).hex() for name, sig in SNO_EVENT_SIGNATURES.items()}
+        self.off_chain_test = off_chain_test
 
         if upnp:
             self.init_upnp()
@@ -177,15 +194,18 @@ class SmartNode(threading.Thread):
         self.init_sock()
 
         if self.off_chain_test is False:
-            # Smart node parameters for additional security and contract connectivity
-            self.url = url
-            self.chain = Web3(Web3.HTTPProvider(url))
-            self.contract_address = Web3.to_checksum_address(contract)
+            # Smart nodes parameters for additional security and contract connectivity
+            self.url = CHAIN_URL
+            self.chain = Web3(Web3.HTTPProvider(CHAIN_URL))
+            self.contract_address = Web3.to_checksum_address(CONTRACT)
 
             # Grab the SmartNode contract
             try:
                 self.contract = self.chain.eth.contract(
                     address=self.contract_address, abi=ABI
+                )
+                self.multi_sig_contract = self.chain.eth.contract(
+                    address=MULTI_SIG_CONTRACT, abi=MULTI_SIG_ABI
                 )
 
             except Exception as e:
@@ -194,7 +214,7 @@ class SmartNode(threading.Thread):
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
-        Handles incoming data from node connections and performs an appropriate response.
+        Handles incoming data from nodes connections and performs an appropriate response.
         Each chunk of data has a tag at the beginning which defines the message type.
         """
         try:
@@ -236,7 +256,7 @@ class SmartNode(threading.Thread):
             elif b"REQUEST-VALUE-RESPONSE" == data[:22]:
                 # Retrieve the value associated with the key from the DHT
                 self.debug_print(
-                    f"handle_data: node ({node.host}:{node.port}) returned value."
+                    f"handle_data: nodes ({node.host}:{node.port}) returned value."
                 )
 
                 # Not enough data received for specific request
@@ -263,7 +283,7 @@ class SmartNode(threading.Thread):
             elif b"REQUEST-VALUE" == data[:13]:
                 # TODO Check of how many requests they have sent recently to prevent spam
                 self.debug_print(
-                    f"handle_data: node ({node.host}:{node.port}) requested value."
+                    f"handle_data: nodes ({node.host}:{node.port}) requested value."
                 )
                 validator_info = None
                 value_hash = None
@@ -275,7 +295,7 @@ class SmartNode(threading.Thread):
                     value_hash = data[13:77]
                     requester = data[77:141]
 
-                    # Get node info
+                    # Get nodes info
                     validator_info = self.query_dht(value_hash, requester)
 
                 # Send back response
@@ -311,294 +331,19 @@ class SmartNode(threading.Thread):
                 reset_colour = "\033[0m"
                 print(f"{self.debug_colour}{self.host}:{self.port} -> {message}{reset_colour}")
 
-    def listen(self):
-        """Listen for incoming connections and initialize custom handshake"""
-        while not self.terminate_flag.is_set():
-            try:
-                # Unpack node info
-                connection, node_address = self.sock.accept()
-
-                # Attempt custom handshake
-                if self.max_connections == 0 or len(self.nodes) < self.max_connections:
-                    self.handshake(connection, node_address)
-
-                else:
-                    self.close_connection_socket(
-                        connection,
-                        "listen: connection refused, max connections reached",
-                    )
-
-            except socket.timeout:
-                # self.debug_print(f"listen: connection timeout!")
-                pass
-
-            except Exception as e:
-                self.debug_print(f"listen: connection error {e}")
-
-            # self.reconnect_nodes()
-
-    def handshake(
-        self, connection: socket.socket, node_address, instigator=False
-    ) -> bool:
-        """Validates incoming node's keys via a random number swap, along with SC verification of connecting user"""
-        id_info = connection.recv(4096)
-        _, role, id_no, connected_node_id = pickle.loads(id_info)
-        node_id_hash = hashlib.sha256(connected_node_id).hexdigest().encode()
-
-        # Query node info/history from dht for reputation if we are a validator
-        if self.role == b"V":
-            if len(self.nodes) > 0:
-                node_info = self.query_dht(node_id_hash)
-                if node_info:
-                    if node_info["reputation"] == 0:
-                        self.debug_print(
-                            f"User with poor reputation attempting connection: {node_id_hash}"
-                        )
-                        connection.close()
-
-        # If we are the instigator of the connection, we will have received a request to verify our id
-        if instigator:
-            encrypted_number = _
-            proof = decrypt(encrypted_number, self.role)
-
-            try:
-                proof = float(proof)
-
-            except Exception as e:
-                self.close_connection_socket(
-                    connection, f"Proof request was not valid: {e}"
-                )
-                return False
-
-        # Confirm their key is a valid RSA key
-        if authenticate_public_key(connected_node_id):
-            # Role-specific confirmations (Must be U, W, or V to utilize smart nodes, tensorlink, etc.)
-            if self.off_chain_test is False:
-                if role == b"V":
-                    try:
-                        # Query contract for users key hash
-                        validator_info = self.contract.functions.getValidatorInfo(
-                            id_no
-                        ).call()
-
-                        # If validator was not found
-                        if not validator_info[0]:
-                            self.close_connection_socket(
-                                connection,
-                                f"handshake: validator role claimed but is not "
-                                f"listed on Smart Nodes!: {connected_node_id}",
-                            )
-                            self.update_node_stats(node_id_hash, "GHOST")
-                            # TODO: potentially some form of reporting mechanism via ip and port
-                            return False
-
-                    except Exception as e:
-                        self.close_connection_socket(
-                            connection, f"handshake: contract query error: {e}"
-                        )
-
-                elif role == b"U":
-                    # TODO: user handling, to be done once users are required to register (post-alpha)
-                    pass
-
-                elif role == b"W":
-                    # TODO: worker handling
-                    pass
-
-                else:
-                    # TODO: potentially some form of reporting mechanism via ip and port
-                    self.close_connection_socket(
-                        connection,
-                        f"listen: connection refused, invalid role: {node_address}",
-                    )
-
-            # Random number swap to confirm the nodes RSA key
-            rand_n = random.random()
-            encrypted_number = encrypt(str(rand_n).encode(), self.role, connected_node_id)
-
-            # Encrypt random number with node's key to confirm their identity
-            # If we are the instigator, we will also need to send our proof
-            if instigator:
-                # Send main port if we are the instigator
-                message = pickle.dumps((self.port, proof, encrypted_number))
-            else:
-                message = pickle.dumps(
-                    (encrypted_number, self.role, self.id, self.rsa_pub_key)
-                )
-
-            connection.send(message)
-
-            # Await response
-            response = connection.recv(4096)
-
-            if instigator:
-                # We have already verified ours and just want to confirm theirs
-                try:
-                    rand_n_proof = float(response)
-                    main_port = node_address[1]
-
-                except Exception as e:
-                    self.close_connection_socket(
-                        connection, f"Proof was not valid: {e}"
-                    )
-                    return False
-            else:
-                # Unpack response (verification of their ID along with a request to verify ours)
-                response = pickle.loads(response)
-                main_port, rand_n_proof, verification = response
-                verification = decrypt(verification, self.role)
-
-                # Send our verification (their random number request)
-                connection.send(verification)
-
-            # If the node has confirmed his identity
-            if rand_n_proof == rand_n:
-                # If ID is confirmed, we solidify the connection
-                thread_client = self.create_connection(
-                    connection,
-                    node_address[0],
-                    node_address[1],
-                    main_port,
-                    connected_node_id,
-                    role,
-                )
-                thread_client.start()
-
-                # Check to see if we are already connected
-                for node in self.nodes.values():
-                    if node.host == node_address[0] and node.port == node_address[1]:
-                        self.debug_print(
-                            f"connect_with_node: already connected with node: {node.node_id}"
-                        )
-                        self.close_connection(thread_client)
-                        return False
-
-                # Finally connect to the node
-                if not thread_client.terminate_flag.is_set():
-                    self.debug_print(
-                        f"Connected to node: {thread_client.host}:{thread_client.port}"
-                    )
-                    self.nodes[node_id_hash] = thread_client
-
-                    self.store_value(
-                        node_id_hash,
-                        get_connection_info(
-                            thread_client, main_port if not instigator else None
-                        ),
-                    )
-
-                    if role == b"V":
-                        self.validators.append(node_id_hash)
-                    elif role == b"W":
-                        self.workers.append(node_id_hash)
-                    elif role == b"U":
-                        self.users.append(node_id_hash)
-
-                    return True
-
-                else:
-                    return False
-
-            else:
-                self.close_connection_socket(connection, "Proof request was not valid.")
-                return False
-
-        else:
-            self.close_connection_socket(connection, "RSA key was not valid.")
-            return False
-
-    def connect_node(
-        self, id_hash: bytes, host: str, port: int, reconnect: bool = False
-    ) -> bool:
-        """
-        Connect to a node and exchange information to confirm its role in the Smart Nodes network.
-        """
-        can_connect = self.can_connect(host, port)
-
-        # Check that we are not already connected
-        if id_hash in self.nodes:
-            self.debug_print(f"connect_node: Already connected to {id_hash}")
-            return True
-
-        if can_connect:
-            try:
-                our_port = self.get_next_port()
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind((self.host, our_port))
-                sock.connect((host, port))
-            except Exception as e:
-                self.debug_print(
-                    f"connect_node: could not initialize connection to {host}:{port} -> {e}"
-                )
-                return False
-
-            self.debug_print(f"connect_node: connecting to {host}:{port}")
-            message = pickle.dumps((None, self.role, self.id, self.rsa_pub_key))
-            sock.send(message)
-            return self.handshake(sock, (host, port), instigator=True)
-        else:
-            return False
-
-    def bootstrap(self):
-        """Bootstrap node to existing validators"""
-        if self.off_chain_test is True:
-            return
-
-        n_validators = self.get_validator_count()
-        sample_size = min(n_validators, 6)
-        candidates = []
-
-        # Connect to randomly selected validators
-        while len(candidates) < sample_size and len(self.validators) < sample_size:
-            # Random validator id
-            validator_id = random.randrange(1, n_validators + 1)
-
-            # Get key validator information from smart contract
-            validator_contract_info = self.get_validator_info(validator_id)
-
-            if validator_contract_info is not None:
-                is_active, id_hash = validator_contract_info
-                id_hash = id_hash.encode()
-                validator_p2p_info = self.query_dht(id_hash)
-
-                if validator_p2p_info is None:
-                    self.delete(id_hash)
-                    continue
-
-                # Check to see if we are already connected
-                already_connected = False
-                for node in self.nodes.values():
-                    if (
-                        node.host == validator_p2p_info["host"]
-                        and node.port == validator_p2p_info["port"]
-                    ):
-                        already_connected = True
-                        break
-
-                # Connect to the validator's node and exchange information
-                # TODO what if we receive false connection info from validator: how to report?
-                connected = self.connect_node(
-                    id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
-                )
-
-                if not connected:
-                    self.delete(id_hash)
-                    continue
-
-                candidates.append(validator_id)
-
+    """Methods for DHT Query and Storage"""
     def query_dht(
         self, key_hash: bytes, requester: bytes = None, ids_to_exclude: list = None
     ):
         """
-        Retrieve stored value from DHT or query the closest node to a given key.
+        Retrieve stored value from DHT or query the closest nodes to a given key.
         * should be run in its own thread due to blocking RPC
         """
         self.debug_print(f"Querying DHT for {key_hash}")
         closest_node = None
         closest_distance = float("inf")
 
-        # Find nearest node in our routing table
+        # Find nearest nodes in our routing table
         for node_hash, node in self.routing_table.items():
             # Get XOR distance between keys
             distance = calculate_xor(key_hash, node_hash)
@@ -616,12 +361,12 @@ class SmartNode(threading.Thread):
             if closest_node[1] is None:
                 self.delete(closest_node[0])
 
-                # Get another closest node
+                # Get another closest nodes
                 return self.query_dht(key_hash, requester, ids_to_exclude)
 
             # The case where we have the stored value
             elif closest_node[0] == key_hash:
-                # If the stored value is a node, send back its info
+                # If the stored value is a nodes, send back its info
                 if isinstance(closest_node[1], Connection):
                     return closest_node[1].stats
 
@@ -629,7 +374,7 @@ class SmartNode(threading.Thread):
                 else:
                     return closest_node[1]
 
-            # We don't have the stored value, and must route the request to the nearest node
+            # We don't have the stored value, and must route the request to the nearest nodes
             else:
                 if closest_node[0] in self.validators:
                     closest_node_hash = closest_node[1]["id"]
@@ -650,7 +395,7 @@ class SmartNode(threading.Thread):
         requester: bytes = None,
         ids_to_exclude: list = None,
     ):
-        """Query a specific node for a value"""
+        """Query a specific nodes for a value"""
         if requester is None:
             requester = self.rsa_key_hash
 
@@ -658,13 +403,13 @@ class SmartNode(threading.Thread):
         message = b"REQUEST-VALUE" + key_hash + requester
         self.send_to_node(node, message)
 
-        # Logs what value were requesting and from what node
+        # Logs what value were requesting and from what nodes
         self.store_request(node.node_id, key_hash)
 
         # Blocking wait to receive the data
         while key_hash not in self.routing_table:
             # TODO some better timeout management
-            # Wait for 3 seconds and then find a new node to query
+            # Wait for 3 seconds and then find a new nodes to query
             if time.time() - start_time > 3:
                 if ids_to_exclude is not None:
                     if len(ids_to_exclude) > 1:
@@ -673,7 +418,7 @@ class SmartNode(threading.Thread):
                 else:
                     ids_to_exclude = [node.node_id]
 
-                # Re route request to the next closest node
+                # Re route request to the next closest nodes
                 self.requests[node.node_id].remove(key_hash)
                 return self.query_dht(key_hash, requester, ids_to_exclude)
 
@@ -734,7 +479,7 @@ class SmartNode(threading.Thread):
         pass
 
     def store_request(self, node_id: bytes, key: bytes):
-        """Stores a log of the request we have made to a node and for what value"""
+        """Stores a log of the request we have made to a nodes and for what value"""
         if node_id in self.nodes.keys():
             if node_id in self.requests:
                 self.requests[node_id].append(key)
@@ -792,13 +537,293 @@ class SmartNode(threading.Thread):
 
         return bucket_index
 
+    def clean_up_dht(self):
+        # TODO Remove old nodes, old jobs, store some things in files
+        pass
+
+    """Peer-to-peer methods"""
+    def listen(self):
+        """Listen for incoming connections and initialize custom handshake"""
+        while not self.terminate_flag.is_set():
+            try:
+                # Unpack nodes info
+                connection, node_address = self.sock.accept()
+
+                # Attempt custom handshake
+                if self.max_connections == 0 or len(self.nodes) < self.max_connections:
+                    self.handshake(connection, node_address)
+
+                else:
+                    self.close_connection_socket(
+                        connection,
+                        "listen: connection refused, max connections reached",
+                    )
+
+            except socket.timeout:
+                # self.debug_print(f"listen: connection timeout!")
+                pass
+
+            except Exception as e:
+                self.debug_print(f"listen: connection error {e}")
+
+            # self.reconnect_nodes()
+
+    def handshake(
+        self, connection: socket.socket, node_address, instigator=False
+    ) -> bool:
+        """Validates incoming nodes's keys via a random number swap, along with SC verification of connecting user"""
+        id_info = connection.recv(4096)
+        _, role, id_no, connected_node_id = pickle.loads(id_info)
+        node_id_hash = hashlib.sha256(connected_node_id).hexdigest().encode()
+
+        # Query nodes info/history from dht for reputation if we are a validator
+        if self.role == b"V" or b"V2":
+            if len(self.nodes) > 0:
+                node_info = self.query_dht(node_id_hash)
+                if node_info:
+                    if node_info["reputation"] == 0:
+                        self.debug_print(
+                            f"User with poor reputation attempting connection: {node_id_hash}"
+                        )
+                        connection.close()
+
+        # If we are the instigator of the connection, we will have received a request to verify our id
+        if instigator:
+            encrypted_number = _
+            proof = decrypt(encrypted_number, self.role)
+
+            try:
+                proof = float(proof)
+
+            except Exception as e:
+                self.close_connection_socket(
+                    connection, f"Proof request was not valid: {e}"
+                )
+                return False
+
+        # Confirm their key is a valid RSA key
+        if authenticate_public_key(connected_node_id):
+            # Role-specific confirmations (Must be U, W, or V to utilize smart nodes, tensorlink, etc.)
+            if self.off_chain_test is False:
+                try:
+
+                    if role == b"V":
+                        # Query contract for users key hash
+                        is_active, pub_key_hash, wallet_address = self.contract.functions.getValidatorInfo(
+                            id_no
+                        ).call()
+
+                        # If validator was not found
+                        if not is_active or node_id_hash != pub_key_hash:
+                            self.update_node_stats(node_id_hash, "GHOST")
+                            # TODO: potentially some form of reporting mechanism via ip and port
+                            raise f"listed on Smart Nodes!: {connected_node_id}"
+
+                    elif role == b"U":
+                        # TODO: user handling, to be done once users are required to register (post-alpha)
+                        pass
+
+                    elif role == b"W":
+                        # TODO: worker handling
+                        pass
+
+                    else:
+                        # TODO: potentially some form of reporting mechanism via ip and port
+                        raise f"listen: connection refused, invalid role: {node_address}"
+
+                except Exception as e:
+                    self.close_connection_socket(
+                        connection, f"handshake: contract query error: {e}"
+                    )
+
+            # Random number swap to confirm the nodes RSA key
+            rand_n = random.random()
+            encrypted_number = encrypt(str(rand_n).encode(), self.role, connected_node_id)
+
+            # Encrypt random number with nodes's key to confirm their identity
+            # If we are the instigator, we will also need to send our proof
+            if instigator:
+                # Send main port if we are the instigator
+                message = pickle.dumps((self.port, proof, encrypted_number))
+            else:
+                message = pickle.dumps(
+                    (encrypted_number, self.role, self.id, self.rsa_pub_key)
+                )
+
+            connection.send(message)
+
+            # Await response
+            response = connection.recv(4096)
+
+            if instigator:
+                # We have already verified ours and just want to confirm theirs
+                try:
+                    rand_n_proof = float(response)
+                    main_port = node_address[1]
+
+                except Exception as e:
+                    self.close_connection_socket(
+                        connection, f"Proof was not valid: {e}"
+                    )
+                    return False
+            else:
+                # Unpack response (verification of their ID along with a request to verify ours)
+                response = pickle.loads(response)
+                main_port, rand_n_proof, verification = response
+                verification = decrypt(verification, self.role)
+
+                # Send our verification (their random number request)
+                connection.send(verification)
+
+            # If the nodes has confirmed his identity
+            if rand_n_proof == rand_n:
+                # Check to see if we are already connected
+                for node in self.nodes.values():
+                    if node.host == node_address[0] and node.port == node_address[1]:
+                        self.debug_print(
+                            f"connect_with_node: already connected with nodes: {node.node_id}"
+                        )
+                        connection.close()
+                        return False
+
+                thread_client = self.create_connection(
+                    connection,
+                    node_address[0],
+                    node_address[1],
+                    main_port,
+                    connected_node_id,
+                    role,
+                )
+                thread_client.start()
+
+                # Finally connect to the nodes
+                if not thread_client.terminate_flag.is_set():
+                    self.debug_print(
+                        f"Connected to nodes: {thread_client.host}:{thread_client.port}"
+                    )
+                    self.nodes[node_id_hash] = thread_client
+
+                    # Check if nodes has history on the network
+                    node_info = self.query_dht(node_id_hash)
+
+                    if node_info is None:
+                        # New nodes, broadcast info to others
+                        node_info = get_connection_info(thread_client, main_port if not instigator else None)
+
+                    elif node_info["reputation"] < 50:
+                        raise "Connection rejected: Poor reputation."
+
+                    self.store_value(node_id_hash, node_info)
+
+                    if role == b"V":
+                        self.validators.append(node_id_hash)
+
+                    elif role == b"W":
+                        self.workers.append(node_id_hash)
+
+                    elif role == b"U":
+                        self.users.append(node_id_hash)
+
+                    return True
+
+                else:
+                    return False
+
+            else:
+                self.close_connection_socket(connection, "Proof request was not valid.")
+                return False
+
+        else:
+            self.close_connection_socket(connection, "RSA key was not valid.")
+            return False
+
+    def connect_node(
+        self, id_hash: bytes, host: str, port: int, reconnect: bool = False
+    ) -> bool:
+        """
+        Connect to a nodes and exchange information to confirm its role in the Smart Nodes network.
+        """
+        can_connect = self.can_connect(host, port)
+
+        # Check that we are not already connected
+        if id_hash in self.nodes:
+            self.debug_print(f"connect_node: Already connected to {id_hash}")
+            return True
+
+        if can_connect:
+            try:
+                our_port = self.get_next_port()
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind((self.host, our_port))
+                sock.connect((host, port))
+            except Exception as e:
+                self.debug_print(
+                    f"connect_node: could not initialize connection to {host}:{port} -> {e}"
+                )
+                return False
+
+            self.debug_print(f"connect_node: connecting to {host}:{port}")
+            message = pickle.dumps((None, self.role, self.id, self.rsa_pub_key))
+            sock.send(message)
+            return self.handshake(sock, (host, port), instigator=True)
+        else:
+            return False
+
+    def bootstrap(self):
+        """Bootstrap nodes to existing validators"""
+        if self.off_chain_test is True:
+            return
+
+        n_validators = self.get_validator_count()
+        sample_size = min(n_validators, 6)
+        candidates = []
+
+        # Connect to randomly selected validators
+        while len(candidates) < sample_size and len(self.validators) < sample_size:
+            # Random validator id
+            validator_id = random.randrange(1, n_validators + 1)
+
+            # Get key validator information from smart contract
+            validator_contract_info = self.get_validator_info(validator_id)
+
+            if validator_contract_info is not None:
+                is_active, id_hash = validator_contract_info
+                id_hash = id_hash.encode()
+                validator_p2p_info = self.query_dht(id_hash)
+
+                if validator_p2p_info is None:
+                    self.delete(id_hash)
+                    continue
+
+                # Check to see if we are already connected
+                already_connected = False
+                for node in self.nodes.values():
+                    if (
+                        node.host == validator_p2p_info["host"]
+                        and node.port == validator_p2p_info["port"]
+                    ):
+                        already_connected = True
+                        break
+
+                # Connect to the validator's nodes and exchange information
+                # TODO what if we receive false connection info from validator: how to report?
+                connected = self.connect_node(
+                    id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
+                )
+
+                if not connected:
+                    self.delete(id_hash)
+                    continue
+
+                candidates.append(validator_id)
+
     def init_sock(self) -> None:
         """Initializes the main socket for handling incoming connections"""
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         port = self.get_next_port()
         self.port = port
         self.sock.bind((self.host, port))
-        self.sock.settimeout(10)
+        self.sock.settimeout(5)
         self.sock.listen(1)
 
     def init_upnp(self) -> None:
@@ -835,7 +860,7 @@ class SmartNode(threading.Thread):
         return Connection(self, connection, host, port, main_port, node_id, role)
 
     def can_connect(self, host: str, port: int):
-        """Makes sure we are not trying to connect to ourselves or a connected node"""
+        """Makes sure we are not trying to connect to ourselves or a connected nodes"""
         # Check if trying to connect to self
         if host == self.host and port == self.port:
             self.debug_print("connect_with_node: cannot connect with yourself!")
@@ -845,7 +870,7 @@ class SmartNode(threading.Thread):
         for node in self.nodes.values():
             if node.host == host and node.port == port:
                 self.debug_print(
-                    f"connect_with_node: already connected with node: {node.node_id}"
+                    f"connect_with_node: already connected with nodes: {node.node_id}"
                 )
                 return False
 
@@ -854,17 +879,17 @@ class SmartNode(threading.Thread):
     def send_to_node(
         self, n: Connection, data: bytes, compression: bool = False
     ) -> None:
-        """Send data to a connected node"""
+        """Send data to a connected nodes"""
         if n in self.nodes.values():
             n.send(data, compression=compression)
         else:
-            self.debug_print("send_to_node: node not found!")
+            self.debug_print("send_to_node: nodes not found!")
 
     def send_to_node_from_file(self, n: Connection, file, tag):
         if n in self.nodes.values():
             n.send_from_file(file, tag)
         else:
-            self.debug_print("send_to_node: node not found!")
+            self.debug_print("send_to_node: nodes not found!")
 
     def update_node_stats(
         self,
@@ -873,7 +898,7 @@ class SmartNode(threading.Thread):
         additional_context=None,
         decrement=False,
     ):
-        """Updates node (connection) statistics, acts as an incrementer (default),
+        """Updates nodes (connection) statistics, acts as an incrementer (default),
         sets the value if context is specified."""
         if additional_context is None:
             if node_hash in self.node_stats.keys():
@@ -891,7 +916,7 @@ class SmartNode(threading.Thread):
 
     def close_connection(self, n: Connection) -> None:
         n.stop()
-        self.debug_print(f"node {n.node_id} disconnected")
+        self.debug_print(f"nodes {n.node_id} disconnected")
 
     def handle_message(self, node: Connection, data) -> None:
         """Callback method to handles incoming data from connections"""
@@ -901,9 +926,13 @@ class SmartNode(threading.Thread):
         self.handle_data(data, node)
 
     def ping_node(self, n: Connection):
-        """Measure latency node latency"""
+        """Measure latency nodes latency"""
         n.pinged = time.time()
         self.send_to_node(n, b"PING")
+
+    def run(self):
+        self.connection_listener = threading.Thread(target=self.listen, daemon=True)
+        self.connection_listener.start()
 
     def close_connection_socket(
         self, n: socket.socket, additional_info: str = None
@@ -922,14 +951,26 @@ class SmartNode(threading.Thread):
             self.debug_print(f"stop_upnp: UPnP removed for port {self.port}")
 
     def stop(self) -> None:
-        """Shut down node and all associated connections/threads"""
-        self.debug_print(f"Node stopping.")
+        """Shut down nodes and all associated connections/threads"""
+        self.debug_print(f"Node stopping...")
         self.terminate_flag.set()
+        self.connection_listener.join()
+
+        for node in self.nodes.values():
+            node.stop()
+
+        for node in self.nodes.values():
+            node.join()
+
+        self.sock.settimeout(None)
+        self.sock.close()
+
         if self.role == b"U":
             self.endpoint_thread.join()
+
         self.stop_upnp()
 
-    # Methods to interact with Flask endpoints
+    """Methods to Interact with Flask Endpoints"""
     def get_self_info(self):
         data = {
             "id": self.rsa_key_hash.decode(),
@@ -975,3 +1016,5 @@ class SmartNode(threading.Thread):
 
         else:
             return None
+
+    """Methods for Smart Contract Interactions"""

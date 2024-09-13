@@ -37,7 +37,7 @@ class DistributedModel(nn.Module):
     """
     DistributedModel:
         Is able to host offloaded submodules along with local operations. Can be spawned
-        by a Worker or a User. Host is referred to as the 'master' node.
+        by a Worker or a User. Host is referred to as the 'master' nodes.
     """
     def __init__(
         self,
@@ -364,7 +364,7 @@ class DistributedModel(nn.Module):
                 waiting = False
 
     def get_node_most_memory(self):
-        # gets node with most mpc, returns key and mpc
+        # gets nodes with most mpc, returns key and mpc
         key = max(
             self.master_node.nodes, key=lambda x: self.master_node.nodes[x]["mpc"]
         )
@@ -551,7 +551,7 @@ class DistributedModel(nn.Module):
 
     def send_request(self, request_type, args):
         """
-        Sends a request to the node and waits for the response.
+        Sends a request to the nodes and waits for the response.
         """
         request = {"type": request_type, "args": args}
         try:
@@ -572,7 +572,7 @@ class DistributedModel(nn.Module):
 class OffloadedModule(nn.Module):
     """
     OffloadedModule:
-        A module wrapper that handles offloading on the master node without disrupting normal
+        A module wrapper that handles offloading on the master nodes without disrupting normal
         pytorch model flow.
     """
 
@@ -589,7 +589,7 @@ class OffloadedModule(nn.Module):
         # timer.start()
 
         # try:
-        # Send the module to the worker node
+        # Send the module to the worker nodes
         self.parent_model.send_request("send_model", (name, self.worker_id, self.module_id))
 
         # Wait for the module to be loaded on worker
@@ -631,7 +631,7 @@ class OffloadedModule(nn.Module):
         detached_args = handle_output(args).clone().detach()
 
         size, shm_name = store_in_shared_memory((detached_args, kwargs))
-        # Relay forward pass to next node
+        # Relay forward pass to next nodes
         self.parent_model.send_request("send_forward", (self.worker_id, size, shm_name, tag))
 
         # Wait for response, change to appending waiting thread to list in master
