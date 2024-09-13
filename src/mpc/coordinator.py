@@ -1,6 +1,6 @@
-from src.roles.user import User
-from src.roles.validator import Validator
-from src.roles.worker import Worker
+from src.nodes.user import User
+from src.nodes.validator import Validator
+from src.nodes.worker import Worker
 from src.ml.distributed import DistributedModel
 from src.ml.worker import DistributedWorker
 
@@ -50,16 +50,18 @@ class BaseCoordinator:
 
     def send_request(self, request_type, args):
         """
-        Sends a request to the node and waits for the response.
+        Sends a request to the nodes and waits for the response.
         """
         request = {"type": request_type, "args": args}
         try:
             self.mpc_lock.acquire()
             self.node_requests.put(request)
             response = self.node_responses.get()  # Blocking call, waits for response
+
         except Exception as e:
             print(f"Error sending request: {e}")
             response = {"return": str(e)}
+
         finally:
             self.mpc_lock.release()
 
@@ -67,6 +69,23 @@ class BaseCoordinator:
 
     def run_role(self):
         raise NotImplementedError("Subclasses must implement this method")
+
+
+class ValidatorCoordinator(BaseCoordinator):
+    def run_role(self):
+        kwargs = self.init_kwargs.copy()
+        kwargs.update({
+            'debug': kwargs.get('debug', True),
+            'upnp': kwargs.get('upnp', False),
+            'off_chain_test': kwargs.get('off_chain_test', False)
+        })
+        role_instance = Validator(
+            self.node_requests,
+            self.node_responses,
+            **kwargs
+        )
+        role_instance.start()
+        self.node_process = role_instance
 
 
 class DistributedCoordinator(BaseCoordinator):
@@ -96,23 +115,6 @@ class DistributedCoordinator(BaseCoordinator):
         distributed_config = self.send_request("request_job", (n_pipelines, dp_factor, distribution))
         dist_model.distribute_model(distributed_config)
         return dist_model
-
-
-class ValidatorCoordinator(BaseCoordinator):
-    def run_role(self):
-        kwargs = self.init_kwargs.copy()
-        kwargs.update({
-            'debug': kwargs.get('debug', True),
-            'upnp': kwargs.get('upnp', False),
-            'off_chain_test': kwargs.get('off_chain_test', True)
-        })
-        role_instance = Validator(
-            self.node_requests,
-            self.node_responses,
-            **kwargs
-        )
-        role_instance.start()
-        self.node_process = role_instance
 
 
 class WorkerCoordinator(BaseCoordinator):

@@ -103,6 +103,15 @@ class User(TorchNode):
                     else:
                         ghost += 1
 
+                elif b"DECLINE-JOB" == data[:11]:
+                    if node.node_id in self.jobs[-1]["seed_validators"]:
+                        reason = data[11:]
+                        self.debug_print(f"Validator ({node.node_id}) declined job! Reason: {reason}")
+
+                    else:
+                        ghost += 1
+
+
                 elif b"WORKERS" == data[:7]:
                     self.debug_print(f"Received workers from: {node.node_id}")
                     workers = pickle.loads(data[7:])
@@ -123,8 +132,13 @@ class User(TorchNode):
             raise e
 
     def handle_requests(self, req=None):
+        """Handles interactions between model and nodes processes"""
         if req is None:
-            req = self.request_queue.get()
+            try:
+                req = self.request_queue.get(timeout=3)
+
+            except queue.Empty:
+                return
 
         if req["type"] == "request_job":
             assert self.role == b"U", "Must be user to request a job!"
@@ -165,6 +179,7 @@ class User(TorchNode):
         # if user_id < 1:
         #     self.debug_print(f"request_job: User not registered on smart contract!")
         #     return None
+        #
         # Publish job request to smart contract (args: n_seed_validators, requested_capacity), returns validator IDs
         # TODO check if user already has job and switch to that if so, (re initialize a job if failed to start or
         #  disconnected, request data from validators/workers if disconnected and have to reset info.
@@ -212,10 +227,10 @@ class User(TorchNode):
 
         # Connect to seed validators
         for validator_id in validator_ids:
-            # Try and grab node connection info from dht
+            # Try and grab nodes connection info from dht
             node_info = self.query_dht(validator_id)
 
-            # Delete space for node info if not found and move on to the next validator
+            # Delete space for nodes info if not found and move on to the next validator
             if node_info is None:
                 self.delete(validator_id)
                 self.debug_print(
@@ -224,7 +239,7 @@ class User(TorchNode):
                 # TODO retry without creating a new job request on SC
                 return False
 
-            # Connect to the validator's node and exchange information
+            # Connect to the validator's nodes and exchange information
             connected = self.connect_node(
                 validator_id, node_info["host"], node_info["port"]
             )
@@ -246,11 +261,11 @@ class User(TorchNode):
         # Create job request
         job_request = {
             "author": self.rsa_key_hash,
+            "active": False,
             "capacity": capacity,
             "n_pipelines": n_pipelines,
             "dp_factor": dp_factor,
             "distribution": distribution,
-            # "job_number": self,
             "n_workers": n_pipelines * len(distribution),
             "seed_validators": validator_ids,
             "workers": [{} for _ in range(n_pipelines)],

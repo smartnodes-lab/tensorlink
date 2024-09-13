@@ -1,17 +1,29 @@
-from src.roles.validator import Validator
+import hashlib
+import time
+from multiprocessing import Queue
+from src.nodes.validator import Validator
+from src.nodes.user import User
+from src.crypto.rsa import *
+# from src.mpc.coordinator import ValidatorCoordinator
 
 
-node1 = Validator([], [], upnp=False, off_chain_test=True, debug=True)
-node2 = Validator([], [], upnp=False, off_chain_test=True, debug=True)
+node1 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True, debug=True)
+node2 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True, debug=True)
+pk = get_rsa_pub_key(b"V2")
+node2.rsa_pub_key = get_public_key_bytes(pk)
+node2.rsa_key_hash = hashlib.sha256(node2.rsa_pub_key)
+node2.role = b"V2"
+user = User(Queue(), Queue(), upnp=False, off_chain_test=True, debug=True)
 node1.start()
 node2.start()
+user.start()
 
-print(node1.rsa_key_hash)
-print(node2.rsa_key_hash)
+node2.connect_node(node1.rsa_key_hash, node1.host, node1.port)
+user.connect_node(node1.rsa_key_hash, node1.host, node1.port)
+# node2.ping_node(node2.nodes[node1.rsa_key_hash])
+user.request_job(3, 1, [1e9, 1e9])
 
-node1.connect_node(b"58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e", node2.host, node2.port)
-
-node1.ping_node(node1.nodes[b"58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e"])
+time.sleep(1)
 
 node1.stop()
 node2.stop()

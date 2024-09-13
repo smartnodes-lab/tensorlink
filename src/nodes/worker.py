@@ -109,16 +109,16 @@ class Worker(TorchNode):
                 #
                 #         proof_of_learning = self.proof_of_learning(dummy_input)
                 #
-                #         self.send_to_node(node, proof_of_learning)
+                #         self.send_to_node(nodes, proof_of_learning)
                 #
                 # elif b"TENSOR" == data[:6]:
                 #     if self.training:
                 #         tensor = pickle.loads(data[6:])
                 #
-                #         # Confirm identity/role of node
-                #         if node in self.inbound:
+                #         # Confirm identity/role of nodes
+                #         if nodes in self.inbound:
                 #             self.forward_relays.put(tensor)
-                #         elif node in self.outbound:
+                #         elif nodes in self.outbound:
                 #             self.backward_relays.put(tensor)
 
                 else:
@@ -209,7 +209,7 @@ class Worker(TorchNode):
     # def host_job(self, model: nn.Module):
     #     """
     #     Todo:
-    #         - connect to master node via SC and load in model
+    #         - connect to master nodes via SC and load in model
     #         - attempt to assign and relay model to other idle connected workers
     #         - determine relevant connections
     #     """

@@ -1,6 +1,6 @@
-from src.roles.worker import Worker
-from src.roles.validator import Validator
-from src.roles.user import User
+from src.nodes.worker import Worker
+from src.nodes.validator import Validator
+from src.nodes.user import User
 from src.ml.distributed import DistributedModel
 from transformers import Wav2Vec2BertModel, BertModel
 import torch.optim as optim

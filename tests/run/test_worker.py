@@ -1,5 +1,5 @@
-from src.roles.worker import Worker
-from src.roles.validator import Validator
+from src.nodes.worker import Worker
+from src.nodes.validator import Validator
 from transformers import BertModel
 
 
