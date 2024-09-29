@@ -108,7 +108,7 @@ class DistributedCoordinator(BaseCoordinator):
         dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, dp_factor)
 
         self.send_request("request_workers", None)
-        time.sleep(1)
+        time.sleep(3)
         workers = self.send_request("check_workers", None)
         dist_model.worker_info = workers
         distribution = dist_model.parse_model(model)

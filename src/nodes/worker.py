@@ -3,16 +3,12 @@ from src.p2p.connection import Connection
 from src.ml.utils import estimate_memory, handle_output, get_gpu_memory
 from src.crypto.rsa import get_rsa_pub_key
 
-from multiprocessing import shared_memory
+from dotenv import get_key
 import torch.nn as nn
-import torch.optim as optim
 import threading
 import hashlib
 import pickle
-import queue
 import torch
-import time
-import os
 
 
 class Worker(TorchNode):
@@ -33,8 +29,7 @@ class Worker(TorchNode):
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
-        off_chain_test=False,
-        public_key=None,
+        off_chain_test=False
     ):
         super(Worker, self).__init__(
             request_queue,
@@ -48,7 +43,8 @@ class Worker(TorchNode):
         self.training = False
         self.role = b"W"
         self.loss = None
-        self.public_key = public_key
+        self.public_key = get_key(".env", "PUBLIC_KEY")
+        self.store_value(hashlib.sha256(b"ADDRESS").hexdigest().encode(), self.public_key)
 
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
@@ -89,7 +85,7 @@ class Worker(TorchNode):
                             self.store_request(user_id + module_id, b"AWAIT-USER")
                             data = b"ACCEPT-JOB" + job_id + module_id
 
-                            # Update available mpc
+                            # Update available memory
                             self.available_memory -= module_size
 
                         else:
@@ -168,7 +164,7 @@ class Worker(TorchNode):
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {
             "node_id": self.name,
-            "mpc": self.available_memory,
+            "memory": self.available_memory,
             "learning": self.training,
             "model": self.model,
         }
@@ -178,10 +174,9 @@ class Worker(TorchNode):
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
-        # mpc = self.available_memory
         stats = {
             "id": self.rsa_key_hash,
-            "mpc": self.available_memory,
+            "memory": self.available_memory,
             "role": self.role,
             "training": self.training,
             # "connection": self.connections[i], "latency_matrix": self.connections[i].latency

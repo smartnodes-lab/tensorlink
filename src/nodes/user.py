@@ -111,7 +111,6 @@ class User(TorchNode):
                     else:
                         ghost += 1
 
-
                 elif b"WORKERS" == data[:7]:
                     self.debug_print(f"Received workers from: {node.node_id}")
                     workers = pickle.loads(data[7:])
@@ -169,16 +168,6 @@ class User(TorchNode):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
         # Commented out code as user contract interactions will come later
-        # assert not self.off_chain_test, "Cannot request job without SC connection."
-        # # Ensure we (user) are registered
-        # user_id = self.contract.functions.userIdByHash(
-        #     self.rsa_key_hash.decode()
-        # ).call()
-        #
-        # if user_id < 1:
-        #     self.debug_print(f"request_job: User not registered on smart contract!")
-        #     return None
-        #
         # Publish job request to smart contract (args: n_seed_validators, requested_capacity), returns validator IDs
         # TODO check if user already has job and switch to that if so, (re initialize a job if failed to start or
         #  disconnected, request data from validators/workers if disconnected and have to reset info.
@@ -235,7 +224,6 @@ class User(TorchNode):
                 self.debug_print(
                     f"request_job: Could not connect to validator for job initialize, try again."
                 )
-                # TODO retry without creating a new job request on SC
                 return False
 
             # Connect to the validator's nodes and exchange information
