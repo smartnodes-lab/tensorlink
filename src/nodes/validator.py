@@ -1,10 +1,13 @@
-import web3.exceptions
+import web3
 
 from src.p2p.torch_node import TorchNode
 from src.p2p.connection import Connection
 from src.crypto.rsa import get_rsa_pub_key
 
-from concurrent.futures import ThreadPoolExecutor
+from web3.exceptions import Web3Exception
+from collections import Counter
+from eth_abi import encode, decode
+from dotenv import get_key
 import threading
 import hashlib
 import pickle
@@ -44,7 +47,6 @@ class Validator(TorchNode):
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
-        private_key=None,
     ):
         super(Validator, self).__init__(
             request_queue,
@@ -63,9 +65,23 @@ class Validator(TorchNode):
 
         self.debug_colour = "\033[92m"
         self.debug_print(f"Launching Validator: {self.rsa_key_hash} ({self.host}:{self.port})")
-        self.active_jobs = []
+
+        self.worker_memories = {}
+
+        # Params for smart contract state aggregation
         self.last_loaded_job = 0
+        self.jobs_to_publish = []
+        self.jobs_to_update = []
+        self.validators_to_clear = []
+
         self.proposal_listener = None
+        self.execution_listener = None
+        self.proposal_candidate = False
+        self.current_proposal = 0
+
+        if off_chain_test is False:
+            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest().encode(), self.public_key)
 
     def handle_data(self, data, node: Connection):
         """
@@ -115,15 +131,6 @@ class Validator(TorchNode):
 
                     else:
                         # Get author of job listed on SC and confirm job and nodes id TODO to be implemented post-alpha
-                        # job_author = self.contract.functions.userIdByJob(
-                        #     job_req["job_number"]
-                        # ).call()
-                        # job_author_id = self.contract.functions.userKeyById(
-                        #     job_author
-                        # ).call()
-                        # job_id = self.contract.functions.jobIdByUserIdHash(
-                        #     nodes.node_id
-                        # ).call()
                         node_info = self.query_dht(node.node_id)
 
                         if node_info and node_info["reputation"] < 50:
@@ -145,6 +152,7 @@ class Validator(TorchNode):
                         stats = pickle.loads(data[14:])
                         self.requests[node.node_id].remove(b"STATS")
                         self.nodes[node.node_id].stats = stats
+                        self.worker_memories[node.node_id] = stats["memory"]
 
                 elif b"JOB-UPDATE" == data[:10]:
                     self.debug_print(f"Validator:user update job request")
@@ -203,7 +211,63 @@ class Validator(TorchNode):
     #         self.
     #     pass
 
-    def create_job(self, job_data):
+    def check_job_availability(self, job_data: dict):
+        """Asserts that the specified user does not have an active job, and that
+        the job capacity can be handled by the network"""
+        job_id = job_data["id"]
+        user_id = job_data["author"]
+        capacity = job_data["capacity"]
+        distribution = job_data["distribution"]
+
+        # Request updated worker statistics
+        self.request_worker_stats()
+
+        user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
+
+        # Check for active job
+        if user_info:
+            current_user_job_id = user_info.get("job")
+
+            if current_user_job_id:
+                current_user_job = self.query_dht(current_user_job_id)
+
+                if current_user_job and current_user_job["active"]:
+                    return False
+
+        # Check network can handle the requested job
+        total_memory = sum(self.worker_memories.values())
+
+        if total_memory < capacity:
+            return False
+
+        # Sort workers by memory in ascending order
+        sorted_workers = sorted(list(self.worker_memories.items()), key=lambda x: x[1])  # (worker_id, memory)
+        assigned_workers = []
+
+        # Iterate over the modules in the distribution
+        for module_id, module_info in distribution.items():
+            if module_info["type"] == "offloaded":
+                module_memory = module_info["size"]
+                assigned_worker = None
+
+                # Iterate through the sorted workers and find one with enough memory
+                for worker_id, memory in sorted_workers:
+                    if memory >= module_memory:
+                        # Assign the worker to this module
+                        assigned_worker = (worker_id, memory)
+                        break
+
+                if assigned_worker:
+                    assigned_workers.append(assigned_worker[0])
+
+                    # Update the worker's available memory
+                    updated_memory = assigned_worker[1] - module_memory
+                    sorted_workers = [(w_id, mem) if w_id != assigned_worker[0] else (w_id, updated_memory)
+                                      for w_id, mem in sorted_workers]
+
+        return assigned_workers
+
+    def create_job(self, job_data: dict):
         # Method must be invoked by job request from a user
         # We receive a minimum job information data structure from user
         modules = job_data["distribution"].copy()
@@ -211,40 +275,20 @@ class Validator(TorchNode):
         author = job_data["author"]
         n_pipelines = job_data["n_pipelines"]
 
-        # Check if user has an existing job
-        user_info = self.query_dht(author)
-        user_active_job = user_info["role_metadata"]["active_job"]
-        if user_active_job:
-            job_info = self.query_dht(user_active_job)
+        assigned_workers = self.check_job_availability(job_data)
 
-            if not (job_info is None or job_info["active"] is False):
-                self.decline_job()
-
-        # Check if other validator has received the same request (handle duplicates)
-        current_job = self.query_dht(job_id, ids_to_exclude=[self.rsa_key_hash])
-
-        if current_job is not None:
-            pass
+        # Job already exists, decline the job
+        if not assigned_workers:
+            self.decline_job()
 
         self.store_value(job_id, job_data)
 
-        # Query SC for user id and reputation?
-
-        # Update connected workers stats
-        self.request_worker_stats()
-        time.sleep(1)
-
-        # Request workers to handle job
+        # Get workers to handle job
         n_modules = len(modules)
-        workers = [self.query_dht(worker_id) for worker_id in self.workers]
-
-        if any([worker is None for worker in workers]):
-            self.decline_job()
 
         worker_stats = [
             self.nodes[worker_id].stats
-            for worker_id in self.workers
-            if self.nodes[worker_id].stats
+            for worker_id in assigned_workers
         ]
 
         # Cycle thru offloaded modules and send request to workers for offloading
@@ -272,6 +316,9 @@ class Validator(TorchNode):
             (k, self.query_dht(values["worker"]))
             for k, values in job_data["distribution"].items()
         ]
+
+        if len(worker_info) != len(recruitment_threads):
+            self.decline_job()
 
         self.send_to_node(requesting_node, b"ACCEPT-JOB" + job_id + pickle.dumps(worker_info))
 
@@ -306,7 +353,7 @@ class Validator(TorchNode):
                 worker_stats = self.nodes[worker_id].stats
 
                 if worker_stats:
-                    worker_mem = worker_stats["mpc"]
+                    worker_mem = worker_stats["memory"]
 
                     if worker_mem >= module_size:
                         memory_diff = worker_mem - module_size
@@ -338,7 +385,7 @@ class Validator(TorchNode):
                 continue
 
             else:
-                node.stats["mpc"] -= module_size
+                node.stats["memory"] -= module_size
                 job = self.query_dht(job_id)
                 job["distribution"][module_id]["worker"] = node.node_id
                 return True
@@ -352,6 +399,8 @@ class Validator(TorchNode):
             self.send_to_node(connection, message)
             self.store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
+
+        time.sleep(1)
 
     def distribute_job(self):
         """Distribute job to a few other non-seed validators"""
@@ -374,6 +423,7 @@ class Validator(TorchNode):
     #         nodes = self.nodes[validator_ids]
     #         self.send_
 
+    """For more intensive, paid jobs that are requested directly from SmartnodesCore"""
     def get_jobs(self):
         current_block = self.chain.eth.block_number
         event_filter = self.chain.eth.filter({
@@ -392,148 +442,345 @@ class Validator(TorchNode):
         for event in events:
             print(event)
 
-    def proposal_validator(self):
+    """Listen for new proposals created on SmartnodesMultiSig"""
+    def listen_for_proposals(self):
         # Proposal-specific event listening
-        latest_block = self.chain.eth.get_block("latest")["number"]
-        proposal_creations = self.multi_sig_contract.events.ProposalCreated.create_filter(fromBlock=latest_block - 50)
+        proposal_flag = threading.Event()
 
         max_proposals = 1
         # TODO: self.multi_sig_contract.functions.getParams() for setting these types of variables on
         #   node startup (init)
-        validator_executor = ThreadPoolExecutor(max_workers=max_proposals)
-        initialized = False
-        proposal_id = 0
-        current_round_proposal_count = 0
+        proposals = {}
 
         while not self.terminate_flag.is_set():
-            # Grab proposal creation events (if any)
-            if not initialized:
-                initialized = True
-                proposal_creation_events = proposal_creations.get_all_entries()
-            else:
-                proposal_creation_events = proposal_creations.get_new_entries()
+            for i in range(max_proposals):
+                if i not in proposals.keys():
+                    try:
+                        # Start validation in a new thread
+                        t = threading.Thread(target=self.validate_proposal, args=(i, proposal_flag))
+                        proposals[i] = t
+                        t.start()
 
-            if proposal_creation_events:
-                # Get most recent proposal and find out the proposal ID
-                most_recent_event = proposal_creation_events[-1]
-                event_prop_id = most_recent_event["args"]["proposalId"]
+                    except Exception as e:
+                        self.debug_print(f"Error while validating proposal {i}: {e}")
+                        time.sleep(30)  # Sleep briefly on error
 
-                if proposal_id != event_prop_id:
-                    delay = event_prop_id - proposal_id
-                    self.debug_print(f"Fell behind on {delay} proposals! Expected: {proposal_id}, Current: {event_prop_id}")
+            if len(proposals) == max_proposals:
+                for thread in proposals.values():
+                    thread.join()
 
-                proposal_id = event_prop_id
-                block = self.chain.eth.get_block(most_recent_event["blockNumber"])
-                # proposals_to_validate = []
+                proposals.clear()
 
-                for event in proposal_creation_events:
-                    event_prop_id = event["args"]["proposalId"]
+                self.debug_print(f"All proposals validated, sleeping for 2 minutes...")
+                time.sleep(100)
 
-                    if event_prop_id == proposal_id:
-                        # proposals_to_validate.append(event)
-                        # validator_executor.submit(self.validate_proposal, event)
-                        current_round_proposal_count += 1
-
-                if current_round_proposal_count == max_proposals:
-                    self.debug_print("All proposals validated! \nSleeping for 10 minutes...")
-                    proposal_id += 1
-                    current_round_proposal_count = 0
-                    time.sleep(600)
-
-                else:
-                    self.debug_print(f"Waiting on {current_round_proposal_count - max_proposals} proposals.")
-                    self.debug_print(f"Sleeping for 60 seconds...")
-                    # Still waiting for potential round proposals, wait for a bit...
-                    time.sleep(60)
-
-            else:
-                # No proposals, wait for a bit...
-                self.debug_print(f"No proposals found for round {proposal_id}! Sleeping for 60 seconds...")
-                time.sleep(60)
-
-    """Wait for the next proposal execution event"""
-    def wait_for_proposal_execution(self):
-        latest_block = self.chain.eth.get_block("latest")["number"]
-        proposal_executions = self.multi_sig_contract.events.ProposalExecuted.createFilter(fromBlock=latest_block - 50)
-
+    """Listen for proposal execution events"""
+    def listen_for_proposal_executions(self):
         while not self.terminate_flag.is_set():
-            round_validators = self.multi_sig_contract.functions.getSelectedValidators().call()
+            try:
+                # Fetch state from the contract
+                last_proposal_time, next_proposal_id, num_validators, round_validators = self.multi_sig_contract.functions.getState().call()
 
-            if self.account.address in round_validators:
-                self.create_proposal()
+                # Check if a new proposal round has started
+                if next_proposal_id > self.current_proposal:
+                    if self.public_key in round_validators:
+                        self.create_proposal()
+                    else:
+                        self.send_state_updates(round_validators)
 
-            while True:
-                proposal_execution_events = proposal_executions.get_new_entries()
-                if proposal_execution_events:
-                    break
+                    self.debug_print("Handled new proposal round, waiting for next proposal...")
 
                 else:
-                    time.sleep(30)
+                    self.debug_print("No new proposals, waiting...")
 
-    def validate_proposal(self, event):
+            except Exception as e:
+                self.debug_print(f"Error during proposal execution check: {e}")
+
+            time.sleep(120)  # Sleep for 2 minutes before checking again
+
+    def validate_proposal(self, proposal_num, proposal_flag):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
         #  We should also use our proposal data to quickly verify matching data
-        proposal_id = event["args"]["proposalId"]
-        function_types = event["args"]["functionTypes"]
-        function_data = event["args"]["data"]
-        executed = event["args"]["executed"]
+        self.debug_print(f"Validation started for proposal: {proposal_num}")
 
-        # Check proposal id matches current proposal, and validator is indeed a proposal candidate
-        return_val = self.contract.functions
+        flag = False
+        reason = ""
 
-        for function_type, call_data in zip(function_types, function_data):
-            # Deactivate validator, attempt validator connection to determine if validator should be deactivated
-            if function_type == 0:
-                node_hash = call_data
-                node_info = self.query_dht(node_hash)
-                node_host, node_port = node_info["host"], node_info["port"]
-                connected = self.connect_node(node_info, node_host, node_port)
+        while not proposal_flag.is_set():
+            try:
+                function_types, function_data = self.multi_sig_contract.functions.getCurrentProposal(proposal_num).call()
 
-                # Verify the nodes is online and in the network
-                if connected:
-                    connection = self.nodes[node_hash]
-                    if connection.role == b"V":
+                for function_type, call_data in zip(function_types, function_data):
+                    # Deactivate validator call: attempt validator connection to determine if validator should be deactivated
+                    if proposal_flag.is_set():
+                        self.debug_print(f"Validation interrupted for proposal {proposal_num}!")
+                        return
+
+                    if function_type == 0:
+                        node_address = self.chain.to_checksum_address(
+                            decode(["address"], call_data)[0]
+                        )
+                        node_hash = self.contract.functions.getValidatorBytes(node_address).call().hex()
+                        node_info = self.query_dht(node_hash)
+
+                        if node_info:
+                            node_host, node_port = node_info["host"], node_info["port"]
+                            connected = self.connect_node(node_info["id"], node_host, node_port)
+
+                            # Verify the nodes is online and in the network
+                            if connected:
+                                flag = True
+                                reason = f"Validator still online."
+                                connection = self.nodes[node_info]
+                                self.close_connection_socket(connection, "Heart beat complete.")
+
+                        else:
+                            flag = True
+                            reason = f"Node not found: {node_hash}"
+
+                    # Create job, ensure job is requested on p2p network
+                    elif function_type == 1:
+                        # TODO ensure the job type is for the tensorlink sub-network
+                        user_hash, job_hash, capacities = decode(
+                            ["bytes32", "bytes32", "uint256[]"], call_data
+                        )
+
+                        user_hash = user_hash.hex()
+                        job_hash = job_hash.hex()
+
+                        validated = self.validate_job(job_hash, user_id=user_hash, capacities=capacities)
+
+                        if not validated:
+                            flag = True
+                            reason = f"Invalid job state! {job_hash}"
+
+                    # Complete job, determine status on p2p network
+                    elif function_type == 2:
+                        job_hash, worker_addresses = decode(
+                            ["bytes32", "address[]"], call_data
+                        )
+
+                        job_hash = job_hash.hex()
+
+                        validated = self.validate_job(job_hash, active=False)
+
+                        if not validated:
+                            flag = True
+                            reason = f"Invalid job state! {job_hash}"
+
+                    else:
                         flag = True
-                        reason = f"Validator still online."
+                        reason = "Invalid function type."
 
-                    self.close_connection_socket(connection, "Heart beat complete.")
+                    if flag is True:
+                        self.debug_print(f"Job validation failed: {reason}")
+                        break
+
+                break
+
+            except Web3Exception as e:
+                if "Proposal not found!" in str(e):
+                    self.debug_print(f"Proposal {proposal_num} not found, sleeping for 30 sec...")
+                    time.sleep(30)
                 else:
-                    flag = True
-                    reason = f"Node inactive: {node_hash}"
+                    raise e
 
-            # Create job, ensure job is requested on p2p network
-            elif function_type == 1:
-                # TODO ensure the job type is for the tensorlink sub-network
-                user_hash, job_hash, capacities = call_data
-                node_info = self.query_dht(user_hash)
-                job_info = self.query_dht(job_hash)
+        if not proposal_flag.is_set() and not flag:
+            tx = self.multi_sig_contract.functions.approveTransaction(proposal_num).build_transaction({
+                "from": self.public_key,
+                "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                "gas": 6721975,
+                "gasPrice": self.chain.eth.gas_price
+            })
+            signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
+            tx_hash = self.chain.eth.send_raw_transaction(signed_tx.rawTransaction)
+            self.debug_print(f"Proposal {proposal_num} approved! ({tx_hash})")
 
-            # Complete job, determine status on p2p network
-            elif function_type == 2:
-                job_hash, worker_addresses = call_data
-                job_info = self.query_dht(job_hash)
+    def validate_job(self, job_id: bytes, user_id: bytes = None, capacities: list = None, active: bool = None) -> bool:
+        # Grab user and job information
+        job_info = self.query_dht(job_id)
 
-                if not worker_addresses in job_info["workers"]:
-                    pass
+        if job_info:
+            user_response = None
 
-            else:
-                flag = True
+            if user_id:
+                user_info = self.query_dht(user_id)
+
+                if user_info:
+                    # Connect to user and cross-validate job info
+                    user_host, user_port = user_info["host"], user_info["port"]
+                    connected = self.connect_node(user_id, user_host, user_port)
+
+                    if connected:
+                        # Query job information from the user
+                        user_response = self.query_node(job_id, self.nodes[user_id])
+
+            # Query job information from seed validators
+            job_responses = [
+                self.query_node(job_id, validator) for validator in job_info["seed_validators"]
+            ]
+
+            # Include the user's response if it exists
+            if user_response:
+                job_responses.append(user_response)
+
+            if len(job_responses) > 0:
+                # Sort workers and seed_validators for comparison
+                for response in job_responses:
+                    if isinstance(response, dict):
+                        response["workers"] = sorted(response["workers"])
+                        response["seed_validators"] = sorted(response["seed_validators"])
+
+                # Create hashable tuples for counting most common responses
+                normalized_responses = [
+                    (tuple(response["workers"]), tuple(response["seed_validators"])) for response in job_responses
+                ]
+
+                # Count the most common response
+                response_count = Counter(normalized_responses)
+                most_common, count = response_count.most_common(1)[0]
+
+                percent_match = count / len(job_responses)
+
+                if percent_match >= 0.66:
+                    # Gather the full original responses that match the most common normalized response
+                    matching_responses = [
+                        response for response in job_responses
+                        if (tuple(response["workers"]), tuple(response["seed_validators"])) == most_common
+                    ]
+
+                    # Validate capacities and state if specified
+                    if capacities is not None or active is not None:
+                        for response in matching_responses:
+                            # Check capacities if provided
+                            if capacities is not None and response.get("capacities") != capacities:
+                                return False
+
+                            # Check state if provided
+                            if active is not None and response.get("active") != active:
+                                return False
+
+                    # If all checks passed or no capacities/state checks were specified
+                    return True
+
+        return False
 
     def create_proposal(self):
-        pass
+
+        if self.multi_sig_contract.functions.hasSubmittedProposal(self.public_key).call():
+            time.sleep(30)
+            return
+
+        self.debug_print(f"Creating proposal...")
+        # Proposal creation mode is active, incoming data is stored in self.proposal_events
+        self.proposal_candidate = True
+        function_types = []
+        function_calldata = []
+
+        def check_proposal(value):
+            for v in function_calldata:
+                if value == v or isinstance(v, list) and value in v:
+                    return True
+            return False
+
+        # Removing offline validators from the contract
+        for validator in self.validators_to_clear:
+            node_info = self.query_dht(validator)
+
+            if node_info:
+                node_host, node_port = node_info["host"], node_info["port"]
+                connected = self.connect_node(node_info["id"], node_host, node_port)
+
+                # Verify the nodes is online and in the network
+                if not connected:
+                    node_address = self.contract.functions.validatorAddressByHash(validator).call()
+
+                    if node_address:
+                        connection = self.nodes[node_info]
+                        self.close_connection_socket(connection, "Heart beat complete.")
+                        function_types.append(0)
+                        function_calldata.append(encode([
+                            ["address"], [node_address]
+                        ]))
+
+        # Publishing new jobs to the contract
+        for job_id in self.jobs_to_publish:
+            job = self.query_dht(job_id)
+
+            if job:
+                user_id = job["author"]
+                job_hash = bytes.fromhex(job_id)
+                user_hash = bytes.fromhex(user_id)
+
+                if not check_proposal(job_hash):
+                    function_types.append(1)
+                    function_calldata.append(encode([
+                        ["bytes32", "bytes32", "uint256[]"],
+                        [user_hash, job_hash, [int(1e9), int(1e9)]]
+                    ]))
+
+        # Mark jobs as complete on the contract
+        for job_id in self.jobs_to_update:
+            job = self.query_dht(job_id)
+
+            if job:
+                user_id = job["author"]
+                job_hash = bytes.fromhex(job_id)
+                user_hash = bytes.fromhex(user_id)
+                worker_addresses = []
+
+                for worker_id in job["workers"]:
+                    worker_info = self.query_dht(worker_id)
+
+                    if worker_info:
+                        worker_host, worker_port = worker_info["host"], worker_info["port"]
+                        connected = self.connect_node(worker_info["id"], worker_host, worker_port)
+
+                        # Verify the nodes is online and in the network
+                        if not connected:
+                            worker_node = self.nodes[worker_id]
+                            worker_address = self.query_node(
+                                hashlib.sha256(b"ADDRESS").hexdigest().encode(),
+                                worker_node
+                            )
+
+                            if worker_address:
+                                connection = self.nodes[worker_id]
+                                self.close_connection_socket(connection, "Check complete.")
+                                worker_addresses.append(worker_address)
+
+                function_types.append(2)
+                function_calldata.append(encode([
+                    ["bytes32", "address[]"],
+                    [job_hash, worker_addresses]
+                ]))
+
+        tx = self.multi_sig_contract.functions.createProposal(
+            function_types, function_calldata
+        ).build_transaction({
+            "from": self.public_key,
+            "nonce": self.chain.eth.get_transaction_count(self.public_key),
+            "gas": 6721975,
+            "gasPrice": self.chain.eth.gas_price
+        })
+        signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
+        tx_hash = self.chain.eth.send_raw_transaction(signed_tx.rawTransaction)
+        self.debug_print(f"Proposal submitted! ({tx_hash})")
+
+    def send_state_updates(self, validators):
+        for job in self.jobs:
+            pass
 
     def run(self):
         super().run()
-        self.proposal_listener = threading.Thread(target=self.proposal_validator, daemon=True)
-        self.proposal_listener.start()
 
-        # self.candidate_listener = threading.Thread(target=self.candidate_selector, daemon=True)
+        # self.proposal_listener = threading.Thread(target=self.listen_for_proposals, daemon=True)
+        # self.proposal_listener.start()
+        #
+        # self.execution_listener = threading.Thread(target=self.listen_for_proposal_executions, daemon=True)
+        # self.execution_listener.start()
 
-        # Listen for proposal creation events, check their info and vote on them
+        # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-            # Get active validators listed on SC
-            # Get active jobs listed on SC: cross check info between user and validators
-            # Submit json to selected proposers/validators
-            # Aggregate incoming json if we are selected validator
             pass

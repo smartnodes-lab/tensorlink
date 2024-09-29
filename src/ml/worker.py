@@ -21,13 +21,15 @@ class DistributedWorker:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        torch._dynamo.config.suppress_errors = True
-        torch.set_num_threads(8)
+        # torch._dynamo.config.suppress_errors = True
+        # torch.set_num_threads(8)
 
     def train_loop(self):
         while not self.terminate:
             # Complete outstanding forward and backward passes
-            for module_id, module in self.modules.items():
+            for module_id in list(self.modules.keys()):
+                module = self.modules.get(module_id)
+
                 if not module.backward_queue.empty():
                     n_micro_batch = module.n_micro_batch
 
@@ -130,11 +132,11 @@ class DistributedWorker:
         return response["return"]
 
     def check_node(self):
-        update_check_interval = 25
+        update_check_interval = 20
         counter = 0
 
         while not self.terminate:
-            if counter % update_check_interval == 0 and self.modules == {}:
+            if counter % update_check_interval == 0:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
@@ -148,7 +150,7 @@ class DistributedWorker:
                     module.host = node_id
 
                     with self.lock:
-                        self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
+                        # self.optimizers[module_id] = torch.optim.Adam(module.parameters(), lr=2e-5)
                         self.modules[module_id] = module
                         self.send_request("module_loaded", module_id)
 

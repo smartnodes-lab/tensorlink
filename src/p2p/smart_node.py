@@ -2,7 +2,6 @@ from src.crypto.rsa import *
 from src.p2p.connection import Connection
 
 from logging.handlers import TimedRotatingFileHandler
-from dotenv import load_dotenv
 from miniupnpc import UPnP
 from web3 import Web3
 import threading
@@ -15,8 +14,6 @@ import json
 import time
 import os
 
-
-load_dotenv()
 
 # Grab smart contract information
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -77,22 +74,15 @@ def calculate_xor(key_hash, node_id):
 
 def get_connection_info(node, main_port=None):
     """Connection info for routing table storage"""
-    role_metadata = {}
-
-    if node.role == b"U":
-        role_metadata["active_job"] = None
-
-    elif node.role == b"V":
-        pass
 
     info = {
         "host": node.host,
         "port": node.port if not main_port else main_port,
         "role": node.role,
-        "role_metadata": role_metadata,
         "id": node.node_id,
         "reputation": node.reputation,
     }
+
     return info
 
 

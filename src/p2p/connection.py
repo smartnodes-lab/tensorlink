@@ -171,7 +171,7 @@ class Connection(threading.Thread):
             try:
                 chunk = self.sock.recv(self.chunk_size)
             except socket.timeout:
-                self.main_node.debug_print("connection timeout")
+                # self.main_node.debug_print("connection timeout")
                 continue
             except Exception as e:
                 self.terminate_flag.set()

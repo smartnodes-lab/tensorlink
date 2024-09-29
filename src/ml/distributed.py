@@ -443,8 +443,8 @@ class DistributedModel(nn.Module):
 
         named_children = list(model.named_children())
         model_size = estimate_memory(model)
-        max_worker = max(self.worker_info.items(), key=lambda x: x[1]["mpc"])
-        max_worker_mem = max_worker[1]["mpc"]
+        max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
+        max_worker_mem = max_worker[1]["memory"]
 
         # If we do not want to handle initial layers and model can fit on worker
         if handled_layer is True and model_size <= max_worker_mem:
@@ -503,34 +503,33 @@ class DistributedModel(nn.Module):
         return config
 
     def wrap_module(self, module_id: list, worker_id):
+        # Access the module and parent
         child_module, module_name = access_module(self.model, module_id)
         parent_module = (
             access_module(self.model, module_id[:-1])[0]
             if len(module_id) > 1
             else self.model
         )
+
         module_hash = self.get_info_from_module_id(module_id)
 
-        # Remove offloaded module from main model optimizer
-        child_params = set(
-            child_module.parameters()
-        )  # Using set for efficient membership check
-
+        # Assign metadata to child_module
         child_module.id = module_hash
         child_module.n_micro_batch = self.n_micro_batch
-        current_params = {name: param for name, param in self.named_parameters()}
 
-        # Remove the parameters of the child_module from the current parameters
-        for name, param in list(current_params.items()):
-            if param in child_params:
-                del self.state_dict()[name]
-
-        del current_params
-
+        file_name = f"{module_hash.decode()}_{worker_id.decode()}.pth"
+        torch.save(child_module, file_name)  # Save the module to disk
         offloaded_module = OffloadedModule(self, worker_id, module_hash)
-        # size, name = store_in_shared_memory(child_module)
-        file_name = module_hash.decode() + worker_id.decode()
-        torch.save(child_module, file_name)
+
+        # Detach and clear the parameters of the child_module to free memory
+        for param in child_module.parameters():
+            param.detach_()  # Detach from the computation graph
+            param.requires_grad = False  # Ensure no gradients are computed
+            param.data = torch.empty(0)  # Clear the data in the parameter
+
+        # Optional: Clear any buffers (like batch norm running stats) in the child module
+        for buffer_name, buffer in child_module.named_buffers(recurse=False):
+            setattr(child_module, buffer_name, torch.empty(0))
 
         # Clear the module's parameters explicitly
         del child_module
@@ -544,10 +543,6 @@ class DistributedModel(nn.Module):
         else:
             child_name = list(parent_module.named_children())[module_id[-1]][0]
             setattr(parent_module, child_name, offloaded_module)
-
-        # spawn_worker = threading.Thread(target=offloaded_module.spawn_worker, args=(child_module, module_id))
-        # spawn_worker.start()
-        # self.spawn_workers.append(spawn_worker)
 
     def send_request(self, request_type, args):
         """
