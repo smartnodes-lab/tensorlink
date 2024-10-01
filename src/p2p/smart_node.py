@@ -648,8 +648,25 @@ class SmartNode(threading.Thread):
             if instigator:
                 # We have already verified ours and just want to confirm theirs
                 try:
-                    rand_n_proof = float(response)
+                    new_port, rand_n_proof = pickle.loads(response)
+                    rand_n_proof = float(rand_n_proof)
                     main_port = node_address[1]
+
+                    # Somehow switch the connection to the nodes new port
+                    connection.close()
+                    self.debug_print(f"Switching connection to the new port: {new_port}")
+
+                    # Select a new port for the node to use if we are not the instigator
+                    our_new_port = self.get_next_port()
+                    self.debug_print(f"Selected next port: {our_new_port} for new connection")
+                    self.add_port_mapping(our_new_port, our_new_port)
+
+                    # Establish a new connection to the node on the provided port
+                    new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    new_sock.bind((self.host, our_new_port))
+                    new_sock.connect((node_address[0], new_port))
+
+                    connection = new_sock
 
                 except Exception as e:
                     self.close_connection_socket(
@@ -662,14 +679,32 @@ class SmartNode(threading.Thread):
                 main_port, rand_n_proof, verification = response
                 verification = decrypt(verification, self.role)
 
-                # Send our verification (their random number request)
-                connection.send(verification)
+                # Select a new port for the node to use if we are not the instigator
+                our_new_port = self.get_next_port()
+                self.debug_print(f"Selected next port: {our_new_port} for new connection")
+                self.add_port_mapping(our_new_port, our_new_port)
+
+                # Send the new port and proof of random number
+                response = pickle.dumps((our_new_port, verification))
+                connection.send(response)
+
+                # Close the current connection and listen on the new port
+                connection.close()
+                self.debug_print(f"Listening for the instigator on the new port: {our_new_port}")
+
+                # Create a new socket and bind to the selected port
+                new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                new_sock.bind((self.host, our_new_port))
+                new_sock.listen(2)
+
+                # Accept the incoming connection on the new port
+                connection, new_node_address = new_sock.accept()
 
             # If the nodes has confirmed his identity
             if rand_n_proof == rand_n:
                 # Check to see if we are already connected
                 for node in self.nodes.values():
-                    if node.host == node_address[0] and node.port == node_address[1]:
+                    if node.host == node_address[0] and node.port == our_new_port:
                         self.debug_print(
                             f"connect_with_node: already connected with nodes: {node.node_id}"
                         )
@@ -679,7 +714,7 @@ class SmartNode(threading.Thread):
                 thread_client = self.create_connection(
                     connection,
                     node_address[0],
-                    node_address[1],
+                    new_port if instigator else node_address[1],
                     main_port,
                     connected_node_id,
                     role,
@@ -742,8 +777,9 @@ class SmartNode(threading.Thread):
 
         if can_connect:
             try:
-                our_port = self.get_next_port()
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                time.sleep(0.1)
+                our_port = self.get_next_port()
                 sock.bind((self.host, our_port))
                 sock.connect((host, port))
             except Exception as e:
@@ -818,21 +854,22 @@ class SmartNode(threading.Thread):
 
     def init_upnp(self) -> None:
         """Enables UPnP on main socket to allow connections"""
-        # if self.upnp:
         self.upnp = UPnP()
-        self.upnp.discoverdelay = 10_000
+        self.upnp.discoverdelay = 2_000
         self.upnp.discover()
         self.upnp.selectigd()
+        self.add_port_mapping(self.port, self.port)
 
     def add_port_mapping(self, external_port, internal_port):
-        result = self.upnp.addportmapping(
-            external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
-        )
+        if self.upnp:
+            result = self.upnp.addportmapping(
+                external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
+            )
 
-        if result:
-            self.debug_print(f"UPnP port forward successful on port {self.port}")
-        else:
-            self.debug_print("Failed to initialize UPnP.")
+            if result:
+                self.debug_print(f"UPnP port forward successful on port {self.port}")
+            else:
+                self.debug_print("Failed to initialize UPnP.")
 
     def get_external_ip(self):
         """Get public IP address"""

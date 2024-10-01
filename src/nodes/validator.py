@@ -782,5 +782,8 @@ class Validator(TorchNode):
 
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-            pass
+            try:
+                # Handle job oversight, and inspect other jobs (includes job verification and reporting)
+                pass
+            except KeyboardInterrupt:
+                self.terminate_flag.set()
