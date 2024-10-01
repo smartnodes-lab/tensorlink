@@ -10,11 +10,11 @@ import time
 
 if __name__ == "__main__":
 
-    user = DistributedCoordinator(upnp=True)
+    user = DistributedCoordinator(upnp=True, debug=True)
     time.sleep(0.2)
-    worker = WorkerCoordinator(upnp=True)
-    time.sleep(0.2)
-    validator = ValidatorCoordinator(upnp=True)
+    # worker = WorkerCoordinator(upnp=True)
+    # time.sleep(0.2)
+    # validator = ValidatorCoordinator(upnp=True)
 
     # Additional tweaks for key access, override for running 2 validators on same device
     # validator.node_process.rsa_pub_key = get_public_key_bytes(
@@ -23,11 +23,11 @@ if __name__ == "__main__":
     # validator.node_process.rsa_key_hash = hashlib.sha256(validator.node_process.rsa_pub_key)
     time.sleep(0.2)
 
-    val_key, val_host, val_port = validator.send_request("info", None)
+    # val_key, val_host, val_port = validator.send_request("info", None)
 
-    worker.send_request("connect_node", (val_key, val_host, val_port))
-    time.sleep(1)
-    user.send_request("connect_node", (val_key, val_host, val_port))
+    # worker.send_request("connect_node", (val_key, val_host, val_port))
+    # time.sleep(1)
+    user.send_request("connect_node", (b"a", "142.188.24.158", 38751))
 
     while True:
         try:

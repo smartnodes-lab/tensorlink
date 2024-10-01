@@ -76,8 +76,8 @@ class ValidatorCoordinator(BaseCoordinator):
         kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
-            'upnp': kwargs.get('upnp', False),
-            'off_chain_test': kwargs.get('off_chain_test', False)
+            'upnp': kwargs.get('upnp', True),
+            'off_chain_test': kwargs.get('off_chain_test', True)
         })
         role_instance = Validator(
             self.node_requests,

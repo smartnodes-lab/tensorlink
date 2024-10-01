@@ -4,7 +4,9 @@ from src.p2p.connection import Connection
 from logging.handlers import TimedRotatingFileHandler
 from miniupnpc import UPnP
 from web3 import Web3
+import ipaddress
 import threading
+import requests
 import logging
 import hashlib
 import pickle
@@ -72,8 +74,30 @@ def calculate_xor(key_hash, node_id):
     return int(key_hash, 16) ^ int(node_id, 16)
 
 
+def get_public_ip():
+    """Get the public IP address of the local machine."""
+    try:
+        response = requests.get('https://api.ipify.org')
+        return response.text
+    except requests.RequestException as e:
+        print(f"Error retrieving public IP: {e}")
+        return None
+
+
+def is_private_ip(ip):
+    """Check if the IP address is private."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
 def get_connection_info(node, main_port=None):
     """Connection info for routing table storage"""
+    node_host = node.host
+
+    if is_private_ip(node_host):
+        node_host = get_public_ip()
 
     info = {
         "host": node.host,
@@ -780,6 +804,7 @@ class SmartNode(threading.Thread):
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 time.sleep(0.1)
                 our_port = self.get_next_port()
+                self.add_port_mapping(our_port, our_port)
                 sock.bind((self.host, our_port))
                 sock.connect((host, port))
             except Exception as e:
@@ -848,6 +873,7 @@ class SmartNode(threading.Thread):
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         port = self.get_next_port()
         self.port = port
+        self.add_port_mapping(port, port)
         self.sock.bind((self.host, port))
         self.sock.settimeout(5)
         self.sock.listen(1)
