@@ -100,7 +100,7 @@ def get_connection_info(node, main_port=None):
         node_host = get_public_ip()
 
     info = {
-        "host": node.host,
+        "host": node_host,
         "port": node.port if not main_port else main_port,
         "role": node.role,
         "id": node.node_id,
@@ -755,7 +755,7 @@ class SmartNode(threading.Thread):
                     # Check if nodes has history on the network
                     node_info = self.query_dht(node_id_hash)
 
-                    if node_info is None:
+                    if not isinstance(node_info, dict):
                         # New nodes, broadcast info to others
                         node_info = get_connection_info(thread_client, main_port if not instigator else None)
 

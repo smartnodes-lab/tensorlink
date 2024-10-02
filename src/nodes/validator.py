@@ -511,7 +511,7 @@ class Validator(TorchNode):
                 function_types, function_data = self.multi_sig_contract.functions.getCurrentProposal(proposal_num).call()
 
                 for function_type, call_data in zip(function_types, function_data):
-                    # Deactivate validator call: attempt validator connection to determine if validator should be deactivated
+                    # Deactivate validator call: attempt connection to determine if validator should be deactivated
                     if proposal_flag.is_set():
                         self.debug_print(f"Validation interrupted for proposal {proposal_num}!")
                         return

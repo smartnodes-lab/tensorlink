@@ -27,26 +27,20 @@ DP_FACTOR = 1
 if __name__ == "__main__":
     # Launch Nodes
     user = DistributedCoordinator(debug=True)
-    time.sleep(0.2)
-    # worker = WorkerCoordinator(debug=True)
-    # time.sleep(0.2)
-    # validator = ValidatorCoordinator(debug=True)
-    # time.sleep(1)
-
-    # time.sleep(0.2)
-    # worker2 = WorkerCoordinator(debug=True)
+    time.sleep(0.5)
+    worker = WorkerCoordinator(debug=True)
+    time.sleep(0.5)
+    validator = ValidatorCoordinator(debug=True)
+    time.sleep(0.5)
 
     # Bootstrap nodes
-    # val_key, val_host, val_port = validator.send_request("info", None)
+    val_key, val_host, val_port = validator.send_request("info", None)
 
     # while True:
     #     pass
 
-    # worker.send_request("connect_node", (val_key, val_host, val_port))
-    # worker2.send_request("connect_node", (val_key, val_host, val_port))
-    user.send_request("connect_node", (b"b", "142.188.24.158", 38751))
-
-    # user.send_request("connect_node", (b"test-val-nodes", "192.168.2.177", 38752))
+    worker.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (val_key, val_host, val_port))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
