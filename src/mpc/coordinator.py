@@ -77,7 +77,7 @@ class ValidatorCoordinator(BaseCoordinator):
         kwargs.update({
             'debug': kwargs.get('debug', True),
             'upnp': kwargs.get('upnp', True),
-            'off_chain_test': kwargs.get('off_chain_test', True)
+            'off_chain_test': kwargs.get('off_chain_test', False)
         })
         role_instance = Validator(
             self.node_requests,
@@ -93,8 +93,8 @@ class DistributedCoordinator(BaseCoordinator):
         kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
-            'upnp': kwargs.get('upnp', False),
-            'off_chain_test': kwargs.get('off_chain_test', True)
+            'upnp': kwargs.get('upnp', True),
+            'off_chain_test': kwargs.get('off_chain_test', False)
         })
         role_instance = User(
             self.node_requests,
@@ -111,7 +111,7 @@ class DistributedCoordinator(BaseCoordinator):
         time.sleep(3)
         workers = self.send_request("check_workers", None)
         dist_model.worker_info = workers
-        distribution = dist_model.parse_model(model)
+        distribution = dist_model.parse_model(model, handle_layer=False)
         distributed_config = self.send_request("request_job", (n_pipelines, dp_factor, distribution))
         dist_model.distribute_model(distributed_config)
         return dist_model
@@ -122,8 +122,8 @@ class WorkerCoordinator(BaseCoordinator):
         kwargs = self.init_kwargs.copy()
         kwargs.update({
             'debug': kwargs.get('debug', True),
-            'upnp': kwargs.get('upnp', False),
-            'off_chain_test': kwargs.get('off_chain_test', True)
+            'upnp': kwargs.get('upnp', True),
+            'off_chain_test': kwargs.get('off_chain_test', False)
         })
         role_instance = Worker(
             self.node_requests,

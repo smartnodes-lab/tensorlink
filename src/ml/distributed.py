@@ -391,7 +391,7 @@ class DistributedModel(nn.Module):
         model,
         config: dict = None,
         ids: list = None,
-        handled_layer=False,
+        handle_layer: bool = False,
     ) -> dict:
         """
         Parse model based on some minimum submodule size and return a config file containing the
@@ -447,69 +447,74 @@ class DistributedModel(nn.Module):
         max_worker_mem = max_worker[1]["memory"]
 
         # If we do not want to handle initial layers and model can fit on worker
-        if handled_layer is True and model_size <= max_worker_mem:
+        if handle_layer is False and model_size <= max_worker_mem:
             k, v = create_offloaded(model, [-1], model_size)
             config[k] = v
 
-        # Break first model into children
-        for i in range(len(named_children)):
-            # Unpack module info
-            name, submodule = named_children[i]
-            module_memory = estimate_memory(submodule)
+        # Otherwise we break the module down into its components and handle
+        else:
+            for i in range(len(named_children)):
+                # Unpack module info
+                name, submodule = named_children[i]
+                module_memory = estimate_memory(submodule)
 
-            # Update current module id
-            new_ids = ids + [i]
-            module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
+                # Update current module id
+                new_ids = ids + [i]
+                module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
-            # Try to handle on user if specified
-            if self.user_memory >= module_memory and handled_layer is False:
-                # If user can handle the layer
+                # Try to handle on user if specified
+                if self.user_memory >= module_memory and handle_layer is True:
+                    # If user can handle the layer
 
-                self.user_memory -= module_memory
-                k, v = create_loaded(submodule, new_ids, module_memory)
-                config[k] = v
-                handled_layer = True
-                continue
+                    self.user_memory -= module_memory
+                    k, v = create_loaded(submodule, new_ids, module_memory)
+                    config[k] = v
+                    handle_layer = False
+                    continue
 
-            # Break down model further if we haven't handled first layer
-            elif handled_layer is False:
-                sub_config = self.parse_model(
-                    submodule,
-                    config=config.copy(),
-                    ids=new_ids,
-                    handled_layer=handled_layer,
-                )
-                handled_layer = True
-                k, v = create_loaded(submodule, new_ids, module_memory)
-                v["subconfig"] = sub_config
-                config[k] = v
-                continue
+                # Break down model further if we haven't handled user's portion of model
+                elif handle_layer is True:
+                    sub_config = self.parse_model(
+                        submodule,
+                        config=config.copy(),
+                        ids=new_ids,
+                        handle_layer=handle_layer,
+                    )
+                    handle_layer = False
+                    k, v = create_loaded(submodule, new_ids, module_memory)
+                    v["subconfig"] = sub_config
+                    config[k] = v
+                    continue
 
-            # Append module id to offloaded config if meets the minimum size
-            elif module_memory <= max_worker_mem:
-                k, v = create_offloaded(submodule, new_ids, module_memory)
-                config[k] = v
+                # Append module id to offloaded config if meets the minimum size
+                elif module_memory <= max_worker_mem:
+                    k, v = create_offloaded(submodule, new_ids, module_memory)
+                    config[k] = v
 
-            # Recursively break down model if too large
-            else:
-                sub_config = self.parse_model(
-                    submodule, config=config.copy(), ids=new_ids, handled_layer=handled_layer
-                )
+                # Recursively break down model if too large
+                else:
+                    sub_config = self.parse_model(
+                        submodule, config=config.copy(), ids=new_ids, handle_layer=handle_layer
+                    )
 
-                k, v = create_loaded(submodule, new_ids, module_memory)
-                v["subconfig"] = sub_config
-                config[k] = v
+                    k, v = create_loaded(submodule, new_ids, module_memory)
+                    v["subconfig"] = sub_config
+                    config[k] = v
 
         return config
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
-        child_module, module_name = access_module(self.model, module_id)
-        parent_module = (
-            access_module(self.model, module_id[:-1])[0]
-            if len(module_id) > 1
-            else self.model
-        )
+        if module_id == [-1]:  # Handling the case of the full model
+            child_module = self.model
+            parent_module = None  # No parent when the full model is offloaded
+        else:
+            child_module, module_name = access_module(self.model, module_id)
+            parent_module = (
+                access_module(self.model, module_id[:-1])[0]
+                if len(module_id) > 1
+                else self.model
+            )
 
         module_hash = self.get_info_from_module_id(module_id)
 
@@ -520,6 +525,7 @@ class DistributedModel(nn.Module):
         file_name = f"{module_hash.decode()}_{worker_id.decode()}.pth"
         torch.save(child_module, file_name)  # Save the module to disk
         offloaded_module = OffloadedModule(self, worker_id, module_hash)
+        # offloaded_module.n_micro_batch = 0
 
         # Detach and clear the parameters of the child_module to free memory
         for param in child_module.parameters():
@@ -538,11 +544,18 @@ class DistributedModel(nn.Module):
         # Spawn a worker thread for the offloaded module
         offloaded_module.spawn_worker(file_name)
 
-        if isinstance(parent_module, nn.ModuleList):
-            parent_module[module_id[-1]] = offloaded_module
+        if parent_module is not None:
+            # Update the parent module's child module with the offloaded module
+            if isinstance(parent_module, nn.ModuleList):
+                parent_module[module_id[-1]] = offloaded_module
+            else:
+                child_name = list(parent_module.named_children())[module_id[-1]][0]
+                setattr(parent_module, child_name, offloaded_module)
         else:
-            child_name = list(parent_module.named_children())[module_id[-1]][0]
-            setattr(parent_module, child_name, offloaded_module)
+            # Handle the case where the top-level model is offloaded
+            self.model = offloaded_module
+            self.model.id = module_hash
+            self.model.n_micro_batch = self.n_micro_batch
 
     def send_request(self, request_type, args):
         """
@@ -612,7 +625,7 @@ class OffloadedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         start_time = time.time()
-        n_iter = self.parent_model.model.n_batch
+        n_iter = self.parent_model.model.n_micro_batch
         n_micro = getattr(THREAD_STORAGE, "micro", None)
         n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 

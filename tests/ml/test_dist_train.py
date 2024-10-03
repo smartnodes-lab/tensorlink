@@ -3,7 +3,8 @@ from useful_scripts import *
 
 import torch
 import time
-from transformers import AutoTokenizer, AutoModelForCausalLM
+# from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers.models.bert import BertModel
 import logging
 import json
 
@@ -26,11 +27,11 @@ DP_FACTOR = 1
 
 if __name__ == "__main__":
     # Launch Nodes
-    user = DistributedCoordinator(debug=True)
+    user = DistributedCoordinator(upnp=False, debug=True, off_chain_test=True)
     time.sleep(0.5)
-    worker = WorkerCoordinator(debug=True)
+    worker = WorkerCoordinator(upnp=False, debug=True, off_chain_test=True)
     time.sleep(0.5)
-    validator = ValidatorCoordinator(debug=True)
+    validator = ValidatorCoordinator(upnp=False, debug=True, off_chain_test=True)
     time.sleep(0.5)
 
     # Bootstrap nodes
@@ -40,6 +41,7 @@ if __name__ == "__main__":
     #     pass
 
     worker.send_request("connect_node", (val_key, val_host, val_port))
+    # user.send_request("connect_node", (b"b", "142.188.24.158", 38753))
     user.send_request("connect_node", (val_key, val_host, val_port))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -47,10 +49,15 @@ if __name__ == "__main__":
     # tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
     #                                           token="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")
     # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
-    #                                              token="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")
+    #                                           token="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")
 
-    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
+    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    # model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
+    model = BertModel.from_pretrained("bert-base-uncased")
 
+    mo = torch.zeros((1, 1), dtype=torch.long)
+    model(mo)
     distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR)
-    train(distributed_model, tokenizer, device, logger, BATCH_SIZE)
+    del model
+    distributed_model(mo)
+    # train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

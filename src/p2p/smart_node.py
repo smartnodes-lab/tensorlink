@@ -92,11 +92,11 @@ def is_private_ip(ip):
         return False
 
 
-def get_connection_info(node, main_port=None):
+def get_connection_info(node, main_port=None, upnp=True):
     """Connection info for routing table storage"""
     node_host = node.host
 
-    if is_private_ip(node_host):
+    if is_private_ip(node_host) and upnp:
         node_host = get_public_ip()
 
     info = {
@@ -540,7 +540,7 @@ class SmartNode(threading.Thread):
             for key, node in self.nodes.items():
                 if key not in self.routing_table:
                     self.debug_print(f"Adding: {key} to routing table.")
-                    self.routing_table[key] = get_connection_info(node)
+                    self.routing_table[key] = get_connection_info(node, upnp=False if self.upnp is None else True)
 
     def calculate_bucket_index(self, key: bytes):
         """
@@ -757,7 +757,11 @@ class SmartNode(threading.Thread):
 
                     if not isinstance(node_info, dict):
                         # New nodes, broadcast info to others
-                        node_info = get_connection_info(thread_client, main_port if not instigator else None)
+                        node_info = get_connection_info(
+                            thread_client,
+                            main_port=main_port if not instigator else None,
+                            upnp=False if self.upnp is None else True
+                        )
 
                     elif node_info["reputation"] < 50:
                         raise "Connection rejected: Poor reputation."

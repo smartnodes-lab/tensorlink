@@ -138,21 +138,23 @@ def find_module(module: nn.Module, target_name: str, ids: list = []):
 
 
 def access_module(module: nn.Module, indices: list):
-    """Access a module from a model based on its integer ID (depth)"""
-    if len(indices) <= 0:
-        # First module selected
-        return module, "root"
+    """Access a module from a model based on its integer ID (depth) and return the module class name."""
+    if indices == [-1]:
+        # If -1 is passed, return the root module and its class name
+        return module, type(module).__name__
 
     current_module = module
-    module_name = None
+    module_name = type(module).__name__  # Set the root module's class name
+
     for index in indices:
-        children = list(current_module.named_children())
+        children = list(current_module.named_children())  # Get all child modules with their names
         if index >= len(children):
             raise IndexError("Index out of range for current module's children.")
 
-        # Access the submodule
-        current_module = children[index][1]
-        module_name = children[index][0]
+        # Access the child module at the specified index
+        module_name = type(children[index][1]).__name__  # Update to the class name of the child module
+        current_module = children[index][1]  # Get the actual child module
+
     return current_module, module_name
 
 
@@ -203,7 +205,10 @@ def attach_tensor(tensor, device):
 
 def enable_grad(tensor):
     if isinstance(tensor, torch.Tensor):
-        return tensor.detach().requires_grad_()
+        if tensor.is_floating_point():
+            return tensor.detach().requires_grad_()  # Enable gradient for floating-point Tensors
+        else:
+            return tensor
     elif isinstance(tensor, ModelOutput):
         for key, value in tensor.items():
             if isinstance(value, torch.Tensor):
