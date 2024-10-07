@@ -38,7 +38,7 @@ class DistributedWorker:
                     # Clear gradients and perform optimizer step only if training
                     if self.modules[module_id].training:
                         with self.lock:
-                            # Grab backward pass from forward nodes and associated input/output from forward pass
+                            # Grab backward pass from forward roles and associated input/output from forward pass
                             tag, loss_relay = module.backward_queue.get()
                             loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
                             microbatch = tag[1]
@@ -71,7 +71,7 @@ class DistributedWorker:
                             del assoc_input, assoc_output
                             torch.cuda.empty_cache()
 
-                            # Pass along backward pass to next nodes
+                            # Pass along backward pass to next roles
                             size, name = store_in_shared_memory(dvalues)
                             self.send_request("send_backward", (next_node, size, name, tag))
 
@@ -106,7 +106,7 @@ class DistributedWorker:
                         detached_out = detach_tensor(out)
                         size, name = store_in_shared_memory(detached_out)
 
-                        # Relay forward pass to the next nodes
+                        # Relay forward pass to the next roles
                         self.send_request("send_forward", (module.host, size, name, key))
 
                         del inp, out, detached_out  # Free memory
@@ -114,7 +114,7 @@ class DistributedWorker:
 
     def send_request(self, request_type, args):
         """
-        Sends a request to the nodes and waits for the response.
+        Sends a request to the roles and waits for the response.
         """
         request = {"type": request_type, "args": args}
         try:

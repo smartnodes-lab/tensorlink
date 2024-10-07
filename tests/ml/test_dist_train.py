@@ -1,10 +1,9 @@
-from src.mpc.coordinator import DistributedCoordinator, WorkerCoordinator, ValidatorCoordinator
+from src.mpc.nodes import DistributedCoordinator, WorkerCoordinator, ValidatorCoordinator
 from useful_scripts import *
 
 import torch
 import time
-# from transformers import AutoTokenizer, AutoModelForCausalLM
-from transformers.models.bert import BertModel
+from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 import json
 
@@ -29,20 +28,20 @@ if __name__ == "__main__":
     # Launch Nodes
     user = DistributedCoordinator(upnp=False, debug=True, off_chain_test=True)
     time.sleep(0.5)
-    worker = WorkerCoordinator(upnp=False, debug=True, off_chain_test=True)
-    time.sleep(0.5)
-    validator = ValidatorCoordinator(upnp=False, debug=True, off_chain_test=True)
-    time.sleep(0.5)
+    # worker = WorkerCoordinator(upnp=False, debug=True, off_chain_test=True)
+    # time.sleep(0.5)
+    # validator = ValidatorCoordinator(upnp=False, debug=True, off_chain_test=True)
+    # time.sleep(0.5)
 
-    # Bootstrap nodes
-    val_key, val_host, val_port = validator.send_request("info", None)
+    # Bootstrap roles
+    # val_key, val_host, val_port = validator.send_request("info", None)
 
     # while True:
     #     pass
 
-    worker.send_request("connect_node", (val_key, val_host, val_port))
-    # user.send_request("connect_node", (b"b", "142.188.24.158", 38753))
-    user.send_request("connect_node", (val_key, val_host, val_port))
+    # worker.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (b"b", "142.188.24.158", 38757))
+    # user.send_request("connect_node", (val_key, val_host, val_port))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -51,13 +50,8 @@ if __name__ == "__main__":
     # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
     #                                           token="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")
 
-    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    # model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
-    model = BertModel.from_pretrained("bert-base-uncased")
-
-    mo = torch.zeros((1, 1), dtype=torch.long)
-    model(mo)
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
     distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR)
     del model
-    distributed_model(mo)
-    # train(distributed_model, tokenizer, device, logger, BATCH_SIZE)
+    train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

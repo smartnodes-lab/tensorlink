@@ -85,7 +85,7 @@ class Validator(TorchNode):
 
     def handle_data(self, data, node: Connection):
         """
-        Callback function to receive streamed data from worker nodes.
+        Callback function to receive streamed data from worker roles.
         """
         try:
             handled = super().handle_data(data, node)
@@ -130,7 +130,7 @@ class Validator(TorchNode):
                         # TODO ask the user to send again if id was specified
 
                     else:
-                        # Get author of job listed on SC and confirm job and nodes id TODO to be implemented post-alpha
+                        # Get author of job listed on SC and confirm job and roles id TODO to be implemented post-alpha
                         node_info = self.query_dht(node.node_id)
 
                         if node_info and node_info["reputation"] < 50:
@@ -185,7 +185,7 @@ class Validator(TorchNode):
 
     # def validate(self, job_id: bytes, module_id: ):
     #     """
-    #     Perform validation by comparing computations with worker nodes.
+    #     Perform validation by comparing computations with worker roles.
     #     params:
     #         job_id: job hash
     #         module_id:
@@ -194,7 +194,7 @@ class Validator(TorchNode):
     #         output:
     #     """
     #     # Perform computations using the provided data
-    #     # Compare results with computations from worker nodes
+    #     # Compare results with computations from worker roles
     #     # Store validation results in self.validation_results
     #
     #     job_info = self.query_routing_table(job_id)
@@ -207,7 +207,7 @@ class Validator(TorchNode):
     #         if author != listed_author:
     #             self.debug_print(f"Invalid/incorrect job")
     #
-    #         # Get worker nodes ids of specific module in workflow
+    #         # Get worker roles ids of specific module in workflow
     #         self.
     #     pass
 
@@ -334,8 +334,11 @@ class Validator(TorchNode):
 
         # Recruit available workers and send them to user?
 
-        # Store job and replicate to other nodes
+        # Store job and replicate to other roles
         # self.store_key_value_pair(job_data["id"].encode(), job_data)
+
+    def decline_job(self, ):
+        self.send_to_node()
 
     def recruit_worker(
         self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int
@@ -420,7 +423,7 @@ class Validator(TorchNode):
 
     # def share_info(self):
     #     for validator_ids in self.validators:
-    #         nodes = self.nodes[validator_ids]
+    #         roles = self.roles[validator_ids]
     #         self.send_
 
     """For more intensive, paid jobs that are requested directly from SmartnodesCore"""
@@ -527,7 +530,7 @@ class Validator(TorchNode):
                             node_host, node_port = node_info["host"], node_info["port"]
                             connected = self.connect_node(node_info["id"], node_host, node_port)
 
-                            # Verify the nodes is online and in the network
+                            # Verify the roles is online and in the network
                             if connected:
                                 flag = True
                                 reason = f"Validator still online."
@@ -540,7 +543,7 @@ class Validator(TorchNode):
 
                     # Create job, ensure job is requested on p2p network
                     elif function_type == 1:
-                        # TODO ensure the job type is for the tensorlink sub-network
+                        # TODO ensure the job type is for the src sub-network
                         user_hash, job_hash, capacities = decode(
                             ["bytes32", "bytes32", "uint256[]"], call_data
                         )
@@ -691,7 +694,7 @@ class Validator(TorchNode):
                 node_host, node_port = node_info["host"], node_info["port"]
                 connected = self.connect_node(node_info["id"], node_host, node_port)
 
-                # Verify the nodes is online and in the network
+                # Verify the roles is online and in the network
                 if not connected:
                     node_address = self.contract.functions.validatorAddressByHash(validator).call()
 
@@ -736,7 +739,7 @@ class Validator(TorchNode):
                         worker_host, worker_port = worker_info["host"], worker_info["port"]
                         connected = self.connect_node(worker_info["id"], worker_host, worker_port)
 
-                        # Verify the nodes is online and in the network
+                        # Verify the roles is online and in the network
                         if not connected:
                             worker_node = self.nodes[worker_id]
                             worker_address = self.query_node(

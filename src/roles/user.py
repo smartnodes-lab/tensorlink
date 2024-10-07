@@ -70,7 +70,7 @@ class User(TorchNode):
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
-        Callback function to receive streamed data from worker nodes.
+        Callback function to receive streamed data from worker roles.
         """
         try:
             handled = super().handle_data(data, node)
@@ -131,7 +131,7 @@ class User(TorchNode):
             raise e
 
     def handle_requests(self, req=None):
-        """Handles interactions between model and nodes processes"""
+        """Handles interactions between model and roles processes"""
         if req is None:
             try:
                 req = self.request_queue.get(timeout=3)
@@ -216,10 +216,10 @@ class User(TorchNode):
 
         # Connect to seed validators
         for validator_id in validator_ids:
-            # Try and grab nodes connection info from dht
+            # Try and grab roles connection info from dht
             node_info = self.query_dht(validator_id)
 
-            # Delete space for nodes info if not found and move on to the next validator
+            # Delete space for roles info if not found and move on to the next validator
             if node_info is None:
                 self.delete(validator_id)
                 self.debug_print(
@@ -227,7 +227,7 @@ class User(TorchNode):
                 )
                 return False
 
-            # Connect to the validator's nodes and exchange information
+            # Connect to the validator's roles and exchange information
             connected = self.connect_node(
                 validator_id, node_info["host"], node_info["port"]
             )
@@ -280,7 +280,7 @@ class User(TorchNode):
         # Check that we have received all required workers (ie N-offloaded * DP factor)
         dist_model_config = {}
         for mod_id, module in distribution.items():
-            # Wait for loading confirmation from worker nodes
+            # Wait for loading confirmation from worker roles
             worker_info = self.modules[mod_id]
             worker_id = worker_info["workers"][0]
             # module, name = access_module(model, config[mod_id]["mod_id"])

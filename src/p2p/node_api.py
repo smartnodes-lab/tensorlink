@@ -6,15 +6,15 @@ def create_endpoint(smart_node):
     app = Flask(__name__)
     CORS(app)
 
-    @app.route("/nodes", methods=["GET"])
+    @app.route("/roles", methods=["GET"])
     def post_node_info():
         response = smart_node.get_self_info()
         return jsonify(response), 200
 
-    # @app.route("/nodes", methods=["GET"])
+    # @app.route("/roles", methods=["GET"])
     # def get_connected_nodes():
-    #     nodes = list(smart_node.nodes.keys())
-    #     return jsonify({"connected_nodes": nodes})
+    #     roles = list(smart_node.roles.keys())
+    #     return jsonify({"connected_nodes": roles})
     #
     # @app.route("/jobs", methods=["POST"])
     # def upload_job_info():

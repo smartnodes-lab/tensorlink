@@ -1,6 +1,6 @@
-from src.nodes.user import User
-from src.nodes.validator import Validator
-from src.nodes.worker import Worker
+from src.roles.user import User
+from src.roles.validator import Validator
+from src.roles.worker import Worker
 from src.ml.distributed import DistributedModel
 from src.ml.worker import DistributedWorker
 
@@ -50,7 +50,7 @@ class BaseCoordinator:
 
     def send_request(self, request_type, args):
         """
-        Sends a request to the nodes and waits for the response.
+        Sends a request to the roles and waits for the response.
         """
         request = {"type": request_type, "args": args}
         try:
@@ -88,7 +88,7 @@ class ValidatorCoordinator(BaseCoordinator):
         self.node_process = role_instance
 
 
-class DistributedCoordinator(BaseCoordinator):
+class UserCoordinator(BaseCoordinator):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
         kwargs.update({

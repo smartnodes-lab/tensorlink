@@ -108,7 +108,7 @@ class TorchNode(SmartNode):
                 elif b"PARAMS-REQ" == data[:10]:
                     self.debug_print(f"RECEIVED PARAMS REQUEST")
 
-                    # TODO Must ensure requesting nodes is indeed the master or an overseeing validator
+                    # TODO Must ensure requesting roles is indeed the master or an overseeing validator
                     module_id = data[10:]
                     self.send_parameters(
                         node, self.modules[module_id].parameters(), module_id
@@ -160,7 +160,7 @@ class TorchNode(SmartNode):
             self.debug_print(f"handle_data: Error handling data: {e}")
 
     def handle_requests(self, request=None):
-        """Handles interactions between model and nodes processes"""
+        """Handles interactions between model and roles processes"""
         if request is None:
             try:
                 request = self.request_queue.get(timeout=3)
@@ -171,22 +171,22 @@ class TorchNode(SmartNode):
         req_type = request["type"]
 
         if req_type == "get_connection":
-            # Get connection info from a nodes id
+            # Get connection info from a roles id
             node_id = request["args"]
             node = self.nodes[node_id]
             self.response_queue.put({"status": "SUCCESS", "return": node})
 
         elif req_type == "send_model":
-            # Send module that is stored in shared mpc to another nodes
+            # Send module that is stored in shared mpc to another roles
             name, worker_id, module_id = request["args"]
             node = self.nodes[worker_id]
             # model_bytes = get_from_shared_memory(size, name, encoded=True)
-            # self.send_module(module_id, model_bytes, nodes)
+            # self.send_module(module_id, model_bytes, roles)
             self.send_module(name, module_id, node)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "check_loaded":
-            # Check if sent module has been received and loaded on the other nodes
+            # Check if sent module has been received and loaded on the other roles
             worker_id = request["args"]
             return_val = False
 
@@ -196,7 +196,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
         elif req_type == "module_loaded":
-            # Send module loaded message to nodes
+            # Send module loaded message to roles
             module_id = request["args"]
             node_id = self.modules[module_id]["host"]
             node = self.nodes[node_id]
@@ -204,7 +204,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_forward":
-            # Send forward pass tensor from shared mpc to a nodes
+            # Send forward pass tensor from shared mpc to a roles
             worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
             forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
@@ -212,7 +212,7 @@ class TorchNode(SmartNode):
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
         elif req_type == "send_backward":
-            # Send backwards pass from shared mpc to a nodes
+            # Send backwards pass from shared mpc to a roles
             worker_id, size, shm_name, tag = request["args"]
             node = self.nodes[worker_id]
             backward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
@@ -347,10 +347,10 @@ class TorchNode(SmartNode):
             self.stop()
 
     def send_forward(self, node: Connection, forward_bytes, context):
-        """Send forward pass to nodes, must contain args (module args) and context (module + epoch id)"""
+        """Send forward pass to roles, must contain args (module args) and context (module + epoch id)"""
         size = str(len(forward_bytes)).encode() + b"::"
         pickled_data = b"FORWARD" + size + forward_bytes + pickle.dumps(context)
-        # self.store_request(nodes.node_id, )
+        # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
     def store_tensor_in_shared_memory(self, key, tensor: bytes, backward=False):
@@ -381,10 +381,10 @@ class TorchNode(SmartNode):
         self.memory_manager[key] = shm.name
 
     def send_backward(self, node: Connection, backward_bytes, context):
-        """Send backward pass to nodes, must contain args (module args) and context (module + epoch id)"""
+        """Send backward pass to roles, must contain args (module args) and context (module + epoch id)"""
         size = str(len(backward_bytes)).encode() + b"::"
         pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
-        # self.store_request(nodes.node_id, )
+        # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
     def send_parameters(self, node: Connection, parameters, module_id):

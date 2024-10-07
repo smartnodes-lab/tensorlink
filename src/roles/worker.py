@@ -54,9 +54,9 @@ class Worker(TorchNode):
 
     def handle_data(self, data: bytes, node: Connection):
         """
-        Handle incoming tensors from connected nodes and new job requests
+        Handle incoming tensors from connected roles and new job requests
         Todo:
-            - ensure correct nodes sending data
+            - ensure correct roles sending data
             - potentially move/forward method directly to Connection to save data via identifying data
                 type and relevancy as its streamed in, saves bandwidth if we do not need the data / spam
         """
@@ -105,16 +105,16 @@ class Worker(TorchNode):
                 #
                 #         proof_of_learning = self.proof_of_learning(dummy_input)
                 #
-                #         self.send_to_node(nodes, proof_of_learning)
+                #         self.send_to_node(roles, proof_of_learning)
                 #
                 # elif b"TENSOR" == data[:6]:
                 #     if self.training:
                 #         tensor = pickle.loads(data[6:])
                 #
-                #         # Confirm identity/role of nodes
-                #         if nodes in self.inbound:
+                #         # Confirm identity/role of roles
+                #         if roles in self.inbound:
                 #             self.forward_relays.put(tensor)
-                #         elif nodes in self.outbound:
+                #         elif roles in self.outbound:
                 #             self.backward_relays.put(tensor)
 
                 else:
@@ -188,15 +188,15 @@ class Worker(TorchNode):
         self.training = True
 
     """Key Methods to Implement"""
-    # def request_worker(self, nodes, module_memory: int, module_type: int):
+    # def request_worker(self, roles, module_memory: int, module_type: int):
     #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough mpc
     #     if module_type == 0:
-    #         candidate_node = max(nodes, key=lambda x: x["mpc"])
+    #         candidate_node = max(roles, key=lambda x: x["mpc"])
     #
     #     # module_type = 1 when model is not modular, select the new master based on both the minimum of a latency
     #     # matrix (low latency to other good workers), and mpc
     #     elif module_type == 1:
-    #         candidate_node = max(nodes, key=lambda x: x["latency"])
+    #         candidate_node = max(roles, key=lambda x: x["latency"])
 
     # def acknowledge(self):
     #     pass
@@ -204,7 +204,7 @@ class Worker(TorchNode):
     # def host_job(self, model: nn.Module):
     #     """
     #     Todo:
-    #         - connect to master nodes via SC and load in model
+    #         - connect to master roles via SC and load in model
     #         - attempt to assign and relay model to other idle connected workers
     #         - determine relevant connections
     #     """

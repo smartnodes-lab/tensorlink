@@ -39,7 +39,7 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(5)
-        self.chunk_size = 1024 * 1024 * 4 * 4
+        self.chunk_size = 1024 * 1024 * 4
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
@@ -228,8 +228,8 @@ class Connection(threading.Thread):
             self.main_node.debug_print(f"file writing error: {e}")
 
     """
-    Connection thread between two nodes that are able to send/stream data from/to
-    the connected nodes.
+    Connection thread between two roles that are able to send/stream data from/to
+    the connected roles.
 
     TODO
         Send message size before to prepare accordingly.

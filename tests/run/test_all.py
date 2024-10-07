@@ -1,20 +1,19 @@
-import hashlib
-
-from src.mpc.coordinator import WorkerCoordinator, ValidatorCoordinator, DistributedCoordinator
+from src.mpc.nodes import WorkerCoordinator, ValidatorCoordinator, UserCoordinator
 from src.crypto.rsa import *
 
 from transformers import BertModel
+import hashlib
 import torch
 import time
 
 
 if __name__ == "__main__":
 
-    user = DistributedCoordinator(upnp=True, debug=True)
+    user = UserCoordinator(upnp=False, off_chain_test=True)
     time.sleep(0.2)
-    worker = WorkerCoordinator(upnp=True)
+    worker = WorkerCoordinator(upnp=False, off_chain_test=True)
     time.sleep(0.2)
-    validator = ValidatorCoordinator(upnp=True)
+    validator = ValidatorCoordinator(upnp=False, off_chain_test=True)
 
     # Additional tweaks for key access, override for running 2 validators on same device
     # validator.node_process.rsa_pub_key = get_public_key_bytes(
