@@ -26,90 +26,72 @@ class DistributedWorker:
 
     def train_loop(self):
         while not self.terminate:
-            # Complete outstanding forward and backward passes
             for module_id in list(self.modules.keys()):
                 module = self.modules.get(module_id)
 
                 if not module.backward_queue.empty():
                     n_micro_batch = module.n_micro_batch
-
                     next_node = module.host
 
-                    # Clear gradients and perform optimizer step only if training
                     if self.modules[module_id].training:
                         with self.lock:
-                            # Grab backward pass from forward roles and associated input/output from forward pass
                             tag, loss_relay = module.backward_queue.get()
                             loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
                             microbatch = tag[1]
 
-                            # Zero gradients only for the first micro-batch
-                            if microbatch == 0:
-                                self.optimizers[module_id].zero_grad()
-
                             if isinstance(loss, tuple):
-                                # If loss is a tuple, it contains args and kwargs
                                 loss = tuple([l.to(self.device) for l in loss if isinstance(l, torch.Tensor)])
-                                # Handle loss_kwargs as needed
                             else:
-                                # Single tensor case
                                 loss = loss.to(self.device)
 
                             inter_tag = tuple(tag)
                             assoc_input, assoc_output = module.intermediates.pop(inter_tag)
 
-                            # Move tensors to the specified device
                             assoc_input = assoc_input.to(self.device)
                             assoc_output = assoc_output.to(self.device)
 
-                            # Continue backward pass
                             assoc_output.backward(loss)
 
                             dvalues = detach_tensor(assoc_input.grad)
 
-                            # Free memory
                             del assoc_input, assoc_output
                             torch.cuda.empty_cache()
 
-                            # Pass along backward pass to next roles
                             size, name = store_in_shared_memory(dvalues)
                             self.send_request("send_backward", (next_node, size, name, tag))
 
-                            # Update gradients if it is last part of the backwards pipeline
                             if n_micro_batch - 1 == microbatch:
                                 self.optimizers[module_id].step()
+
+                            # Clear variables for backward pass
+                            del loss, dvalues, tag, loss_relay, inter_tag, next_node
+                            torch.cuda.empty_cache()
 
                 if not module.forward_queue.empty():
                     with self.lock:
                         key, (size, name) = module.forward_queue.get()
                         tensor = get_from_shared_memory(size, name)
 
-                        # Unpack queued forward pass values (e.g., mask, stride...)
-                        # TODO kwargs to device
                         if isinstance(tensor, tuple):
                             args, kwargs = tensor
                         else:
                             args = tensor
                             kwargs = {}
 
-                        # Move args and kwargs to the device using attach_tensor
                         inp = enable_grad(attach_tensor(args, self.device))
                         kwargs = enable_grad(attach_tensor(kwargs, self.device))
 
-                        # Forward pass through the module
                         out = module(inp, **kwargs)
 
-                        # Store output and input tensor for backward pass only if training
                         if self.modules[module_id].training:
                             module.intermediates[key] = [inp, handle_output(out).to(self.device)]
 
                         detached_out = detach_tensor(out)
                         size, name = store_in_shared_memory(detached_out)
 
-                        # Relay forward pass to the next roles
                         self.send_request("send_forward", (module.host, size, name, key))
 
-                        del inp, out, detached_out  # Free memory
+                        del inp, out, detached_out, args, kwargs, key, size, name  # Clear memory
                         torch.cuda.empty_cache()
 
     def send_request(self, request_type, args):

@@ -110,9 +110,7 @@ class TorchNode(SmartNode):
 
                     # TODO Must ensure requesting roles is indeed the master or an overseeing validator
                     module_id = data[10:]
-                    self.send_parameters(
-                        node, self.modules[module_id].parameters(), module_id
-                    )
+                    self.send_parameters(node, module_id)
 
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
@@ -387,10 +385,13 @@ class TorchNode(SmartNode):
         # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
-    def send_parameters(self, node: Connection, parameters, module_id):
+    def send_parameters(self, node: Connection, module_id):
         """Send specific module parameters
         TODO should be accompanied by a requested proof (from smart contract) or the specific user
         """
+        # Request parameters from ML process
+        self.mpc_lock.acquire()
+
         pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
         self.send_to_node(node, pickled_data)
 

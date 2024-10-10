@@ -39,7 +39,7 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest().encode()
         self.role = role
         self.sock.settimeout(5)
-        self.chunk_size = 1024 * 1024 * 4
+        self.chunk_size = 1024 * 1024 * 4 * 4
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"

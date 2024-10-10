@@ -1,4 +1,4 @@
-from transformers import BertModel, AutoModelForCausalLM
+import matplotlib.pyplot as plt
 from torchviz import make_dot
 import torch.nn as nn
 import networkx as nx
@@ -8,13 +8,13 @@ import re
 
 
 def parse_node(node):
-    id = node.split()[0]
+    _id = node.split()[0]
     name = node.split("label=")[-1]
     if name[0] == "\"":
         name = name.split("\"", maxsplit=2)[1].strip()
     if name[-1] == "]":
         name = name[:-1]
-    return id, name
+    return _id, name
 
 
 def parse_edge(edge):
@@ -33,22 +33,33 @@ def handle_output(tensor):
     return tensor
 
 
-def create_graph(module: nn.Module, dummy_input: torch.Tensor):
-    out = handle_output(module(dummy_input))
+def create_graph(module: nn.Module, dummy_input: torch.Tensor, output_format: str = "png"):
+    # Generate the forward pass to get the output
+    out = module(dummy_input)
 
-    dot = make_dot(out, params=dict(list(module.named_parameters())))
-    dot.render(str(round(random.random(), 2)))
+    # Create a computation graph
+    dot = make_dot(out, params=dict(module.named_parameters()))
 
+    # Export the graph to file
+    filename = str(round(random.random(), 2))  # Random name to avoid overwriting
+    dot.render(filename, format=output_format)  # You can change the format to 'pdf', 'svg', etc.
+
+    # Display the graph inline (optional, requires matplotlib)
+    image_path = f"{filename}.{output_format}"
+    plt.figure(figsize=(10, 10))
+    img = plt.imread(image_path)
+    plt.imshow(img)
+    plt.axis('off')
+    plt.show()
+
+    # Return dot source as string, nodes, and edges for further inspection if needed
     dot_string = dot.source
     lines = dot_string.replace("\n", "").split("\t")
     nodes = [line.strip() for line in lines if "label=" in line]
-    nodes = [parse_node(node) for node in nodes]
-    nodes = {node[0]: node[1] for node in nodes}
+    nodes = {node.split(' [')[0]: node.split('label="')[1].split('"')[0] for node in nodes}
     edges = [line.strip() for line in lines if "->" in line]
-    edges = [parse_edge(edge) for edge in edges]
 
     return nodes, edges
-
 
 def estimate_memory(module):
     """
@@ -80,10 +91,10 @@ class DAG:
 
 
 # model = AutoModelForCausalLM.from_pretrained("microsoft/phi-2")
-model = BertModel.from_pretrained('bert-base-uncased')
-submodels = model.children()
-dummy_in = torch.zeros((1, 1), dtype=torch.long)
-dag = DAG(model, dummy_in)
+# model = BertModel.from_pretrained('bert-base-uncased')
+# submodels = model.children()
+# dummy_in = torch.zeros((1, 1), dtype=torch.long)
+# dag = DAG(model, dummy_in)
 
 # from networkx import DiGraph, draw
 # import matplotlib.pyplot as plt

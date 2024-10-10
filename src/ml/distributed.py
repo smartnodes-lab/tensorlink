@@ -33,6 +33,23 @@ def contains_offloaded(module: nn.Module):
     return exists
 
 
+class CustomAutogradRouter(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, model, output_tensor):
+        """
+        Forward pass, save the model in the context (ctx) for use during the backward pass.
+        """
+        ctx.model = model
+        return output_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """
+        Backward pass, call the model's custom backward method.
+        """
+        return ctx.model.backward(grad_output)
+
+
 class DistributedModel(nn.Module):
     """
     DistributedModel:
@@ -62,14 +79,6 @@ class DistributedModel(nn.Module):
 
         self.n_pipelines = n_pipelines
         self.n_micro_batch = n_pipelines
-
-        self.model.n_batch = 0
-        self.model.forward_queues = {}
-        self.model.backward_queues = {}
-        self.model.intermediates = [
-            []
-        ]  # Queue to hold intermediates, must be converted into dictionary
-        # of queues if we wish to perform multiple epochs concurrently
 
         self.distributed_graph = {}
         self.device = (
@@ -138,7 +147,8 @@ class DistributedModel(nn.Module):
         for t in threads:
             t.join()
 
-        return combine_micro_batches(self.model.outputs)
+        combined_output = combine_micro_batches(self.model.outputs)
+        return CustomAutogradRouter.apply(self, combined_output)
 
     def _perform_micro_forward(self, micro, *args, **kwargs):
         THREAD_STORAGE.micro = micro
@@ -152,8 +162,8 @@ class DistributedModel(nn.Module):
         - TODO Creates multiple parallel streams of workers for model parallel acceleration
         - TODO halt worker parameter updates until final micro-batch
         """
-
-        loss = loss.micro_loss
+        if hasattr(loss, "micro_loss"):
+            loss = loss.micro_loss
 
         threads = []
         for micro in range(self.n_micro_batch):
@@ -282,7 +292,7 @@ class DistributedModel(nn.Module):
     def eval(self):
         self.train(False)
 
-    def parameters(self, recurse: bool = True, distributed: bool = False):
+    def parameters(self, recurse: bool = True, distributed: bool = True):
         """
         Collects parameters from all modules (including offloaded) asynchronously and returns them.
         """
@@ -293,7 +303,7 @@ class DistributedModel(nn.Module):
             def recurse_parameters(module):
                 for children in module.children():
                     if isinstance(children, OffloadedModule):
-                        self.send_request("request_parameters", (children.worker_node, children.module_id))
+                        self.send_request("request_parameters", (children.worker_id, children.module_id))
                         t = threading.Thread(
                             target=self._wait_for_parameters, args=(children.module_id,)
                         )
@@ -383,6 +393,14 @@ class DistributedModel(nn.Module):
             mod_id = mod_info["mod_id"]
             worker_id = mod_info["workers"][0]
             self.wrap_module(mod_id, worker_id)
+
+        self.model.n_batch = 0
+        self.model.forward_queues = {}
+        self.model.backward_queues = {}
+        self.model.intermediates = [
+            []
+        ]  # Queue to hold intermediates, must be converted into dictionary
+        # of queues if we wish to perform multiple epochs concurrently
 
         return 0, 0
 
@@ -593,7 +611,7 @@ class OffloadedModule(nn.Module):
 
     def spawn_worker(self, name):
         # # Initialize a threading Timer to monitor the loading process
-        # timer = threading.Timer(MAX_WAIT_TIME, self.handle_timeout)
+        # timer = threading.Tier(MAX_WAIT_TIME, self.handle_timeout)
         # timer.start()
 
         # try:
@@ -625,7 +643,7 @@ class OffloadedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         start_time = time.time()
-        n_iter = self.parent_model.model.n_micro_batch
+        n_iter = self.parent_model.model.n_micro_batch - 1
         n_micro = getattr(THREAD_STORAGE, "micro", None)
         n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
