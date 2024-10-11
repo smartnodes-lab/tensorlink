@@ -47,7 +47,11 @@ class CustomAutogradRouter(torch.autograd.Function):
         """
         Backward pass, call the model's custom backward method.
         """
-        return ctx.model.backward(grad_output)
+        # Call the model's custom backward method
+        grad_input = ctx.model.backward(grad_output)
+
+        # Return gradients for model and output_tensor
+        return None, grad_input
 
 
 class DistributedModel(nn.Module):
@@ -111,7 +115,7 @@ class DistributedModel(nn.Module):
         - Splits input into micro-batches and runs them in parallel.
         - Creates multiple parallel streams of workers for model parallel acceleration
         """
-        if len(args) == 1:
+        if isinstance(args, tuple) and len(args) == 1:
             args = args[0]
 
         batch_size = get_batch_size(args)
@@ -130,7 +134,7 @@ class DistributedModel(nn.Module):
         self.model.forward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
         self.model.backward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
         self.model.outputs = [None] * self.n_micro_batch
-        self.model.intermediates = {m: [[]] for m in range(self.n_micro_batch)}
+        self.model.intermediates = {m: [] for m in range(self.n_micro_batch)}
 
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
@@ -193,6 +197,10 @@ class DistributedModel(nn.Module):
                 assoc_input, assoc_output, module_id = vals
                 tag = [self.model.n_batch, micro, module_id]
 
+                if loss is None:
+                    # If loss is None, use the associated output for backward pass
+                    loss = assoc_output
+
                 assoc_output.backward(loss, retain_graph=True)
                 loss = assoc_input.grad
                 worker_id = self.distributed_graph[module_id]
@@ -211,6 +219,11 @@ class DistributedModel(nn.Module):
                 if isinstance(val1, torch.Tensor):
                     assoc_output, _ = vals
                     loss = assoc_output.backward(loss, retain_graph=True)
+
+                    if loss is None:
+                        # If loss is None, use the associated output for backward pass
+                        loss = assoc_output
+
                 # Pass of the last section
                 else:
                     module_id_bytes, assoc_input = vals
@@ -395,6 +408,7 @@ class DistributedModel(nn.Module):
             self.wrap_module(mod_id, worker_id)
 
         self.model.n_batch = 0
+        self.model.n_micro_batch = self.n_micro_batch
         self.model.forward_queues = {}
         self.model.backward_queues = {}
         self.model.intermediates = [
@@ -409,7 +423,7 @@ class DistributedModel(nn.Module):
         model,
         config: dict = None,
         ids: list = None,
-        handle_layer: bool = False,
+        handle_layer: bool = True,
     ) -> dict:
         """
         Parse model based on some minimum submodule size and return a config file containing the
@@ -569,11 +583,6 @@ class DistributedModel(nn.Module):
             else:
                 child_name = list(parent_module.named_children())[module_id[-1]][0]
                 setattr(parent_module, child_name, offloaded_module)
-        else:
-            # Handle the case where the top-level model is offloaded
-            self.model = offloaded_module
-            self.model.id = module_hash
-            self.model.n_micro_batch = self.n_micro_batch
 
     def send_request(self, request_type, args):
         """
@@ -650,7 +659,7 @@ class OffloadedModule(nn.Module):
         tag = [n_iter, n_micro, self.module_id]
 
         # Store the intermediate tensor for backwards pass
-        self.parent_model.model.intermediates[n_micro][-1].extend(
+        self.parent_model.model.intermediates[n_micro].append(
             [handle_output(args), self.module_id]
         )
 

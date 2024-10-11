@@ -206,7 +206,7 @@ def attach_tensor(tensor, device):
 def enable_grad(tensor):
     if isinstance(tensor, torch.Tensor):
         if tensor.is_floating_point():
-            return tensor.detach().requires_grad_()  # Enable gradient for floating-point Tensors
+            return tensor.clone().detach().requires_grad_()  # Enable gradient for floating-point Tensors
         else:
             return tensor
     elif isinstance(tensor, ModelOutput):

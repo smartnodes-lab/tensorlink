@@ -79,44 +79,23 @@ class User(TorchNode):
             if not handled:
                 # We have received a job accept request from a validator handle
                 if b"ACCEPT-JOB" == data[:10]:
-                    if node.node_id in self.jobs[-1]["seed_validators"]:
-                        self.debug_print(f"Validator ({node.node_id}) accepted job!")
-                        job_id = data[10:74]
-                        distribution = pickle.loads(data[74:])
-
-                        for mod_id, worker_info in distribution:
-                            # Connect to workers for each model
-                            connected = self.connect_worker(
-                                worker_info["id"],
-                                worker_info["host"],
-                                worker_info["port"],
-                                mod_id,
-                            )
-
-                            if connected:
-                                self.modules[mod_id]["workers"].append(
-                                    worker_info["id"]
-                                )
-
-                                self.requests[node.node_id].remove(job_id)
-
-                    else:
-                        ghost += 1
-
+                    # Start a new thread to handle the job acceptance logic
+                    threading.Thread(
+                        target=self.handle_accept_job,
+                        args=(data, node),
+                        daemon=True
+                    ).start()
                 elif b"DECLINE-JOB" == data[:11]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         reason = data[11:]
                         self.debug_print(f"Validator ({node.node_id}) declined job! Reason: {reason}")
-
                     else:
                         ghost += 1
-
                 elif b"WORKERS" == data[:7]:
                     self.debug_print(f"Received workers from: {node.node_id}")
                     workers = pickle.loads(data[7:])
                     for worker, stats in workers.items():
                         self.worker_stats[worker] = stats
-
                 else:
                     ghost += 1
 
@@ -159,6 +138,39 @@ class User(TorchNode):
 
     def request_peers(self):
         pass
+
+    def handle_accept_job(self, data: bytes, node: Connection):
+        """
+        Handle the job acceptance logic when a validator accepts a job.
+        Runs in a separate thread.
+        """
+        try:
+            if node.node_id in self.jobs[-1]["seed_validators"]:
+                self.debug_print(f"Validator ({node.node_id}) accepted job!")
+                job_id = data[10:74]
+                job_data = pickle.loads(data[74:])
+                distribution = job_data["distribution"]
+
+                for mod_id, mod_info in distribution.items():
+                    for worker, worker_info in mod_info["worker"]:
+                        # Connect to workers for each model
+                        connected = self.connect_worker(
+                            worker_info["id"],
+                            worker_info["host"],
+                            worker_info["port"],
+                            mod_id,
+                        )
+
+                        if connected:
+                            self.modules[mod_id]["workers"].append(worker_info["id"])
+
+                self.requests[node.node_id].remove(job_id)
+            else:
+                self.debug_print(f"Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}")
+
+        except Exception as e:
+            self.debug_print(f"handle_accept_job: {e}")
+            raise e
 
     def request_job(
         self,

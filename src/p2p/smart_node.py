@@ -275,6 +275,7 @@ class SmartNode(threading.Thread):
 
                 # Not enough data received for specific request
                 if len(data) < 86:
+                    self.debug_print("Received random chunk of data (small packet!)")
                     # TODO not enough data received!
                     pass
 
@@ -287,17 +288,19 @@ class SmartNode(threading.Thread):
                         self.requests[node.node_id].remove(value_id)
                         self.routing_table[value_id] = value
                     else:
+                        self.debug_print("Received ghost data from node!")
                         # Report being sent data we have not requested
                         ghost += 1
                 else:
                     # Report being sent data we have not requested
+                    self.debug_print("Received ghost data from unknown node!")
                     ghost += 1
 
             # We have received a request for some data
             elif b"REQUEST-VALUE" == data[:13]:
                 # TODO Check of how many requests they have sent recently to prevent spam
                 self.debug_print(
-                    f"handle_data: roles ({node.host}:{node.port}) requested value."
+                    f"handle_data: node ({node.host}:{node.port}) requested value."
                 )
                 validator_info = None
                 value_hash = None
@@ -317,7 +320,7 @@ class SmartNode(threading.Thread):
                     node,
                     b"REQUEST-VALUE-RESPONSE"
                     + value_hash
-                    + pickle.dumps(None if validator_info is None else validator_info),
+                    + pickle.dumps(validator_info)
                 )
 
             # No recognized tag
@@ -424,7 +427,7 @@ class SmartNode(threading.Thread):
         while key_hash not in self.routing_table:
             # TODO some better timeout management
             # Wait for 3 seconds and then find a new roles to query
-            if time.time() - start_time > 3:
+            if time.time() - start_time > 100:
                 if ids_to_exclude is not None:
                     if len(ids_to_exclude) > 1:
                         return None
@@ -593,7 +596,7 @@ class SmartNode(threading.Thread):
         # Query roles info/history from dht for reputation if we are a validator
         if self.role == b"V" or b"V2":
             if len(self.nodes) > 0:
-                node_info = self.query_dht(node_id_hash)
+                node_info = self.query_dht(node_id_hash, ids_to_exclude=[self.rsa_key_hash])
                 if node_info:
                     if node_info["reputation"] == 0:
                         self.debug_print(
@@ -938,6 +941,7 @@ class SmartNode(threading.Thread):
     ) -> None:
         """Send data to a connected roles"""
         if n in self.nodes.values():
+            self.debug_print(f"Sending {len(data)} to node: {n.host}:{n.port}")
             n.send(data, compression=compression)
         else:
             self.debug_print("send_to_node: roles not found!")

@@ -268,132 +268,100 @@ class Validator(TorchNode):
         return assigned_workers
 
     def create_job(self, job_data: dict):
-        # Method must be invoked by job request from a user
-        # We receive a minimum job information data structure from user
         modules = job_data["distribution"].copy()
         job_id = job_data["id"]
         author = job_data["author"]
         n_pipelines = job_data["n_pipelines"]
 
+        # Check network availability for job request
         assigned_workers = self.check_job_availability(job_data)
 
-        # Job already exists, decline the job
+        # If no workers available, decline job
         if not assigned_workers:
             self.decline_job()
+            return
 
         self.store_value(job_id, job_data)
 
-        # Get workers to handle job
-        n_modules = len(modules)
+        # Temporary structure to hold worker connection info
+        worker_connection_info = {}
 
-        worker_stats = [
-            self.nodes[worker_id].stats
-            for worker_id in assigned_workers
-        ]
-
-        # Cycle thru offloaded modules and send request to workers for offloading
-        recruitment_threads = []
+        # Assign workers for each module, ensuring unique workers for the same module across pipelines
         for module_id, module in modules.items():
+            worker_assignment = []  # Track assigned workers per pipeline for this module
+
             for stream in range(n_pipelines):
-                t = threading.Thread(
-                    target=self.recruit_worker,
-                    args=(
-                        job_data["author"],
-                        job_id,
-                        module_id,
-                        module["size"],
-                    ),
-                )
-                t.start()
-                recruitment_threads.append(t)
+                worker_found = False
 
-        for t in recruitment_threads:
-            t.join()
+                # Recruit a worker that hasn't been assigned this module in other pipelines
+                for worker_id in assigned_workers:
+                    worker = self.nodes[worker_id]
 
-        # Send recruited worker info to user
-        requesting_node = self.nodes[job_data["author"]]
-        worker_info = [
-            (k, self.query_dht(values["worker"]))
-            for k, values in job_data["distribution"].items()
-        ]
+                    # Ensure worker isn't already assigned this module in a different pipeline
+                    if worker_id not in worker_assignment:
+                        if self.recruit_worker(author, job_id, module_id, module["size"], worker_id):
+                            worker_assignment.append(worker_id)  # Assign worker to this pipeline's module
+                            worker_found = True
+                            time.sleep(0.25)
+                            break  # Move to the next pipeline
 
-        if len(worker_info) != len(recruitment_threads):
-            self.decline_job()
+                # If no suitable worker found for this pipeline, decline job
+                if not worker_found:
+                    self.decline_job()
+                    return
 
-        self.send_to_node(requesting_node, b"ACCEPT-JOB" + job_id + pickle.dumps(worker_info))
+            # Temporarily store worker connection info for this module
+            worker_connection_info[module_id] = [
+                (worker_id, self.query_dht(worker_id)) for worker_id in worker_assignment
+            ]
 
-        # job = {
-        #     "id": b"",  # Job ID hash
-        #     "author": b"",  # Author ID hash
-        #     "capacity": 0,  # Combined model size
-        #     "dp_factor": 0,  # Number of parallel streams
-        #     "distribution": {},  # Distribution graph for a single data parallel stream
-        #     "loss": [],  # Global (or individual worker) loss + accuracy
-        #     "accuracy": [],
-        # }
+        # After recruiting workers, update the original job_data structure
+        for module_id, worker_info in worker_connection_info.items():
+            job_data["distribution"][module_id]["worker"] = worker_info
 
-        # Recruit available workers and send them to user?
+        # Check if all modules have the required number of pipelines assigned
+        for module, module_info in job_data["distribution"].items():
+            if len(module_info["worker"]) != n_pipelines:
+                self.decline_job()
+                return
 
-        # Store job and replicate to other roles
-        # self.store_key_value_pair(job_data["id"].encode(), job_data)
-
-    def decline_job(self, ):
-        self.send_to_node()
+        # Send the updated job data with worker info to the user
+        requesting_node = self.nodes[author]
+        self.send_to_node(
+            requesting_node,
+            b"ACCEPT-JOB" + job_id + pickle.dumps(job_data)
+        )
 
     def recruit_worker(
-        self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int
+            self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int, worker_id: str
     ) -> bool:
         data = pickle.dumps([user_id, job_id, module_id, module_size])
         data = b"JOB-REQ" + data
-        found = False
+        node = self.nodes[worker_id]
 
-        # Cycle through workers finding the closest free mpc to required mpc
-        while not found:
-            selected_worker = None
-            closest_mem_diff = float("inf")
+        # Check worker's available memory
+        worker_stats = node.stats
+        if worker_stats["memory"] < module_size:
+            return False
 
-            for worker_id in self.workers:
-                worker_stats = self.nodes[worker_id].stats
+        self.store_request(node.node_id, job_id + module_id)
+        self.send_to_node(node, data)
 
-                if worker_stats:
-                    worker_mem = worker_stats["memory"]
-
-                    if worker_mem >= module_size:
-                        memory_diff = worker_mem - module_size
-
-                        if memory_diff < closest_mem_diff:
-                            closest_mem_diff = memory_diff
-                            selected_worker = worker_stats["id"]
-
-            # If we can no longer find a worker with the required mpc
-            if not selected_worker:
+        start_time = time.time()
+        while module_id in self.requests[node.node_id]:
+            if time.time() - start_time > 3:
+                self.requests[node.node_id].remove(module_id)
                 return False
 
-            if isinstance(module_id, str):
-                module_id = module_id.encode()
+        # Worker accepted the job, update stats
+        node.stats["memory"] -= module_size
+        job = self.query_dht(job_id)
+        job["distribution"][module_id]["worker"] = node.node_id
 
-            node = self.nodes[selected_worker]
-            self.store_request(node.node_id, job_id + module_id)
-            self.send_to_node(node, data)
+        return True
 
-            start_time = time.time()
-            not_found = None
-            while module_id in self.requests[node.node_id]:
-                if time.time() - start_time > 3:
-                    self.requests[node.node_id].remove(module_id)
-                    not_found = True
-                    break
-
-            if not_found:
-                continue
-
-            else:
-                node.stats["memory"] -= module_size
-                job = self.query_dht(job_id)
-                job["distribution"][module_id]["worker"] = node.node_id
-                return True
-        else:
-            return False
+    def decline_job(self):
+        self.send_to_node()
 
     def request_worker_stats(self):
         for worker_id in self.workers:

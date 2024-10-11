@@ -61,6 +61,7 @@ def create_graph(module: nn.Module, dummy_input: torch.Tensor, output_format: st
 
     return nodes, edges
 
+
 def estimate_memory(module):
     """
     Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy

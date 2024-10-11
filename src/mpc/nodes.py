@@ -111,7 +111,7 @@ class UserCoordinator(BaseCoordinator):
         time.sleep(3)
         workers = self.send_request("check_workers", None)
         dist_model.worker_info = workers
-        distribution = dist_model.parse_model(model, handle_layer=False)
+        distribution = dist_model.parse_model(model, handle_layer=True)
         distributed_config = self.send_request("request_job", (n_pipelines, dp_factor, distribution))
         dist_model.distribute_model(distributed_config)
         return dist_model
