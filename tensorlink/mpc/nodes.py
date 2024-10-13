@@ -13,12 +13,12 @@ import time
 multiprocessing.set_start_method('spawn', force=True)
 
 
-class BaseCoordinator:
+class BaseNode:
     _instance = None
 
     # def __new__(cls, *args, **kwargs):
     #     if cls._instance is None:
-    #         cls._instance = super(BaseCoordinator, cls).__new__(cls)
+    #         cls._instance = super(BaseNode, cls).__new__(cls)
     #         cls._instance._initialized = False
     #         cls._instance._init_kwargs = kwargs
     #     return cls._instance
@@ -71,7 +71,7 @@ class BaseCoordinator:
         raise NotImplementedError("Subclasses must implement this method")
 
 
-class ValidatorCoordinator(BaseCoordinator):
+class ValidatorNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
         kwargs.update({
@@ -88,7 +88,7 @@ class ValidatorCoordinator(BaseCoordinator):
         self.node_process = role_instance
 
 
-class UserCoordinator(BaseCoordinator):
+class UserNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
         kwargs.update({
@@ -117,7 +117,7 @@ class UserCoordinator(BaseCoordinator):
         return dist_model
 
 
-class WorkerCoordinator(BaseCoordinator):
+class WorkerNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
         kwargs.update({

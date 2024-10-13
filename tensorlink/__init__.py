@@ -1,1 +1,1 @@
-from tensorlink.mpc import nodes
+from .mpc import nodes
