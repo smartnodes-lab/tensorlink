@@ -3,7 +3,7 @@ import torch.nn as nn
 import multiprocessing
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from src.ml.distributed import DistributedModel
+from tensorlink.ml.distributed import DistributedModel
 
 q1 = multiprocessing.Queue()
 q2 = multiprocessing.Queue()

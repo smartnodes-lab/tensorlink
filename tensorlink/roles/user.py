@@ -1,7 +1,7 @@
-from src.p2p.connection import Connection
-from src.p2p.torch_node import TorchNode
-from src.p2p.node_api import *
-from src.crypto.rsa import get_rsa_pub_key
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.p2p.node_api import *
+from tensorlink.crypto.rsa import get_rsa_pub_key
 
 import threading
 import hashlib

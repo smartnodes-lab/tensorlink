@@ -1,5 +1,5 @@
-from src.ml.utils import *
-from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
+from tensorlink.ml.utils import *
+from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from transformers.utils import ModelOutput
 import torch.nn as nn

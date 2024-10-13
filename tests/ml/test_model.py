@@ -1,7 +1,7 @@
-from src.roles.worker import Worker
-from src.roles.validator import Validator
-from src.roles.user import User
-from src.ml.distributed import DistributedModel
+from tensorlink.roles.worker import Worker
+from tensorlink.roles.validator import Validator
+from tensorlink.roles.user import User
+from tensorlink.ml.distributed import DistributedModel
 from transformers import Wav2Vec2BertModel, BertModel
 import torch.optim as optim
 import torch

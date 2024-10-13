@@ -1,4 +1,4 @@
-from src.ml.distributed import DistributedModel
+from tensorlink.ml.distributed import DistributedModel
 
 import time
 import torch

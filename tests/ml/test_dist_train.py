@@ -1,4 +1,4 @@
-from src.mpc.nodes import UserCoordinator, WorkerCoordinator, ValidatorCoordinator
+from tensorlink.mpc.nodes import UserCoordinator, WorkerCoordinator, ValidatorCoordinator
 from useful_scripts import *
 
 import torch
@@ -23,22 +23,6 @@ logger.setLevel(logging.INFO)
 BATCH_SIZE = 64
 PIPELINES = 1
 DP_FACTOR = 1
-
-
-class DummyModule(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(1, 100)
-        self.fc2 = nn.Linear(100, 100)
-        self.fc3 = nn.Linear(100, 100)
-        self.fc4 = nn.Linear(100, 1)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
-        x = self.fc4(x)
-        return x
 
 
 if __name__ == "__main__":
@@ -66,16 +50,9 @@ if __name__ == "__main__":
     #                                           token="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")
     # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
     #                                           token="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")
-    # tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-    # model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
-    model = DummyModule()
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
+    model = AutoModelForCausalLM.from_pretrained("bert-base-uncased")
 
     distributed_model = user.create_distributed_model(model, PIPELINES, DP_FACTOR)
     del model
-
-    for _ in range(10):
-        x1 = torch.zeros((1, 1))
-        x_pred = distributed_model(x1)
-        x_pred.sum().backward()
-
-    # train(distributed_model, tokenizer, device, logger, BATCH_SIZE)
+    train(distributed_model, tokenizer, device, logger, BATCH_SIZE)

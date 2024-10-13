@@ -1,8 +1,8 @@
 import web3
 
-from src.p2p.torch_node import TorchNode
-from src.p2p.connection import Connection
-from src.crypto.rsa import get_rsa_pub_key
+from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.p2p.connection import Connection
+from tensorlink.crypto.rsa import get_rsa_pub_key
 
 from web3.exceptions import Web3Exception
 from collections import Counter
@@ -67,6 +67,7 @@ class Validator(TorchNode):
         self.debug_print(f"Launching Validator: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         self.worker_memories = {}
+        self.all_workers = {}
 
         # Params for smart contract state aggregation
         self.last_loaded_job = 0
@@ -138,6 +139,23 @@ class Validator(TorchNode):
 
                         else:
                             self.create_job(job_req)
+
+                elif b"REQUEST-WORKERS" == data[:15]:
+                    if node.role == b"V":
+                        t = threading.Thread(
+                            target=self.request_worker_stats,
+                            args=(node.node_id,),
+                            daemon=True
+                        )
+                        t.start()
+
+                elif b"ALL-WORKER-STATS" == data[:16]:
+                    if node.node_id in self.requests.keys() and b"ALL-WORKER-STATS" in self.requests[node.node_id]:
+                        self.requests[node.node_id].remove(b"ALL-WORKER-STATS")
+                        workers = pickle.loads(data[16:])
+                        # TODO thread for aggregation and worker stats aggregation (ie average/most common values)
+                        for worker, stats in workers.items():
+                            self.all_workers[worker] = stats
 
                 elif b"STATS-RESPONSE" == data[:14]:
                     self.debug_print(f"Received stats from worker: {node.node_id}")
@@ -360,10 +378,23 @@ class Validator(TorchNode):
 
         return True
 
-    def decline_job(self):
-        self.send_to_node()
+    def get_workers(self):
+        workers = {}
 
-    def request_worker_stats(self):
+        self.request_worker_stats()
+
+        for node_id, node in self.nodes.items():
+            if node.role == b"V":
+                self.send_to_node(node, b"REQUEST-WORKERS")
+                self.store_request(node_id, b"ALL-WORKER-STATS")
+
+        time.sleep(6)
+
+        for worker in self.workers:
+            if self.nodes[worker].stats:
+                self.all_workers[worker] = self.nodes[worker].stats
+
+    def request_worker_stats(self, send_to=None):
         for worker_id in self.workers:
             connection = self.nodes[worker_id]
             message = b"STATS-REQUEST"
@@ -371,7 +402,18 @@ class Validator(TorchNode):
             self.store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
 
-        time.sleep(1)
+        time.sleep(2)
+
+        if send_to is not None:
+            node = self.nodes[send_to]
+            workers = {}
+
+            for worker in self.workers:
+                stats = self.nodes[worker].stats
+                if stats:
+                    workers[worker] = stats
+
+            self.send_to_node(node, b"ALL-WORKER-STATS" + pickle.dumps(workers))
 
     def distribute_job(self):
         """Distribute job to a few other non-seed validators"""
@@ -511,7 +553,7 @@ class Validator(TorchNode):
 
                     # Create job, ensure job is requested on p2p network
                     elif function_type == 1:
-                        # TODO ensure the job type is for the src sub-network
+                        # TODO ensure the job type is for the tensorlink sub-network
                         user_hash, job_hash, capacities = decode(
                             ["bytes32", "bytes32", "uint256[]"], call_data
                         )

@@ -1,5 +1,5 @@
-from src.crypto.rsa import *
-from src.p2p.connection import Connection
+from tensorlink.crypto.rsa import *
+from tensorlink.p2p.connection import Connection
 
 from logging.handlers import TimedRotatingFileHandler
 from miniupnpc import UPnP
@@ -594,7 +594,7 @@ class SmartNode(threading.Thread):
         node_id_hash = hashlib.sha256(connected_node_id).hexdigest().encode()
 
         # Query roles info/history from dht for reputation if we are a validator
-        if self.role == b"V" or b"V2":
+        if self.role == b"V":
             if len(self.nodes) > 0:
                 node_info = self.query_dht(node_id_hash, ids_to_exclude=[self.rsa_key_hash])
                 if node_info:
@@ -620,7 +620,7 @@ class SmartNode(threading.Thread):
 
         # Confirm their key is a valid RSA key
         if authenticate_public_key(connected_node_id):
-            # Role-specific confirmations (Must be U, W, or V to utilize smart roles, src, etc.)
+            # Role-specific confirmations (Must be U, W, or V to utilize smart roles, tensorlink, etc.)
             if self.off_chain_test is False:
                 try:
 
@@ -1025,8 +1025,8 @@ class SmartNode(threading.Thread):
 
         self.sock.close()
 
-        if self.role == b"U":
-            self.endpoint_thread.join()
+        # if self.role == b"U":
+        #     self.endpoint_thread.join()
 
         self.stop_upnp()
 

@@ -1,7 +1,7 @@
-from src.ml.utils import get_gpu_memory, handle_output
-from src.p2p.smart_node import SmartNode
-from src.p2p.connection import Connection
-from src.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
+from tensorlink.ml.utils import get_gpu_memory, handle_output
+from tensorlink.p2p.smart_node import SmartNode
+from tensorlink.p2p.connection import Connection
+from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from multiprocessing import shared_memory
 import torch.optim as optim
@@ -390,8 +390,6 @@ class TorchNode(SmartNode):
         TODO should be accompanied by a requested proof (from smart contract) or the specific user
         """
         # Request parameters from ML process
-        self.mpc_lock.acquire()
-
         pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
         self.send_to_node(node, pickled_data)
 

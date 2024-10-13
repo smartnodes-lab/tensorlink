@@ -1,8 +1,8 @@
-from src.roles.user import User
-from src.roles.validator import Validator
-from src.roles.worker import Worker
-from src.ml.distributed import DistributedModel
-from src.ml.worker import DistributedWorker
+from tensorlink.roles.user import User
+from tensorlink.roles.validator import Validator
+from tensorlink.roles.worker import Worker
+from tensorlink.ml.distributed import DistributedModel
+from tensorlink.ml.worker import DistributedWorker
 
 import multiprocessing
 import threading

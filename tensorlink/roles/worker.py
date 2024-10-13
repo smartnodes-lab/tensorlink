@@ -1,7 +1,7 @@
-from src.p2p.torch_node import TorchNode
-from src.p2p.connection import Connection
-from src.ml.utils import estimate_memory, handle_output, get_gpu_memory
-from src.crypto.rsa import get_rsa_pub_key
+from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.p2p.connection import Connection
+from tensorlink.ml.utils import estimate_memory, handle_output, get_gpu_memory
+from tensorlink.crypto.rsa import get_rsa_pub_key
 
 from dotenv import get_key
 import torch.nn as nn
