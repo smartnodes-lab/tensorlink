@@ -29,7 +29,8 @@ class Worker(TorchNode):
         debug: bool = False,
         max_connections: int = 0,
         upnp=True,
-        off_chain_test=False
+        off_chain_test=False,
+        local_test=False
     ):
         super(Worker, self).__init__(
             request_queue,
@@ -38,6 +39,7 @@ class Worker(TorchNode):
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
+            local_test=local_test
         )
 
         self.training = False
@@ -51,6 +53,7 @@ class Worker(TorchNode):
 
         self.debug_colour = "\033[94m"
         self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})")
+        self.available_memory = 2e9
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -98,6 +101,10 @@ class Worker(TorchNode):
                         print(node.main_port)
                         raise e
 
+                elif b"OPTIMIZER" == data[:9]:
+                    module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
+                    self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
+
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
@@ -139,17 +146,6 @@ class Worker(TorchNode):
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
             pass
-
-        print("Node stopping...")
-        for node in self.nodes.values():
-            node.stop()
-
-        for node in self.nodes.values():
-            node.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass

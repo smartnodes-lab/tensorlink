@@ -3,23 +3,27 @@ import torch.nn as nn
 import multiprocessing
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from tensorlink.ml.distributed import DistributedModel
+from tensorlink.ml.module import DistributedModel
 
-q1 = multiprocessing.Queue()
-q2 = multiprocessing.Queue()
 
-tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
-                                          token="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")
-model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
-                                             token="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")
+class DummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(10, 10)
+        self.fc2 = nn.Linear(10, 10)
 
-dmodel = DistributedModel(q1, q2, model, 1)
-dmodel.worker_info = {
-    b'509d89bf56704c67873c328e4f706a705b2fdc1671ebacab1083c9c6d2df650f': {
-        'id': b'509d89bf56704c67873c328e4f706a705b2fdc1671ebacab1083c9c6d2df650f', 'mpc': 8e9, 'role': b'W',
-        'training': True},
-    b'409d89bf56704c67873c328e4f706a705b2fdc1671ebacab1083c9c6d2df650f': {
-        'id': b'409d89bf56704c67873c328e4f706a705b2fdc1671ebacab1083c9c6d2df650f', 'mpc': 24e9, 'role': b'W',
-        'training': True}
-}
-dmodel.parse_model(model)
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.fc2(x)
+        return x
+
+
+if __name__ == "__main__":
+
+    # tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
+    #                                           token="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")
+    # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
+    #                                              token="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")
+    model = DummyModel()
+    dmodel = DistributedModel(q1, q2, lock, model, 1)
+    dmodel.distribute_model()

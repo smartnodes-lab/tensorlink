@@ -51,7 +51,8 @@ class DistributedWorker:
                         # Backward pass with CUDA synchronization for accurate profiling
                         if self.device.type != "cpu":
                             torch.cuda.synchronize()
-                        assoc_output.backward(loss[-1].view_as(assoc_output))
+
+                        assoc_output.backward(loss[-1])
 
                         if self.device.type != "cpu":
                             torch.cuda.synchronize()
@@ -123,7 +124,7 @@ class DistributedWorker:
         return response["return"]
 
     def check_node(self):
-        update_check_interval = 20
+        update_check_interval = 25
         counter = 0
 
         while not self.terminate:
@@ -143,6 +144,8 @@ class DistributedWorker:
 
                     with self.lock:
                         self.modules[module_id] = module
+                        self.optimizers[module_id] = module.optimizer
+                        delattr(module, "optimizer")
                         self.send_request("module_loaded", module_id)
 
             # Process training, forward, and backward queues
@@ -155,6 +158,13 @@ class DistributedWorker:
                     if isinstance(is_training, bool):
                         module.training = is_training
 
+                    # Check for parameters requests
+                    params_req = self.send_request("check_parameters_request", module_id)
+                    if params_req:
+                        parameters = list(module.parameters())
+                        size, name = store_in_shared_memory(parameters)
+                        self.send_request("send_parameters", (module.host, size, name, module_id))
+
                     # Handle forward queue
                     forward_task = self.send_request("check_forward", module_id)
                     if forward_task:
@@ -165,8 +175,31 @@ class DistributedWorker:
                     if backward_task:
                         module.backward_queue.put(backward_task)
 
+                    state_update = self.send_request("check_state_update", module_id)
+                    if state_update:
+                        if state_update[0] == "init":
+                            optimizer_kwargs = state_update[1]
+                            self.optimizers[module_id](module.parameters(), **optimizer_kwargs)
+                            self.send_request("optimizer_loaded", module_id)
+
+                        elif state_update[0] == "step":
+                            pass
+
+                        elif state_update[0] == "zero_grad":
+                            pass
+
+            # Check for node termination
+            self.check_for_termination()
+
             counter += 1
             time.sleep(0.1)
+
+    def check_for_termination(self):
+        # Send a request to check if the node is shutting down
+        shutdown_signal = self.send_request("check_shutdown", None)
+        if shutdown_signal:  # Assuming shutdown_signal is True or some indication of shutdown
+            print("Termination signal received. Shutting down DistributedWorker process...")
+            self.terminate = True
 
     def run(self):
         node_check_thread = threading.Thread(target=self.check_node)

@@ -1,13 +1,15 @@
-from tensorlink.ml.distributed import DistributedModel
-
-import time
 import torch
-import numpy as np
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from transformers import BertTokenizer, BertForSequenceClassification, AdamW, get_linear_schedule_with_warmup, set_seed
 from datasets import load_dataset
 from tqdm import tqdm
-from transformers import set_seed, get_linear_schedule_with_warmup
+import time
+import numpy as np
 import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def flat_accuracy(preds, labels):
@@ -16,160 +18,192 @@ def flat_accuracy(preds, labels):
     return np.sum(pred_flat == labels_flat) / len(labels_flat)
 
 
-def preprocess_data(dataset, tokenizer, split, logger):
-    input_ids = []
-    attention_masks = []
-
-    logger.info("Preprocessing data")
-    for sent in tqdm(dataset[split]):
-        encoded_dict = tokenizer.encode_plus(
-            sent["text"],
-            add_special_tokens=True,
-            max_length=100,
-            pad_to_max_length=True,
-            return_attention_mask=True,
-            return_tensors="pt",
+def preprocess_data(dataset, tokenizer, max_length=128):
+    def tokenize_function(examples):
+        return tokenizer(
+            examples["text"],
+            truncation=True,
+            padding="max_length",
+            max_length=max_length
         )
-        input_ids.append(encoded_dict["input_ids"])
-        attention_masks.append(encoded_dict["attention_mask"])
 
-    input_ids = torch.cat(input_ids, dim=0)
-    attention_masks = torch.cat(attention_masks, dim=0)
-    labels = torch.tensor(dataset[split]["label"])
-
-    return TensorDataset(input_ids, attention_masks, labels)
+    # Directly apply the tokenization function using a smaller dataset
+    dataset = dataset.map(tokenize_function, batched=True)
+    dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+    return dataset
 
 
-def train(model, tokenizer, device, logger, batch_size):
-    epochs = 1
+# Function to load and preprocess a subset
+def load_and_preprocess_subset(dataset, tokenizer, split, subset_size, max_length=128):
+    subset = dataset[split].shuffle(seed=42).select(range(subset_size))
+    return preprocess_data(subset, tokenizer, max_length=max_length)
+
+
+def train(model, optimizer, tokenizer, device, batch_size=8, epochs=1):
     set_seed(42)
+    model.to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=2e-5)
-    dataset = load_dataset("zeroshot/twitter-financial-news-sentiment")
+    # Load a dummy dataset
+    dataset = load_dataset("imdb")
 
-    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(512))
-    dataset["validation"] = dataset["validation"].shuffle(seed=42).select(range(128))
-    train_dataset = preprocess_data(dataset, tokenizer, "train", logger)
-    val_dataset = preprocess_data(dataset, tokenizer, "validation", logger)
+    train_subset_size = 500
+    test_subset_size = 100
 
-    logger.info("Train dataset size: %d", len(train_dataset))
-    logger.info("Validation dataset size: %d", len(val_dataset))
+    # Preprocess only the smaller subsets
+    train_dataset = load_and_preprocess_subset(dataset, tokenizer, "train", train_subset_size)
+    val_dataset = load_and_preprocess_subset(dataset, tokenizer, "test", test_subset_size)
 
-    train_dataloader = DataLoader(
-        train_dataset, sampler=RandomSampler(train_dataset), batch_size=batch_size
-    )
-
-    val_dataloader = DataLoader(
-        val_dataset, sampler=SequentialSampler(val_dataset), batch_size=batch_size
-    )
+    train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=batch_size)
+    val_dataloader = DataLoader(val_dataset, sampler=SequentialSampler(val_dataset), batch_size=batch_size)
 
     total_steps = len(train_dataloader) * epochs
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
 
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=0,  # Default value in run_glue.py
-        num_training_steps=total_steps,
-    )
-
-    training_stats = []
-    total_start_time = time.time()
-
+    # Rest of the training loop
     for epoch_i in range(epochs):
-        start_time = time.time()
-        logger.info("======== Epoch %d / %d ========", epoch_i + 1, epochs)
-        logger.info("Training...")
-
-        total_train_loss = 0
-        losses = []
+        logger.info(f"Epoch {epoch_i + 1}/{epochs}")
         model.train()
+        total_train_loss = 0
 
-        for step, batch in enumerate(tqdm(train_dataloader, position=0, leave=True)):
-            b_input_ids = batch[0].to(device)
-            b_input_mask = batch[1].to(device)
-            b_labels = batch[2].to(device)
+        for batch in tqdm(train_dataloader, desc="Training"):
+            b_input_ids = batch['input_ids'].to(device)
+            b_input_mask = batch['attention_mask'].to(device)
+            b_labels = batch['label'].to(device)
 
             optimizer.zero_grad()
-
-            output = model(
-                b_input_ids,
-                # token_type_ids=None,
-                # attention_mask=b_input_mask,
-                # labels=b_labels,
-            )
-
-            loss = output.loss
+            outputs = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+            loss = outputs.loss
             total_train_loss += loss.item()
 
-            losses.append(loss.item())
-
-            if step % 50 == 0 and step != 0:
-                logger.info("Step %d average loss: %f", step, np.mean(losses))
-
-            if isinstance(model, DistributedModel):
-                model.backward(loss)
-            else:
-                loss.backward()
-
+            loss.backward()
             optimizer.step()
             scheduler.step()
 
         avg_train_loss = total_train_loss / len(train_dataloader)
-        epoch_time = time.time() - start_time
-        logger.info("Average training loss: %f", avg_train_loss)
-        logger.info("Epoch training time: %.2f seconds", epoch_time)
-        logger.info("End of Epoch %d", epoch_i + 1)
+        logger.info(f"Average Training Loss: {avg_train_loss}")
 
+        # Validation
+        model.eval()
         total_eval_accuracy = 0
         total_eval_loss = 0
-        logger.info("Running Evaluation")
-        model.eval()
 
-        for batch in val_dataloader:
-            b_input_ids = batch[0].to(device)
-            b_input_mask = batch[1].to(device)
-            b_labels = batch[2].to(device)
+        for batch in tqdm(val_dataloader, desc="Evaluating"):
+            b_input_ids = batch['input_ids'].to(device)
+            b_input_mask = batch['attention_mask'].to(device)
+            b_labels = batch['label'].to(device)
+
             with torch.no_grad():
-                output = model(
-                    b_input_ids,
-                    token_type_ids=None,
-                    attention_mask=b_input_mask,
-                    labels=b_labels,
-                )
+                outputs = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                loss = outputs.loss
+                total_eval_loss += loss.item()
 
-            total_eval_loss += output.loss.item()
-            logits = output.logits.detach().cpu().numpy()
-            label_ids = b_labels.to("cpu").numpy()
-
-            total_eval_accuracy += flat_accuracy(logits, label_ids)
+                logits = outputs.logits.detach().cpu().numpy()
+                label_ids = b_labels.to('cpu').numpy()
+                total_eval_accuracy += flat_accuracy(logits, label_ids)
 
         avg_val_accuracy = total_eval_accuracy / len(val_dataloader)
         avg_val_loss = total_eval_loss / len(val_dataloader)
 
-        logger.info("Validation Loss: %f", avg_val_loss)
-        logger.info("Validation Accuracy: %f", avg_val_accuracy)
+        logger.info(f"Validation Loss: {avg_val_loss}")
+        logger.info(f"Validation Accuracy: {avg_val_accuracy}")
 
-        training_stats.append(
-            {
-                "epoch": epoch_i + 1,
-                "Training Loss": avg_train_loss,
-                "Valid. Loss": avg_val_loss,
-                "Valid. Accur.": avg_val_accuracy,
-            }
-        )
-
-    total_training_time = time.time() - total_start_time
     logger.info("Training complete!")
-    logger.info("Total training time: %.2f seconds", total_training_time)
 
-    # Total summary
-    avg_train_loss_all_epochs = np.mean([stat["Training Loss"] for stat in training_stats])
-    avg_val_loss_all_epochs = np.mean([stat["Valid. Loss"] for stat in training_stats])
-    avg_val_accuracy_all_epochs = np.mean([stat["Valid. Accur."] for stat in training_stats])
 
-    logger.info("==== Train Summary ====")
-    logger.info("Average Training Loss: %f", avg_train_loss_all_epochs)
-    logger.info("Average Validation Loss: %f", avg_val_loss_all_epochs)
-    logger.info("Average Validation Accuracy: %f", avg_val_accuracy_all_epochs)
-    logger.info("Training stats: %s", training_stats)
+# def prepare_dummy_data(choice):
+#     texts = ["This is a positive sentence.", "This is a negative sentence."]
+#     labels = [1, 0]
+#
+#     # Tokenization
+#     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+#     tokenized_texts = tokenizer(texts, padding=True, truncation=True, return_tensors='pt')
+#
+#     # dataset
+#     if choice == 1:
+#         dataset = TensorDataset(tokenized_texts['input_ids'], tokenized_texts['attention_mask'], torch.tensor(labels))
+#         dataloader = DataLoader(dataset)
+#         return dataloader
+#     elif choice == 2:
+#         dataset = Dataset.from_dict({
+#             'input_ids': tokenized_texts['input_ids'].tolist(),
+#             'attention_mask': tokenized_texts['attention_mask'].tolist(),
+#             'labels': labels,
+#         })
+#         return dataset
+#     else:
+#         return tokenized_texts
 
-    return training_stats
+
+# def simple_train(model, optimizer):
+#     loss_fn = torch.nn.CrossEntropyLoss()
+#
+#     dataloader = prepare_dummy_data(1)
+#
+#     # simple training loop
+#     for batch in dataloader:
+#         optimizer.zero_grad()
+#         input_ids, attention_mask, label = batch
+#         outputs = model(input_ids, attention_mask=attention_mask, labels=label)
+#         loss = outputs.loss
+#         loss.backward()
+#         optimizer.step()
+#         print(loss.item())
+
+
+# def d_simple_train(model, optimizer):
+#     loss_fn = torch.nn.CrossEntropyLoss()
+#
+#     dataloader = prepare_dummy_data(1)
+#
+#     # simple training loop
+#     for batch in dataloader:
+#         optimizer.zero_grad()
+#         input_ids, attention_mask, label = batch
+#         outputs = model(input_ids, attention_mask=attention_mask, labels=label)
+#         loss = outputs.loss
+#         model.backward(loss)
+#         optimizer.step()
+#         print(loss.item())
+
+
+# def hf_train(model, optimizer):
+#     optimizer.zero_grad()
+#     loss_fn = torch.nn.CrossEntropyLoss()
+#
+#     training_args = TrainingArguments(
+#         output_dir='./results',
+#         num_train_epochs=1,
+#         per_device_train_batch_size=1,
+#         logging_steps=1,
+#         overwrite_output_dir=True,
+#     )
+#
+#     dataset = prepare_dummy_data(2)
+#
+#     def compute_metrics(pred):
+#         labels = pred.label_ids
+#         preds = pred.predictions.argmax(-1)
+#         accuracy = (preds == labels).mean()
+#         loss = pred.loss
+#         return {"accuracy": accuracy}
+#
+#     trainer = Trainer(
+#         model=model,
+#         args=training_args,
+#         train_dataset=dataset,
+#         compute_metrics=compute_metrics
+#     )
+#
+#     trainer.train()
+
+
+# def fp_check(model):
+#     tokenized_texts = prepare_dummy_data(3)
+#     input_ids = tokenized_texts['input_ids'][0].unsqueeze(0)  # Add batch dimension
+#     attention_mask = tokenized_texts['attention_mask'][0].unsqueeze(0)  # Add batch dimension
+#
+#     # Perform a forward pass through the model
+#     with torch.no_grad():
+#         outputs = model(input_ids, attention_mask=attention_mask)
+#
+#     print(outputs.logits)

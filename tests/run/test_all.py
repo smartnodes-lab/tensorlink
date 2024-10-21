@@ -1,4 +1,4 @@
-from tensorlink.mpc.nodes import WorkerCoordinator, ValidatorCoordinator, UserCoordinator
+from tensorlink.mpc.nodes import WorkerNode, ValidatorNode, UserNode
 from tensorlink.crypto.rsa import *
 import hashlib
 from transformers import BertModel
@@ -7,19 +7,19 @@ import time
 
 if __name__ == "__main__":
 
-    # user = UserCoordinator(upnp=True, off_chain_test=True)
-    # time.sleep(0.2)
-    worker = WorkerCoordinator(upnp=False, off_chain_test=True)
+    user = UserNode(upnp=False, off_chain_test=True)
     time.sleep(0.2)
-    validator = ValidatorCoordinator(upnp=False, off_chain_test=True)
+    worker = WorkerNode(upnp=False, off_chain_test=True)
+    time.sleep(0.2)
+    validator = ValidatorNode(upnp=False, off_chain_test=True)
 
     time.sleep(0.2)
 
     val_key, val_host, val_port = validator.send_request("info", None)
 
     worker.send_request("connect_node", (val_key, val_host, val_port))
-    time.sleep(1)
-    # user.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(5)
+    user.send_request("connect_node", (val_key, val_host, val_port))
     # user.send_request("connect_node", (b"", "142.188.24.158", 38751))
 
     while True:
@@ -27,6 +27,10 @@ if __name__ == "__main__":
             time.sleep(3)
         except KeyboardInterrupt:
             break
+
+    validator.cleanup()
+    worker.cleanup()
+    user.cleanup()
 
     # model = BertModel.from_pretrained("bert-base-uncased")
     # distributed_model = user.create_distributed_model(model, 1, 1)

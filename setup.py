@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 # Version of the package
-VERSION = "0.1.0"
+VERSION = "0.0.1"
 
 # Description of the package
 DESCRIPTION = (

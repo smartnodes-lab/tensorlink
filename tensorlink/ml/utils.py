@@ -22,20 +22,46 @@ def get_gpu_memory():
             memory += free
 
     else:
-        # TODO CPU should be able to handle 1 GB (temporary fix)
-        # memory += 4e9
-        memory += 4e9
+        # TODO CPU should be able to handle 100 MB (temporary fix)
+        # memory += 400e6
+        memory += 1e9
 
     return memory
 
 
-def estimate_memory(module: nn.Module):
-    """Estimate the memory usage of a module."""
+def estimate_memory(module: nn.Module, batch_size: int = 256, input_size=(3, 224, 224)):
+    """
+    Estimate the memory usage of a module in bytes, considering parameters and approximations
+    for activations without performing a forward pass.
+
+    Args:
+        module (nn.Module): The PyTorch module.
+        batch_size (int): The batch size of input data.
+        input_size (tuple): The size of a single input (C, H, W).
+
+    Returns:
+        int: The estimated memory usage in bytes.
+    """
     memory_usage = 0
+
+    # Estimate memory for model parameters
     for param in module.parameters():
         memory_usage += param.numel() * param.element_size()
 
-    return memory_usage
+    # Estimate memory for gradients (same size as parameters during training)
+    # if module.training:
+    memory_usage *= 2
+
+    # Approximate memory for input data
+    input_memory = batch_size * torch.prod(torch.tensor(input_size)) * 4  # float32 inputs
+    memory_usage += input_memory.item()
+
+    # Estimate memory for activations based on layer type (rough estimation)
+    activation_factor = 1.5 if isinstance(module, (nn.Conv2d, nn.Linear)) else 1.2
+    activation_memory = input_memory * activation_factor * len(list(module.children()))
+    memory_usage += activation_memory
+
+    return int(memory_usage)
 
 
 def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
@@ -258,6 +284,39 @@ def combine_micro_batches(micro_batches):
                 final_output[key] = value  # Leave as is if not a tensor
 
         return type(micro_batches[0])(**final_output)
+
+    else:
+        raise TypeError("Unsupported output type")
+
+
+def split_into_micro_batches(combined_output, n_micro_batch):
+    """
+    Splits the combined output back into individual micro-batches.
+    """
+    if isinstance(combined_output, torch.Tensor):
+        # Split the tensor along the batch dimension
+        return torch.chunk(combined_output, n_micro_batch, dim=0)
+
+    elif isinstance(combined_output, ModelOutput):
+        micro_batches = [defaultdict(list) for _ in range(n_micro_batch)]
+
+        # Iterate over each key-value pair in the combined output
+        for key, value in combined_output.items():
+            if isinstance(value, torch.Tensor):
+                # Split the tensor along the batch dimension
+                split_values = torch.chunk(value, n_micro_batch, dim=0)
+
+                # Assign each split to the corresponding micro-batch
+                for i, split_value in enumerate(split_values):
+                    micro_batches[i][key] = split_value
+
+            else:
+                # Distribute non-tensor values as they are
+                for i in range(n_micro_batch):
+                    micro_batches[i][key] = value
+
+        # Convert each dictionary back into a ModelOutput
+        return [type(combined_output)(**batch) for batch in micro_batches]
 
     else:
         raise TypeError("Unsupported output type")

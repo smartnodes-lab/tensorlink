@@ -1,15 +1,16 @@
+from tensorlink.ml.optim import create_distributed_optimizer, DistributedParameter
 from tensorlink.ml.utils import *
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from transformers.utils import ModelOutput
-import torch.nn as nn
-import torch
-
 from collections import defaultdict
 from types import GeneratorType
+import torch.nn as nn
 import threading
 import hashlib
 import random
+import pickle
+import torch
 import queue
 import time
 import gc
@@ -85,29 +86,12 @@ class DistributedModel(nn.Module):
         self.n_micro_batch = n_pipelines
 
         self.distributed_graph = {}
+        self.parameters_storage = {}
+
         self.device = (
             device if device else "cuda" if torch.cuda.is_available() else "cpu"
         )
-
-        self.spawn_workers = []
-
-    def request_job(
-        self,
-        max_module_size=4e9,
-    ):
-        """Request job through smart contract and set up the relevant connections for a distributed model.
-        Returns a distributed nn.Module with built-in RPC calls to workers."""
-        # TODO Auto micro batch (data pipelines) selection based on job request (free = 2 max, paid is maximized to 16?)
-
-        # Get model distribution schematic
-        self.distributed_graph = self.parse_model(self.model, max_module_size)
-
-        # Get offloaded GPU usage for network
-        capacity = (sum(v["size"] for v in self.distributed_graph.values()) * self.n_pipelines)
-
-        job_info = (self.n_pipelines, capacity, self.distributed_graph)
-        config = self.send_request("request_job", job_info)
-        self.distribute_model(config)
+        self.optimizer = None
 
     def forward(self, *args, **kwargs):
         """
@@ -163,16 +147,17 @@ class DistributedModel(nn.Module):
         """
         Performs the backward pass through the model.
         - Splits input into micro-batches and runs them in parallel.
-        - TODO Creates multiple parallel streams of workers for model parallel acceleration
-        - TODO halt worker parameter updates until final micro-batch
         """
         if hasattr(loss, "micro_loss"):
-            loss = loss.micro_loss
+            micro_losses = loss.micro_loss
+        else:
+            # Split the combined loss into micro-batch-specific losses
+            micro_losses = split_into_micro_batches(loss, self.n_micro_batch)
 
         threads = []
         for micro in range(self.n_micro_batch):
             t = threading.Thread(
-                target=self._perform_micro_backward, args=(micro, loss[micro])
+                target=self._perform_micro_backward, args=(micro, micro_losses[micro])
             )
             t.start()
             threads.append(t)
@@ -305,6 +290,15 @@ class DistributedModel(nn.Module):
     def eval(self):
         self.train(False)
 
+    def children(self):
+        # If the model is an instance of OffloadedModule, return an iterator with only itself.
+        if isinstance(self.model, OffloadedModule):
+            yield self.model  # Just yield the OffloadedModule, don't dive into its children.
+        else:
+            # Otherwise, yield the model itself and then recursively yield its children.
+            yield self.model
+            yield from self.model.children()
+
     def parameters(self, recurse: bool = True, distributed: bool = True):
         """
         Collects parameters from all modules (including offloaded) asynchronously and returns them.
@@ -322,26 +316,25 @@ class DistributedModel(nn.Module):
                         )
                         t.start()
                         parameter_requests.append(t)
-                        parameters.append(children.module_id)
                     elif contains_offloaded(children):
                         recurse_parameters(children)
                     else:
                         parameters.append(children.parameters())
 
-            recurse_parameters(self.model)
+            recurse_parameters(self)
 
             for req in parameter_requests:
                 req.join()
 
-            for i in range(len(parameters)):
-                if isinstance(parameters[i], GeneratorType):
-                    pass
+            for module_id, module_info in self.distributed_graph.items():
+                if module_info["type"] == "offloaded":
+                    parameters.append(self.parameters_storage[module_id])
                 else:
-                    params = self.master_node.parameters[parameters[i]]
-                    parameters[i] = params
+                    module, module_name = access_module(self.model, module_info["mod_id"])
+                    parameters.append(list(module.parameters()))
 
         else:
-            parameters = self.model.parameters()
+            parameters = self.model.parameters(recurse)
 
         return parameters
 
@@ -359,7 +352,9 @@ class DistributedModel(nn.Module):
             if args is not None:
                 waiting = False
                 size, name = args
-                output = get_from_shared_memory(size, name)
+                parameters = get_from_shared_memory(size, name, encoded=True)
+                parameters = pickle.loads(parameters)
+                self.parameters_storage[module_id] = parameters
 
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
@@ -430,7 +425,6 @@ class DistributedModel(nn.Module):
         distributed model configuration.
         # TODO update mpc of semi-offloaded modules
         """
-
         if config is None:
             config = {}
         if ids is None:
@@ -494,41 +488,19 @@ class DistributedModel(nn.Module):
                 new_ids = ids + [i]
                 module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
 
-                # Try to handle on user if specified
-                if self.user_memory >= module_memory and handle_layer is True:
-                    # If user can handle the layer
-
+                # Try handling the layer with user memory if possible
+                if self.user_memory >= module_memory and handle_layer:
                     self.user_memory -= module_memory
                     k, v = create_loaded(submodule, new_ids, module_memory)
                     config[k] = v
                     handle_layer = False
-                    continue
-
-                # Break down model further if we haven't handled user's portion of model
-                elif handle_layer is True:
-                    sub_config = self.parse_model(
-                        submodule,
-                        config=config.copy(),
-                        ids=new_ids,
-                        handle_layer=handle_layer,
-                    )
-                    handle_layer = False
-                    k, v = create_loaded(submodule, new_ids, module_memory)
-                    v["subconfig"] = sub_config
-                    config[k] = v
-                    continue
-
-                # Append module id to offloaded config if meets the minimum size
                 elif module_memory <= max_worker_mem:
                     k, v = create_offloaded(submodule, new_ids, module_memory)
                     config[k] = v
-
-                # Recursively break down model if too large
                 else:
-                    sub_config = self.parse_model(
-                        submodule, config=config.copy(), ids=new_ids, handle_layer=handle_layer
-                    )
-
+                    # Recursively break down larger modules that can't fit in memory
+                    sub_config = self.parse_model(submodule, config=config.copy(), ids=new_ids,
+                                                  handle_layer=handle_layer)
                     k, v = create_loaded(submodule, new_ids, module_memory)
                     v["subconfig"] = sub_config
                     config[k] = v
@@ -556,14 +528,33 @@ class DistributedModel(nn.Module):
 
         file_name = f"{module_hash.decode()}_{worker_id.decode()}.pth"
         torch.save(child_module, file_name)  # Save the module to disk
-        offloaded_module = OffloadedModule(self, worker_id, module_hash)
+        module_info = str(child_module)
+        offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
         # offloaded_module.n_micro_batch = 0
 
         # Detach and clear the parameters of the child_module to free memory
-        for param in child_module.parameters():
-            param.detach_()  # Detach from the computation graph
-            param.requires_grad = False  # Ensure no gradients are computed
-            param.data = torch.empty(0)  # Clear the data in the parameter
+
+        for name, param in child_module.named_parameters():
+            # Create the DistributedParameter.
+            module_hash = hash(child_module)
+            distributed_param = DistributedParameter(child_module, module_hash, worker_id, name)
+
+            # Use a safe name for attribute registration.
+            safe_name = name.replace('.', '_')
+            setattr(child_module, safe_name, distributed_param)
+
+            # Replace the parameter in _parameters.
+            child_module._parameters[safe_name] = distributed_param
+            offloaded_module.add_distributed_parameter(safe_name, distributed_param)
+
+            # Remove the original parameter using its original name.
+            if name in child_module._parameters:
+                del child_module._parameters[name]
+
+        # for param in child_module.parameters():
+        #     param.detach_()  # Detach from the computation graph
+        #     param.requires_grad = False  # Ensure no gradients are computed
+        #     param.data = torch.empty(0)  # Clear the data in the parameter
 
         # Optional: Clear any buffers (like batch norm running stats) in the child module
         for buffer_name, buffer in child_module.named_buffers(recurse=False):
@@ -583,6 +574,8 @@ class DistributedModel(nn.Module):
             else:
                 child_name = list(parent_module.named_children())[module_id[-1]][0]
                 setattr(parent_module, child_name, offloaded_module)
+        else:
+            setattr(self, "model", offloaded_module)
 
     def send_request(self, request_type, args):
         """
@@ -611,12 +604,20 @@ class OffloadedModule(nn.Module):
         pytorch model flow.
     """
 
-    def __init__(self, parent_model: DistributedModel, worker_id, module_id: bytes):
+    def __init__(self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes):
         super(OffloadedModule, self).__init__()
 
+        self.module_name = module_name.split("(")[0]
+        self.module_info = module_name.split("(")[1][:-1]
         self.parent_model = parent_model
         self.worker_id = worker_id
         self.module_id = module_id
+
+    def children(self):
+        # Print the offloaded module and the original model name
+        # print(f"OffloadedModule: {self.module_name}")
+        # Return an empty iterator to hide deeper children
+        return iter([])
 
     def spawn_worker(self, name):
         # # Initialize a threading Timer to monitor the loading process
@@ -698,3 +699,15 @@ class OffloadedModule(nn.Module):
         self.parent_model.model.intermediates[n_micro].append(inter_storage)
 
         return output
+
+    def add_distributed_parameter(self, name, distributed_param):
+        """Register a DistributedParameter to the offloaded module."""
+        self._parameters[name] = distributed_param
+
+    def parameters(self, recurse=True):
+        """Override parameters to return wrapped DistributedParameters."""
+        return iter(self._parameters.values())
+
+    def __repr__(self):
+        # Custom representation to prevent recursion when printing or debugging.
+        return f"OffloadedModule(name={self.module_name}, worker_id={self.worker_id})"

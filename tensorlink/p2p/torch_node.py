@@ -36,12 +36,14 @@ class TorchNode(SmartNode):
             max_connections: int = 0,
             upnp=True,
             off_chain_test=False,
+            local_test=False
     ):
         super(TorchNode, self).__init__(
             debug=debug,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
+            local_test=local_test
         )
 
         # Available GPU mpc estimation
@@ -54,12 +56,11 @@ class TorchNode(SmartNode):
 
         # Pointers to model parameters in DistributedModels
         self.modules = {}
-        self.optimizers = {}
-        self.parameters = {}
         self.state_updates = {}
 
         # Master flag for handling different types of storage as master
         self.master = False
+        self.mpc_terminate_flag = threading.Event()
 
     def handle_data(self, data: bytes, node: Connection):
         try:
@@ -70,7 +71,7 @@ class TorchNode(SmartNode):
                 if b"LOADED" == data[:6]:
                     pickled = data[6:]
                     self.debug_print(
-                        f"Successfully offloaded submodule to: {node.node_id}"
+                        f"torch_node.py -> Successfully offloaded submodule to: {node.node_id}"
                     )
                     module_id = data[6:]
                     self.remove_request(node.node_id, b"MODULE")
@@ -80,7 +81,7 @@ class TorchNode(SmartNode):
                     eos = data.find(b"::")
                     size = int(data[7:eos])
                     formatted_size = format_size(size)
-                    self.debug_print(f"RECEIVED FORWARD: {formatted_size}")
+                    self.debug_print(f"torch_node.py -> RECEIVED FORWARD: {formatted_size}")
 
                     # TODO we must check that the forward received corresponds to a sent pass/specific module
                     # must also do with backwards
@@ -94,7 +95,7 @@ class TorchNode(SmartNode):
                     eos = data.find(b"::")
                     size = int(data[8:eos])
                     formatted_size = format_size(size)
-                    self.debug_print(f"RECEIVED BACKWARD: {formatted_size}")
+                    self.debug_print(f"torch_node.py -> RECEIVED BACKWARD: {formatted_size}")
 
                     # TODO we must check that the forward received corresponds to a sent pass/specific module
                     # must also do with backwards
@@ -104,23 +105,34 @@ class TorchNode(SmartNode):
                     # Create shared mpc block and store tensor
                     self.store_tensor_in_shared_memory(key, tensor, backward=True)
 
+                elif b"OPTIMIZER-LOADED" == data[:16]:
+                    module_id = data[16:]
+                    self.debug_print(
+                        f"torch_node.py -> Optimizer for module: {module_id} loaded on worker {node.node_id}"
+                    )
+                    self.state_updates[module_id].append(
+                        b"OPTIMIZER-LOADED" + module_id + node.node_id
+                    )
+
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
-                    self.debug_print(f"RECEIVED PARAMS REQUEST")
+                    self.debug_print(f"torch_node.py -> RECEIVED PARAMS REQUEST")
 
                     # TODO Must ensure requesting roles is indeed the master or an overseeing validator
-                    module_id = data[10:]
-                    self.send_parameters(node, module_id)
+                    module_id = data[10:74]
+                    self.memory_manager[b"P" + module_id] = True
 
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
-                    self.debug_print(f"RECEIVED PARAMS")
-                    module_id, parameters = pickle.loads(data[10:])
+                    self.debug_print(f"torch_node.py -> RECEIVED PARAMS")
+                    module_id = data[10:74]
+                    size, name = store_in_shared_memory(data[74:], encoded=True)
                     key = b"P" + module_id
-                    self.store_parameters_in_shared_memory(key, parameters)
+                    self.memory_manager[key] = (size, name)
+                    # self.store_parameters_in_shared_memory(key, parameters)
 
                 elif b"MODULE" == data[:6]:
-                    self.debug_print("RECEIVED MODULE")
+                    self.debug_print("torch_node.py -> RECEIVED MODULE")
                     module_id = data[6:70]
 
                     self.modules[module_id] = {
@@ -129,7 +141,9 @@ class TorchNode(SmartNode):
                         "forward_queue": {},
                         "backward_queue": {},
                     }
-                    self.debug_print(f"Loaded distributed module!")
+                    self.state_updates[module_id] = []
+
+                    self.debug_print(f"torch_node.py -> Loaded distributed module!")
 
                 elif b"UPDATE-TRAIN" == data[:12]:
                     mode = False if data[12:13] == b"0" else True
@@ -155,7 +169,7 @@ class TorchNode(SmartNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"handle_data: Error handling data: {e}")
+            self.debug_print(f"torch_node.py -> Error handling data: {e}")
 
     def handle_requests(self, request=None):
         """Handles interactions between model and roles processes"""
@@ -167,7 +181,6 @@ class TorchNode(SmartNode):
                 return
 
         req_type = request["type"]
-
         if req_type == "get_connection":
             # Get connection info from a roles id
             node_id = request["args"]
@@ -201,6 +214,13 @@ class TorchNode(SmartNode):
             self.send_to_node(node, b"LOADED" + module_id)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
+        elif req_type == "optimizer_loaded":
+            module_id = request["args"]
+            node_id = self.modules[module_id]["host"]
+            node = self.nodes[node_id]
+            self.send_to_node(node, b"OPTIMIZER-LOADED" + module_id)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
         elif req_type == "send_forward":
             # Send forward pass tensor from shared mpc to a roles
             worker_id, size, shm_name, tag = request["args"]
@@ -217,6 +237,12 @@ class TorchNode(SmartNode):
             self.send_backward(node, backward_bytes, tag)
             self.response_queue.put({"status": "SUCCESS", "return": None})
 
+        elif req_type == "send_parameters":
+            node_id, size, shm_name, module_id = request["args"]
+            node = self.nodes[node_id]
+            parameters = get_from_shared_memory(size, shm_name, encoded=True)
+            self.send_to_node(node, b"PARAMETERS" + module_id + parameters)
+
         elif req_type == "check_module":
             # Check if module has been received and is loaded in shared mpc
             return_val = False
@@ -226,6 +252,17 @@ class TorchNode(SmartNode):
                     return_val = (name, module_id, module["host"])
                     del module["mem_info"]
 
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "check_module_request":
+            request_type, worker_id, module_id = request["args"]
+            return_val = False
+            if request_type == "optimizer":
+                if module_id in self.state_updates.keys():
+                    key = b"OPTIMIZER-LOADED" + module_id + worker_id
+                    if key in self.state_updates[module_id]:
+                        self.state_updates[module_id].remove(key)
+                        return_val = True
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
         elif req_type == "check_forward":
@@ -291,6 +328,43 @@ class TorchNode(SmartNode):
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
+        elif req_type == "send_optimizer_request":
+            worker_id, module_id, optimizer_fn, optimizer_kwargs = request["args"]
+            node = self.nodes[worker_id]
+            data = pickle.dumps((module_id, optimizer_fn, optimizer_kwargs))
+            self.send_to_node(node, b"OPTIMIZER" + data)
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+
+        elif req_type == "check_state_update":
+            module_id = request["args"]
+            return_val = None
+            if self.state_updates[module_id]:
+                return_val = self.state_updates[module_id].pop()
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "check_parameters_request":
+            module_id = request["args"]
+            return_val = None
+            key = b"P" + module_id
+
+            if key in self.memory_manager:
+                del self.memory_manager[key]
+                return_val = True
+            else:
+                return_val = False
+
+            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+        elif req_type == "check_parameters":
+            module_id = request["args"]
+            key = b"P" + module_id
+            if key in self.memory_manager:
+                size, name = self.memory_manager[key]
+                return_val = (size, name)
+            else:
+                return_val = None
+            self.response_queue.put({"stats": "SUCCESS", "return": return_val})
+
         elif req_type == "request_parameters":
             worker_id, module_id = request["args"]
             node = self.nodes[worker_id]
@@ -314,16 +388,6 @@ class TorchNode(SmartNode):
 
             self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
-        elif req_type == "check_parameters":
-            module_id = request["args"]
-            return_val = None
-            key = b"P" + module_id
-
-            if key in self.memory_manager:
-                return_val = self.memory_manager[key]
-
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
         elif req_type == "release_memory":
             data_type, module_id, key = tuple(request["args"])
             del self.memory_manager[key]
@@ -343,6 +407,14 @@ class TorchNode(SmartNode):
         elif req_type == "stop":
             self.response_queue.put({"status": "SUCCESS", "return": None})
             self.stop()
+
+        elif req_type == "check_shutdown":
+            if self.terminate_flag.is_set():
+                self.response_queue.put({"status": "SUCCESS", "return": True})
+                t = threading.Thread(target=self.stop_mpc_comms)
+                t.start()
+            else:
+                self.response_queue.put({"status": "SUCCESS", "return": False})
 
     def send_forward(self, node: Connection, forward_bytes, context):
         """Send forward pass to roles, must contain args (module args) and context (module + epoch id)"""
@@ -385,14 +457,6 @@ class TorchNode(SmartNode):
         # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
-    def send_parameters(self, node: Connection, module_id):
-        """Send specific module parameters
-        TODO should be accompanied by a requested proof (from smart contract) or the specific user
-        """
-        # Request parameters from ML process
-        pickled_data = b"PARAMETERS" + pickle.dumps((module_id, list(parameters)))
-        self.send_to_node(node, pickled_data)
-
     def send_parameters_req(self, node: Connection, module_id):
         """Request parameters from a specific worker"""
         self.send_to_node(node, b"PARAMS-REQ" + module_id)
@@ -402,12 +466,13 @@ class TorchNode(SmartNode):
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
     def send_module(self, file_name: bytes, module_id: bytes, node: Connection):
-        self.debug_print(f"Sending module: {module_id} to worker: {node.node_id}")
+        self.debug_print(f"torch_node.py -> Sending module: {module_id} to worker: {node.node_id}")
         self.store_request(node.node_id, b"MODULE")
+        self.state_updates[module_id] = []
         self.send_to_node_from_file(node, file_name, b"MODULE" + module_id)
 
     def listen_requests(self):
-        while not self.terminate_flag.is_set():
+        while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
 
     def get_module_hash_from_id(self, mod_id: bytes):
@@ -423,4 +488,7 @@ class TorchNode(SmartNode):
 
     def stop(self):
         super().stop()
+
+    def stop_mpc_comms(self):
+        self.mpc_terminate_flag.set()
         self.mpc_comms.join()

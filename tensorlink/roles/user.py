@@ -21,6 +21,7 @@ class User(TorchNode):
         upnp=True,
         off_chain_test=False,
         private_key=None,
+        local_test=False
     ):
         super(User, self).__init__(
             request_queue,
@@ -29,6 +30,7 @@ class User(TorchNode):
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
+            local_test=local_test
         )
 
         self.role = b"U"
@@ -88,11 +90,11 @@ class User(TorchNode):
                 elif b"DECLINE-JOB" == data[:11]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         reason = data[11:]
-                        self.debug_print(f"Validator ({node.node_id}) declined job! Reason: {reason}")
+                        self.debug_print(f"user.py -> Validator ({node.node_id}) declined job! Reason: {reason}")
                     else:
                         ghost += 1
                 elif b"WORKERS" == data[:7]:
-                    self.debug_print(f"Received workers from: {node.node_id}")
+                    self.debug_print(f"user.py -> Received workers from: {node.node_id}")
                     workers = pickle.loads(data[7:])
                     for worker, stats in workers.items():
                         self.worker_stats[worker] = stats
@@ -106,7 +108,7 @@ class User(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"stream_data:{e}")
+            self.debug_print(f"user.py -> error handling data {e}")
             raise e
 
     def handle_requests(self, req=None):
@@ -146,7 +148,7 @@ class User(TorchNode):
         """
         try:
             if node.node_id in self.jobs[-1]["seed_validators"]:
-                self.debug_print(f"Validator ({node.node_id}) accepted job!")
+                self.debug_print(f"user.py -> Validator ({node.node_id}) accepted job!")
                 job_id = data[10:74]
                 job_data = pickle.loads(data[74:])
                 distribution = job_data["distribution"]
@@ -166,10 +168,10 @@ class User(TorchNode):
 
                 self.requests[node.node_id].remove(job_id)
             else:
-                self.debug_print(f"Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}")
+                self.debug_print(f"user.py -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}")
 
         except Exception as e:
-            self.debug_print(f"handle_accept_job: {e}")
+            self.debug_print(f"user.py -> handle job acception error: {e}")
             raise e
 
     def request_job(
@@ -235,7 +237,7 @@ class User(TorchNode):
             if node_info is None:
                 self.delete(validator_id)
                 self.debug_print(
-                    f"request_job: Could not connect to validator for job initialize, try again."
+                    f"user.py -> Could not connect to validator for job initialization, try again."
                 )
                 return False
 
@@ -247,7 +249,7 @@ class User(TorchNode):
             if not connected:
                 self.delete(validator_id)
                 self.debug_print(
-                    f"request_job: Could not connect to validator for job initialize, try again."
+                    f"user.py -> Could not connect to validator for job initialize, try again."
                 )
                 return False
 
@@ -378,14 +380,3 @@ class User(TorchNode):
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
             pass
-
-        print("Node stopping...")
-        for node in self.nodes.values():
-            node.stop()
-
-        for node in self.nodes.values():
-            node.join()
-
-        self.sock.settimeout(None)
-        self.sock.close()
-        print("Node stopped")

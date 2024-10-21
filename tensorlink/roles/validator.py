@@ -47,6 +47,7 @@ class Validator(TorchNode):
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
+        local_test=False
     ):
         super(Validator, self).__init__(
             request_queue,
@@ -55,6 +56,7 @@ class Validator(TorchNode):
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
+            local_test=local_test
         )
 
         # Additional attributes specific to the Validator class
@@ -103,7 +105,7 @@ class Validator(TorchNode):
                         node.node_id in self.requests
                         and job_id + module_id in self.requests[node.node_id]
                     ):
-                        self.debug_print(f"Validator: worker has accepted job!")
+                        self.debug_print(f"validator.py -> Worker: {node.node_id} has accepted job!")
                         self.requests[node.node_id].remove(job_id + module_id)
 
                     else:
@@ -111,7 +113,7 @@ class Validator(TorchNode):
 
                 # Job decline from worker
                 elif b"DECLINE-JOB" == data[:11]:
-                    self.debug_print(f"Validator: worker has declined job!")
+                    self.debug_print(f"validator.py -> Worker: {node.node_id} has declined job!")
                     if (
                         node.node_id in self.requests
                         and b"JOB-REQ" in self.requests[node.node_id]
@@ -122,11 +124,12 @@ class Validator(TorchNode):
 
                 # Job creation request from user
                 elif b"JOB-REQ" == data[:7]:
-                    self.debug_print(f"Validator: user requested job.")
+                    self.debug_print(f"validator.py -> User: {node.node_id} requested job.")
                     job_req = pickle.loads(data[7:])
 
                     # Ensure all job data is present
                     if assert_job_req(job_req, node.node_id) is False:
+                        self.debug_print(f"validator.py -> Declining job: invalid job structure!")
                         ghost += 1
                         # TODO ask the user to send again if id was specified
 
@@ -158,12 +161,13 @@ class Validator(TorchNode):
                             self.all_workers[worker] = stats
 
                 elif b"STATS-RESPONSE" == data[:14]:
-                    self.debug_print(f"Received stats from worker: {node.node_id}")
+                    self.debug_print(f"validator.py -> Received stats from worker: {node.node_id}")
 
                     if (
                         node.node_id not in self.requests
                         or b"STATS" not in self.requests[node.node_id]
                     ):
+                        self.debug_print(f"validator.py -> Received unrequested stats from worker: {node.node_id}")
                         ghost += 1
 
                     else:
@@ -173,11 +177,11 @@ class Validator(TorchNode):
                         self.worker_memories[node.node_id] = stats["memory"]
 
                 elif b"JOB-UPDATE" == data[:10]:
-                    self.debug_print(f"Validator:user update job request")
+                    self.debug_print(f"validator.py -> User requested update to job structure")
                     self.update_job(data[10:])
 
                 elif b"USER-GET-WORKERS" == data[:16]:
-                    self.debug_print(f"User requested workers:")
+                    self.debug_print(f"validator.py -> User requested workers.")
                     self.request_worker_stats()
                     time.sleep(0.5)
                     stats = {}
@@ -198,7 +202,7 @@ class Validator(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"Validator: stream_data: {e}")
+            self.debug_print(f"validator.py -> Error handling data: stream_data: {e}")
             raise e
 
     # def validate(self, job_id: bytes, module_id: ):
@@ -379,8 +383,6 @@ class Validator(TorchNode):
         return True
 
     def get_workers(self):
-        workers = {}
-
         self.request_worker_stats()
 
         for node_id, node in self.nodes.items():
@@ -475,7 +477,7 @@ class Validator(TorchNode):
                         t.start()
 
                     except Exception as e:
-                        self.debug_print(f"Error while validating proposal {i}: {e}")
+                        self.debug_print(f"validator.py -> Error while validating proposal {i}: {e}")
                         time.sleep(30)  # Sleep briefly on error
 
             if len(proposals) == max_proposals:
@@ -484,7 +486,7 @@ class Validator(TorchNode):
 
                 proposals.clear()
 
-                self.debug_print(f"All proposals validated, sleeping for 2 minutes...")
+                self.debug_print(f"validator.py -> All proposals validated, sleeping for 2 minutes...")
                 time.sleep(100)
 
     """Listen for proposal execution events"""
@@ -501,20 +503,20 @@ class Validator(TorchNode):
                     else:
                         self.send_state_updates(round_validators)
 
-                    self.debug_print("Handled new proposal round, waiting for next proposal...")
+                    self.debug_print("validator.py -> Handled new proposal round, waiting for next proposal...")
 
                 else:
-                    self.debug_print("No new proposals, waiting...")
+                    self.debug_print("validator.py -> No new proposals, waiting...")
 
             except Exception as e:
-                self.debug_print(f"Error during proposal execution check: {e}")
+                self.debug_print(f"validator.py -> Error during proposal execution check: {e}")
 
             time.sleep(120)  # Sleep for 2 minutes before checking again
 
     def validate_proposal(self, proposal_num, proposal_flag):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
         #  We should also use our proposal data to quickly verify matching data
-        self.debug_print(f"Validation started for proposal: {proposal_num}")
+        self.debug_print(f"validator.py -> Validation started for proposal: {proposal_num}")
 
         flag = False
         reason = ""
@@ -526,7 +528,7 @@ class Validator(TorchNode):
                 for function_type, call_data in zip(function_types, function_data):
                     # Deactivate validator call: attempt connection to determine if validator should be deactivated
                     if proposal_flag.is_set():
-                        self.debug_print(f"Validation interrupted for proposal {proposal_num}!")
+                        self.debug_print(f"validator.py -> Validation interrupted for proposal {proposal_num}!")
                         return
 
                     if function_type == 0:
@@ -586,14 +588,14 @@ class Validator(TorchNode):
                         reason = "Invalid function type."
 
                     if flag is True:
-                        self.debug_print(f"Job validation failed: {reason}")
+                        self.debug_print(f"validator.py -> Job validation failed: {reason}")
                         break
 
                 break
 
             except Web3Exception as e:
                 if "Proposal not found!" in str(e):
-                    self.debug_print(f"Proposal {proposal_num} not found, sleeping for 30 sec...")
+                    self.debug_print(f"validator.py -> Proposal {proposal_num} not found, sleeping for 30 sec...")
                     time.sleep(30)
                 else:
                     raise e
@@ -607,7 +609,7 @@ class Validator(TorchNode):
             })
             signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
             tx_hash = self.chain.eth.send_raw_transaction(signed_tx.rawTransaction)
-            self.debug_print(f"Proposal {proposal_num} approved! ({tx_hash})")
+            self.debug_print(f"validator.py -> Proposal {proposal_num} approved! ({tx_hash})")
 
     def validate_job(self, job_id: bytes, user_id: bytes = None, capacities: list = None, active: bool = None) -> bool:
         # Grab user and job information
@@ -684,7 +686,7 @@ class Validator(TorchNode):
             time.sleep(30)
             return
 
-        self.debug_print(f"Creating proposal...")
+        self.debug_print(f"validator.py -> Creating proposal...")
         # Proposal creation mode is active, incoming data is stored in self.proposal_events
         self.proposal_candidate = True
         function_types = []
@@ -778,7 +780,7 @@ class Validator(TorchNode):
         })
         signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
         tx_hash = self.chain.eth.send_raw_transaction(signed_tx.rawTransaction)
-        self.debug_print(f"Proposal submitted! ({tx_hash})")
+        self.debug_print(f"validator.py -> Proposal submitted! ({tx_hash})")
 
     def send_state_updates(self, validators):
         for job in self.jobs:
@@ -787,11 +789,11 @@ class Validator(TorchNode):
     def run(self):
         super().run()
 
-        # self.proposal_listener = threading.Thread(target=self.listen_for_proposals, daemon=True)
-        # self.proposal_listener.start()
-        #
-        # self.execution_listener = threading.Thread(target=self.listen_for_proposal_executions, daemon=True)
-        # self.execution_listener.start()
+        self.proposal_listener = threading.Thread(target=self.listen_for_proposals, daemon=True)
+        self.proposal_listener.start()
+
+        self.execution_listener = threading.Thread(target=self.listen_for_proposal_executions, daemon=True)
+        self.execution_listener.start()
 
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
@@ -800,3 +802,6 @@ class Validator(TorchNode):
                 pass
             except KeyboardInterrupt:
                 self.terminate_flag.set()
+    
+    def stop(self):
+        super().stop()

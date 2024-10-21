@@ -77,12 +77,22 @@ print(f"Job Status: {status}")
 
 Training progress can also be tracked through the Tensorlink/Smartnodes dashboard.
 
+## Current Features
+
+* PyTorch model wrapper handling distributed forward & backwards pass
+* Offloaded model and hybrid offloaded modules
+* Distributed torch optimizer
+
+### Coming Soon
+* Pipeline and Data parallel acceleration
+* Further support for features of HuggingFace models and trainers
+
+
 ## Known Issues
 
-**Computation is not guaranteed to be Turing complete. If you require precise, replicable training, we advise using a different platform (BitTensor, Google Cloud, etc)!** This is a protocol-level decision, as Turing-complete neural network computation can be expensive and inefficient. Our primary goal is to provide training compute for the public. As Tensorlink is currently in pre-alpha, we focus on capturing and providing compute resources to users. We have opted to release this tool to the public before enforcing proof-of-learning.
+As Tensorlink is currently in pre-alpha, our focus is on capturing and providing compute resources to users. We have chosen to release this tool to the public before implementing proof-of-learning mechanisms. **Computation may not be precisely reproducible. If you require consistent and guaranteed training results, we recommend using a different platform (BitTensor, Google Cloud, etc).** This decision was made at the protocol level, as achieving precise, reproducible distributed training across nodes requires replicating pipelines, which can be computationally expensive and inefficient. Our primary goal is to make training compute accessible to the public, but we will address this issue in the near future. 
 
 During pre-alpha, issues may arise with gradient checkpointing, job storage, and network connectivity. Please report any problems through GitHub or our website, as your feedback is crucial to improving Tensorlink and making it more robust!
-
 
 ## Contributing
 
