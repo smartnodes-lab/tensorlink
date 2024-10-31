@@ -51,7 +51,6 @@ class Worker(TorchNode):
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
 
-        self.debug_colour = "\033[94m"
         self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})")
         self.available_memory = 2e9
 
@@ -77,22 +76,26 @@ class Worker(TorchNode):
 
                 elif b"JOB-REQ" == data[:7]:
                     try:
-                        # Accept job request from validator if we can handle it
-                        user_id, job_id, module_id, module_size = pickle.loads(data[7:])
+                        if node.role == b"V":
+                            # Accept job request from validator if we can handle it
+                            user_id, job_id, module_id, module_size = pickle.loads(data[7:])
 
-                        if (
-                            self.available_memory >= module_size
-                        ):  # TODO Ensure were active?
-                            # Respond to validator that we can accept the job
-                            # Store a request to wait for the user connection as well
-                            self.store_request(user_id + module_id, b"AWAIT-USER")
-                            data = b"ACCEPT-JOB" + job_id + module_id
+                            if (
+                                self.available_memory >= module_size
+                            ):  # TODO Ensure were active?
+                                # Respond to validator that we can accept the job
+                                # Store a request to wait for the user connection as well
+                                self.store_request(user_id + module_id, b"AWAIT-USER")
+                                data = b"ACCEPT-JOB" + job_id + module_id
 
-                            # Update available memory
-                            self.available_memory -= module_size
+                                # Update available memory
+                                self.available_memory -= module_size
+
+                            else:
+                                data = b"DECLINE-JOB"
 
                         else:
-                            data = b"DECLINE-JOB"
+                            node.stop()
 
                         self.send_to_node(node, data)
 
@@ -100,10 +103,6 @@ class Worker(TorchNode):
                         print(data)
                         print(node.main_port)
                         raise e
-
-                elif b"OPTIMIZER" == data[:9]:
-                    module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
-                    self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
 
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")

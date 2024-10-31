@@ -1,3 +1,5 @@
+import pickle
+
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 from tensorlink.ml.utils import *
 import threading
@@ -27,7 +29,7 @@ class DistributedWorker:
 
                 # Handle backward pass
                 if not module.backward_queue.empty():
-                    n_micro_batch = module.n_micro_batch
+                    n_batch = module.n_batch
                     next_node = module.host
 
                     if self.modules[module_id].training:
@@ -35,79 +37,86 @@ class DistributedWorker:
                         with self.lock:
                             tag, loss_relay = module.backward_queue.get()
 
-                        # Load loss and move to the device
-                        loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
-                        if isinstance(loss, tuple):
-                            loss = tuple([l.to(self.device) for l in loss if isinstance(l, torch.Tensor)])
-                        else:
-                            loss = loss.to(self.device)
+                            # Load loss and move to the device
+                            loss = get_from_shared_memory(loss_relay[0], loss_relay[1])
 
-                        inter_tag = tuple(tag)
-                        assoc_input, assoc_output = module.intermediates.pop(inter_tag)
+                            if isinstance(loss, tuple):
+                                loss = tuple([l.to(self.device) for l in loss if isinstance(l, torch.Tensor)])
 
-                        assoc_input = assoc_input.to(self.device)
-                        assoc_output = assoc_output.to(self.device)
+                                if len(loss) == 1:
+                                    loss = loss[-1]
+                                #
+                                # if loss.grad is None:
 
-                        # Backward pass with CUDA synchronization for accurate profiling
-                        if self.device.type != "cpu":
-                            torch.cuda.synchronize()
+                            else:
+                                loss = loss.to(self.device)
 
-                        assoc_output.backward(loss[-1])
+                            inter_tag = tuple(tag)
+                            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
 
-                        if self.device.type != "cpu":
-                            torch.cuda.synchronize()
+                            assoc_input = assoc_input.to(self.device)
+                            assoc_output = assoc_output.to(self.device)
 
-                        # Detach gradients and prepare for next node
-                        dvalues = detach_tensor(assoc_input.grad)
+                            # Backward pass with CUDA synchronization for accurate profiling
+                            if self.device.type != "cpu":
+                                torch.cuda.synchronize()
 
-                        # Clean up to avoid memory leaks
-                        del assoc_input, assoc_output
+                            assoc_output.backward(loss)
 
-                        # Store gradients in shared memory and send to next node
-                        size, name = store_in_shared_memory(dvalues)
-                        self.send_request("send_backward", (next_node, size, name, tag))
+                            if self.device.type != "cpu":
+                                torch.cuda.synchronize()
 
-                        # Clear memory, but avoid excessive cache clearing
-                        if self.device.type != "cpu":
-                            torch.cuda.empty_cache()
+                            # Detach gradients and prepare for next node
+                            dvalues = detach_tensor(assoc_input.grad)
+
+                            # Clean up to avoid memory leaks
+                            del assoc_input, assoc_output
+
+                            # Store gradients in shared memory and send to next node
+                            size, name = store_in_shared_memory(dvalues)
+                            self.send_request("send_backward", (next_node, size, name, tag))
+
+                            # Clear memory, but avoid excessive cache clearing
+                            if self.device.type != "cpu":
+                                torch.cuda.empty_cache()
 
                 # Handle forward pass
                 if not module.forward_queue.empty():
                     with self.lock:
                         key, (size, name) = module.forward_queue.get()
 
-                    tensor = get_from_shared_memory(size, name)
-                    if isinstance(tensor, tuple):
-                        args, kwargs = tensor
-                    else:
-                        args = tensor
-                        kwargs = {}
+                        tensor = get_from_shared_memory(size, name)
+                        if isinstance(tensor, tuple):
+                            args, kwargs = tensor
+                        else:
+                            args = tensor
+                            kwargs = {}
 
-                    # Enable gradient tracking and move to device
-                    inp = enable_grad(attach_tensor(args, self.device))
-                    kwargs = enable_grad(attach_tensor(kwargs, self.device))
+                        # Enable gradient tracking and move to device
+                        inp = enable_grad(attach_tensor(args, self.device))
+                        kwargs = enable_grad(attach_tensor(kwargs, self.device))
 
-                    # Forward pass with CUDA synchronization for accurate profiling
-                    if self.device.type != "cpu":
-                        torch.cuda.synchronize()
+                        # Forward pass with CUDA synchronization for accurate profiling
+                        if self.device.type != "cpu":
+                            torch.cuda.synchronize()
 
-                    out = module(inp, **kwargs)
+                        out = module(inp, **kwargs)
 
-                    if self.device.type != "cpu":
-                        torch.cuda.synchronize()
+                        if self.device.type != "cpu":
+                            torch.cuda.synchronize()
 
-                    # Store intermediate results if training
-                    if self.modules[module_id].training:
-                        module.intermediates[key] = [inp, handle_output(out).to(self.device)]
+                        # Store intermediate results if training
+                        if self.modules[module_id].training:
+                            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
 
-                    # Detach and store output
-                    detached_out = detach_tensor(out)
-                    size, name = store_in_shared_memory(detached_out)
-                    self.send_request("send_forward", (module.host, size, name, key))
+                        # Detach and store output
+                        detached_out = detach_tensor(out)
+                        size, name = store_in_shared_memory(detached_out)
+                        self.send_request("send_forward", (module.host, size, name, key))
 
-                    # Clean memory efficiently
-                    if self.device.type != "cpu":
-                        torch.cuda.empty_cache()
+                        # Clean memory efficiently
+                        if self.device.type != "cpu":
+                            torch.cuda.empty_cache()
 
     def send_request(self, request_type, args):
         request = {"type": request_type, "args": args}
@@ -133,16 +142,17 @@ class DistributedWorker:
 
                 if isinstance(args, tuple):
                     file_name, module_id, node_id = args
-                    module = torch.load(file_name).to(self.device)
-                    os.remove(file_name)
-
-                    # Initialize module queues and states
-                    module.forward_queue = queue.Queue()
-                    module.backward_queue = queue.Queue()
-                    module.intermediates = {}
-                    module.host = node_id
 
                     with self.lock:
+                        module = torch.load(file_name).to(self.device)
+                        os.remove(file_name)
+
+                        # Initialize module queues and states
+                        module.forward_queue = queue.Queue()
+                        module.backward_queue = queue.Queue()
+                        module.intermediates = {}
+                        module.host = node_id
+
                         self.modules[module_id] = module
                         self.optimizers[module_id] = module.optimizer
                         delattr(module, "optimizer")
@@ -161,9 +171,12 @@ class DistributedWorker:
                     # Check for parameters requests
                     params_req = self.send_request("check_parameters_request", module_id)
                     if params_req:
-                        parameters = list(module.parameters())
-                        size, name = store_in_shared_memory(parameters)
-                        self.send_request("send_parameters", (module.host, size, name, module_id))
+                        self.send_request("debug_print", "DistributedWorker -> Sending parameters.")
+                        with open(f"parameters_{module_id.decode()}", "wb") as file:
+                            file.write(b"PARAMETERS" + module_id)
+                            torch.save(module.state_dict(), file)
+
+                        self.send_request("send_parameters", (module.host, module_id))
 
                     # Handle forward queue
                     forward_task = self.send_request("check_forward", module_id)
@@ -177,19 +190,29 @@ class DistributedWorker:
 
                     state_update = self.send_request("check_state_update", module_id)
                     if state_update:
-                        if state_update[0] == "init":
-                            optimizer_kwargs = state_update[1]
-                            self.optimizers[module_id](module.parameters(), **optimizer_kwargs)
-                            self.send_request("optimizer_loaded", module_id)
+                        with self.lock:
+                            if state_update[0] == "init":
+                                optimizer_kwargs = state_update[1]
+                                self.optimizers[module_id] = self.optimizers[module_id](module.parameters(), **optimizer_kwargs)
+                                self.send_request("debug_print",
+                                                  "DistributedWorker -> Initialized optimizer.")
+                                self.send_request("optimizer_response", (module_id, "loaded"))
 
-                        elif state_update[0] == "step":
-                            pass
+                            elif state_update[0] == "step":
+                                closure = state_update[1]
+                                self.optimizers[module_id].step(closure)
+                                self.send_request("debug_print",
+                                                  "DistributedWorker -> Optimizer stepped.")
+                                self.send_request("optimizer_response", (module_id, "stepped"))
 
-                        elif state_update[0] == "zero_grad":
-                            pass
+                            elif state_update[0] == "zero_grad":
+                                self.optimizers[module_id].zero_grad()
+                                self.send_request("debug_print",
+                                                  "DistributedWorker -> Optimizer zeroed.")
+                                self.send_request("optimizer_response", (module_id, "zeroed"))
 
             # Check for node termination
-            self.check_for_termination()
+            # self.check_for_termination()
 
             counter += 1
             time.sleep(0.1)

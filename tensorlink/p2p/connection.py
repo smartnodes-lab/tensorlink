@@ -134,6 +134,8 @@ class Connection(threading.Thread):
                 self.sock.sendall(self.EOT_CHAR)
                 print(time.time() - start_time)
 
+            os.remove(file_name)
+
         except Exception as e:
             self.main_node.debug_print(f"Error sending file: {e}")
             self.stop()
@@ -161,7 +163,7 @@ class Connection(threading.Thread):
     def run(self):
         buffer = b""
         b_size = 0
-        shmlorp = b""
+        prefix = b""
         writing_threads = []
 
         while not self.terminate_flag.is_set():
@@ -182,8 +184,11 @@ class Connection(threading.Thread):
                 self.last_seen = datetime.now()
 
                 if b"MODULE" == chunk[:6]:
-                    shmlorp = chunk[:70]
+                    prefix = chunk[:70]
                     buffer += chunk[70:]
+                elif b"PARAMETERS" == chunk[:10]:
+                    prefix = chunk[:74]
+                    buffer += chunk[74:]
                 else:
                     buffer += chunk
 
@@ -196,9 +201,10 @@ class Connection(threading.Thread):
                             f.write(packet)
                     except Exception as e:
                         self.main_node.debug_print(f"file writing error: {e}")
+
                     buffer = buffer[eot_pos + len(self.EOT_CHAR):]
-                    self.main_node.handle_message(self, b"DONE STREAM" + shmlorp)
-                    shmlorp = b""
+                    self.main_node.handle_message(self, b"DONE STREAM" + prefix)
+                    prefix = b""
 
                     for t in writing_threads:
                         t.join()

@@ -3,6 +3,7 @@ from useful_scripts import *
 
 import torch
 import torch.nn as nn
+from torch.nn.functional import mse_loss
 import time
 from transformers import BertTokenizer, BertForSequenceClassification
 import logging
@@ -74,17 +75,21 @@ if __name__ == "__main__":
     )
     del model
 
+    validator.cleanup()
+
+    # p1 = list(distributed_model.parameters())
+    # p2 = list(distributed_model.parameters(load=False))
+    # d = distributed_model.state_dict()
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
 
     for _ in range(10):
-        # distributed_optimizer.step()
+        distributed_optimizer.zero_grad()
         x = torch.zeros((10, 10))
         x = distributed_model(x)
-        loss = x.sum()
+        loss = mse_loss(x, x)
         loss.backward()
         distributed_optimizer.step()
 
     # train(distributed_model, distributed_optimizer, tokenizer, device, batch_size=BATCH_SIZE)
-    validator.cleanup()
     user.cleanup()
     worker.cleanup()

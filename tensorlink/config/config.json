@@ -1,8 +1,8 @@
 {
   "api": {
-    "core": "0x06F8979dD0Ff1D79c24c95BbD749220fdc5D321d",
-    "multi-sig": "0x4419f9C064354525701Ff6090482C49c59b817A5",
-    "chain-url": "https://api.developer.coinbase.com/rpc/v1/base-sepolia/kJ0ZU7UryXngsdHBLvmirNx9Mw2ZKAys",
+    "core": "0xe23E21E58c348D6F6d66b61e90E4efA02624AdC8",
+    "multi-sig": "0xa93BBC938664fCFea144105032E953b89338DB42",
+    "chain-url": "http://127.0.0.1:7545",
     "endpoint-url": "http://127.0.0.1:5029"
   }
 }

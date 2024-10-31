@@ -40,7 +40,6 @@ class User(TorchNode):
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
 
-        self.debug_colour = "\033[93m"
         self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
 
         self.endpoint = create_endpoint(self)

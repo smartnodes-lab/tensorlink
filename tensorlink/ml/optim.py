@@ -117,8 +117,9 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
                         )
                         t = threading.Thread(
                             target=self._wait_for_worker,
-                            args=(worker_id, module_id)
+                            args=("loaded", worker_id, module_id)
                         )
+
                         t.start()
                         worker_requests.append(t)
 
@@ -132,17 +133,23 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
                 closure (callable, optional): A closure that reevaluates the model and returns the loss.
             """
             # Perform a local step for parameters directly on the master
-            self.base_optimizer.step(closure)
+            if self.base_optimizer is not None:
+                self.base_optimizer.step(closure)
 
             # Send step commands to all workers asynchronously
             threads = []
-            for worker_id in self.worker_ids:
-                thread = threading.Thread(
-                    target=self.model.send_request_to_worker,
-                    args=("step_optimizer", worker_id)
-                )
-                thread.start()
-                threads.append(thread)
+            for module_id, module_info in self.modules.items():
+                if module_info["type"] == "offloaded":
+                    for worker_id in module_info["workers"]:
+                        self.model.send_request(
+                            "send_optimizer_request", (worker_id, module_id, "step", closure)
+                        )
+                        t = threading.Thread(
+                            target=self._wait_for_worker,
+                            args=("stepped", worker_id, module_id)
+                        )
+                        t.start()
+                        threads.append(t)
 
             # Wait for all threads to finish to ensure consistency
             for thread in threads:
@@ -153,28 +160,34 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             Zero out the gradients for both local and remote parameters.
             """
             # Zero local gradients
-            self.base_optimizer.zero_grad()
+            if self.base_optimizer is not None:
+                self.base_optimizer.zero_grad()
 
             # Send zero_grad commands to all workers asynchronously
             threads = []
-            for worker_id in self.worker_ids:
-                thread = threading.Thread(
-                    target=self.model.send_request_to_worker,
-                    args=("zero_grad", worker_id)
-                )
-                thread.start()
-                threads.append(thread)
+            for module_id, module_info in self.modules.items():
+                if module_info["type"] == "offloaded":
+                    for worker_id in module_info["workers"]:
+                        self.model.send_request(
+                            "send_optimizer_request", (worker_id, module_id, "zero_grad", None)
+                        )
+                        thread = threading.Thread(
+                            target=self._wait_for_worker,
+                            args=("zeroed", worker_id, module_id)
+                        )
+                        thread.start()
+                        threads.append(thread)
 
             # Wait for all threads to finish
             for thread in threads:
                 thread.join()
 
-        def _wait_for_worker(self, worker_id, module_id):
+        def _wait_for_worker(self, request_type, worker_id, module_id):
             waiting = True
             start_time = time.time()
             while waiting:
                 time.sleep(1)
-                args = self.model.send_request("check_module_request", ("optimizer", worker_id, module_id))
+                args = self.model.send_request("check_module_request", (request_type, worker_id, module_id))
 
                 if args is True:
                     waiting = False

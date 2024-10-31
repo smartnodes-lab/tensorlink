@@ -68,10 +68,11 @@ class TorchNode(SmartNode):
             ghost = 0
 
             if not handled:
+
                 if b"LOADED" == data[:6]:
                     pickled = data[6:]
                     self.debug_print(
-                        f"torch_node.py -> Successfully offloaded submodule to: {node.node_id}"
+                        f"TorchNode -> Successfully offloaded submodule to: {node.node_id}"
                     )
                     module_id = data[6:]
                     self.remove_request(node.node_id, b"MODULE")
@@ -81,7 +82,7 @@ class TorchNode(SmartNode):
                     eos = data.find(b"::")
                     size = int(data[7:eos])
                     formatted_size = format_size(size)
-                    self.debug_print(f"torch_node.py -> RECEIVED FORWARD: {formatted_size}")
+                    self.debug_print(f"TorchNode -> RECEIVED FORWARD: {formatted_size}")
 
                     # TODO we must check that the forward received corresponds to a sent pass/specific module
                     # must also do with backwards
@@ -95,7 +96,7 @@ class TorchNode(SmartNode):
                     eos = data.find(b"::")
                     size = int(data[8:eos])
                     formatted_size = format_size(size)
-                    self.debug_print(f"torch_node.py -> RECEIVED BACKWARD: {formatted_size}")
+                    self.debug_print(f"TorchNode -> RECEIVED BACKWARD: {formatted_size}")
 
                     # TODO we must check that the forward received corresponds to a sent pass/specific module
                     # must also do with backwards
@@ -105,18 +106,31 @@ class TorchNode(SmartNode):
                     # Create shared mpc block and store tensor
                     self.store_tensor_in_shared_memory(key, tensor, backward=True)
 
-                elif b"OPTIMIZER-LOADED" == data[:16]:
-                    module_id = data[16:]
-                    self.debug_print(
-                        f"torch_node.py -> Optimizer for module: {module_id} loaded on worker {node.node_id}"
-                    )
-                    self.state_updates[module_id].append(
-                        b"OPTIMIZER-LOADED" + module_id + node.node_id
-                    )
+                elif b"OPTIMIZER-RESPONSE" == data[:18]:
+                    module_id, response_type = pickle.loads(data[18:])
+
+                    if response_type == "loaded":
+                        self.debug_print(
+                            f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}"
+                        )
+                    elif response_type == "stepped":
+                        self.debug_print(
+                            f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}"
+                        )
+                    elif response_type == "zeroed":
+                        self.debug_print(
+                            f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}"
+                        )
+
+                    self.state_updates[module_id].append(response_type.encode() + node.node_id)
+
+                elif b"OPTIMIZER" == data[:9]:
+                    module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
+                    self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
 
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
-                    self.debug_print(f"torch_node.py -> RECEIVED PARAMS REQUEST")
+                    self.debug_print(f"TorchNode -> RECEIVED PARAMS REQUEST")
 
                     # TODO Must ensure requesting roles is indeed the master or an overseeing validator
                     module_id = data[10:74]
@@ -124,15 +138,14 @@ class TorchNode(SmartNode):
 
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
-                    self.debug_print(f"torch_node.py -> RECEIVED PARAMS")
+                    self.debug_print(f"TorchNode -> RECEIVED PARAMS")
                     module_id = data[10:74]
-                    size, name = store_in_shared_memory(data[74:], encoded=True)
+                    file_name = f"{module_id.decode()}_parameters"
                     key = b"P" + module_id
-                    self.memory_manager[key] = (size, name)
-                    # self.store_parameters_in_shared_memory(key, parameters)
+                    self.memory_manager[key] = file_name
 
                 elif b"MODULE" == data[:6]:
-                    self.debug_print("torch_node.py -> RECEIVED MODULE")
+                    self.debug_print("TorchNode -> RECEIVED MODULE")
                     module_id = data[6:70]
 
                     self.modules[module_id] = {
@@ -143,7 +156,7 @@ class TorchNode(SmartNode):
                     }
                     self.state_updates[module_id] = []
 
-                    self.debug_print(f"torch_node.py -> Loaded distributed module!")
+                    self.debug_print(f"TorchNode -> Loaded distributed module!")
 
                 elif b"UPDATE-TRAIN" == data[:12]:
                     mode = False if data[12:13] == b"0" else True
@@ -169,252 +182,266 @@ class TorchNode(SmartNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"torch_node.py -> Error handling data: {e}")
+            self.debug_print(f"TorchNode -> Error handling data: {e}")
 
     def handle_requests(self, request=None):
-        """Handles interactions between model and roles processes"""
-        if request is None:
-            try:
-                request = self.request_queue.get(timeout=3)
+        try:
+            """Handles interactions between model and roles processes"""
+            if request is None:
+                try:
+                    request = self.request_queue.get(timeout=3)
 
-            except queue.Empty:
-                return
+                except queue.Empty:
+                    return
 
-        req_type = request["type"]
-        if req_type == "get_connection":
-            # Get connection info from a roles id
-            node_id = request["args"]
-            node = self.nodes[node_id]
-            self.response_queue.put({"status": "SUCCESS", "return": node})
+            req_type = request["type"]
+            if req_type == "get_connection":
+                # Get connection info from a roles id
+                node_id = request["args"]
+                node = self.nodes[node_id]
+                self.response_queue.put({"status": "SUCCESS", "return": node})
 
-        elif req_type == "send_model":
-            # Send module that is stored in shared mpc to another roles
-            name, worker_id, module_id = request["args"]
-            node = self.nodes[worker_id]
-            # model_bytes = get_from_shared_memory(size, name, encoded=True)
-            # self.send_module(module_id, model_bytes, roles)
-            self.send_module(name, module_id, node)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
+            elif req_type == "send_model":
+                # Send module that is stored in shared mpc to another roles
+                name, worker_id, module_id = request["args"]
+                node = self.nodes[worker_id]
+                # model_bytes = get_from_shared_memory(size, name, encoded=True)
+                # self.send_module(module_id, model_bytes, roles)
+                self.send_module(name, module_id, node)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
 
-        elif req_type == "check_loaded":
-            # Check if sent module has been received and loaded on the other roles
-            worker_id = request["args"]
-            return_val = False
+            elif req_type == "check_loaded":
+                # Check if sent module has been received and loaded on the other roles
+                worker_id = request["args"]
+                return_val = False
 
-            if b"MODULE" not in self.requests[worker_id]:
-                return_val = True
+                if b"MODULE" not in self.requests[worker_id]:
+                    return_val = True
 
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
-        elif req_type == "module_loaded":
-            # Send module loaded message to roles
-            module_id = request["args"]
-            node_id = self.modules[module_id]["host"]
-            node = self.nodes[node_id]
-            self.send_to_node(node, b"LOADED" + module_id)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "optimizer_loaded":
-            module_id = request["args"]
-            node_id = self.modules[module_id]["host"]
-            node = self.nodes[node_id]
-            self.send_to_node(node, b"OPTIMIZER-LOADED" + module_id)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "send_forward":
-            # Send forward pass tensor from shared mpc to a roles
-            worker_id, size, shm_name, tag = request["args"]
-            node = self.nodes[worker_id]
-            forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
-            self.send_forward(node, forward_bytes, tag)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "send_backward":
-            # Send backwards pass from shared mpc to a roles
-            worker_id, size, shm_name, tag = request["args"]
-            node = self.nodes[worker_id]
-            backward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
-            self.send_backward(node, backward_bytes, tag)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "send_parameters":
-            node_id, size, shm_name, module_id = request["args"]
-            node = self.nodes[node_id]
-            parameters = get_from_shared_memory(size, shm_name, encoded=True)
-            self.send_to_node(node, b"PARAMETERS" + module_id + parameters)
-
-        elif req_type == "check_module":
-            # Check if module has been received and is loaded in shared mpc
-            return_val = False
-            for module_id, module in self.modules.items():
-                if "mem_info" in module:
-                    name = module["mem_info"]
-                    return_val = (name, module_id, module["host"])
-                    del module["mem_info"]
-
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
-        elif req_type == "check_module_request":
-            request_type, worker_id, module_id = request["args"]
-            return_val = False
-            if request_type == "optimizer":
-                if module_id in self.state_updates.keys():
-                    key = b"OPTIMIZER-LOADED" + module_id + worker_id
-                    if key in self.state_updates[module_id]:
-                        self.state_updates[module_id].remove(key)
-                        return_val = True
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
-        elif req_type == "check_forward":
-            # Check if forward pass has been received and is loaded in shared mpc
-            return_val = None
-
-            if self.role == b"W":
+            elif req_type == "module_loaded":
+                # Send module loaded message to roles
                 module_id = request["args"]
+                node_id = self.modules[module_id]["host"]
+                node = self.nodes[node_id]
+                self.send_to_node(node, b"LOADED" + module_id)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
 
-                if module_id in self.modules:
-                    module = self.modules[module_id]
+            elif req_type == "optimizer_response":
+                module_id, response_type = request["args"]
+                node_id = self.modules[module_id]["host"]
+                node = self.nodes[node_id]
+
+                self.send_to_node(node, b"OPTIMIZER-RESPONSE" + pickle.dumps((module_id, response_type)))
+
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "send_forward":
+                # Send forward pass tensor from shared mpc to a roles
+                worker_id, size, shm_name, tag = request["args"]
+                node = self.nodes[worker_id]
+                forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+                self.send_forward(node, forward_bytes, tag)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "send_backward":
+                # Send backwards pass from shared mpc to a roles
+                worker_id, size, shm_name, tag = request["args"]
+                node = self.nodes[worker_id]
+                backward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+                self.send_backward(node, backward_bytes, tag)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "send_parameters":
+                node_id, module_id = request["args"]
+                node = self.nodes[node_id]
+                self.send_to_node_from_file(node, f"parameters_{module_id.decode()}", b"PARAMETERS" + module_id)
+
+            elif req_type == "check_module":
+                # Check if module has been received and is loaded in shared mpc
+                return_val = False
+                for module_id, module in self.modules.items():
+                    if "mem_info" in module:
+                        name = module["mem_info"]
+                        return_val = (name, module_id, module["host"])
+                        del module["mem_info"]
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "check_module_request":
+                request_type, worker_id, module_id = request["args"]
+                return_val = False
+                key = None
+
+                if module_id in self.state_updates.keys():
+                    key = request_type.encode() + worker_id
+
+                if key in self.state_updates[module_id]:
+                    self.state_updates[module_id].remove(key)
+                    return_val = True
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "check_forward":
+                # Check if forward pass has been received and is loaded in shared mpc
+                return_val = None
+
+                if self.role == b"W":
+                    module_id = request["args"]
+
+                    if module_id in self.modules:
+                        module = self.modules[module_id]
+                        min_iter, min_micro = -1, -1
+                        for (n_iter, n_micro, module_id) in module["forward_queue"].keys():
+                            if n_iter <= min_iter or min_iter == -1:
+                                min_iter = n_iter
+                            if n_micro <= min_micro or min_micro == -1:
+                                min_micro = n_micro
+
+                        key = (min_iter, min_micro, module_id)
+
+                        if key in module["forward_queue"]:
+                            return_val = (key, module["forward_queue"][key])
+                            del module["forward_queue"][key]
+
+                else:
+                    n_iter, n_micro, module_id = request["args"]
+
+                    if module_id in self.modules:
+                        if request["args"] in self.modules[module_id]["forward_queue"]:
+                            return_val = self.modules[module_id]["forward_queue"][request["args"]]
+                            del self.modules[module_id]["forward_queue"][request["args"]]
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "check_backward":
+                # Check if backward pass has been received and is loaded in shared mpc
+                args = request["args"]
+                return_val = None
+
+                if self.role == b"W":
+                    module_hash = args
+                    module = self.modules[module_hash]
                     min_iter, min_micro = -1, -1
-                    for (n_iter, n_micro, module_id) in module["forward_queue"].keys():
+                    for (n_iter, n_micro, module_id) in module["backward_queue"].keys():
                         if n_iter <= min_iter or min_iter == -1:
                             min_iter = n_iter
                         if n_micro <= min_micro or min_micro == -1:
                             min_micro = n_micro
 
-                    key = (min_iter, min_micro, module_id)
+                    key = (min_iter, min_micro, module_hash)
 
-                    if key in module["forward_queue"]:
-                        return_val = (key, module["forward_queue"][key])
-                        del module["forward_queue"][key]
+                    if key in module["backward_queue"]:
+                        return_val = (key, module["backward_queue"][key])
+                        del module["backward_queue"][key]
 
-            else:
-                n_iter, n_micro, module_id = request["args"]
+                else:
+                    n_iter, n_micro, module_hash, module_id = args
+                    key = (n_iter, n_micro, module_id)
+                    if module_hash in self.modules:
+                        if key in self.modules[module_hash]["backward_queue"]:
+                            return_val = self.modules[module_hash]["backward_queue"][key]
+                            del self.modules[module_id]["backward_queue"][key]
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "send_optimizer_request":
+                worker_id, module_id, optimizer_fn, optimizer_kwargs = request["args"]
+                node = self.nodes[worker_id]
+                data = pickle.dumps((module_id, optimizer_fn, optimizer_kwargs))
+                self.send_to_node(node, b"OPTIMIZER" + data)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "check_state_update":
+                module_id = request["args"]
+                return_val = None
+                if self.state_updates[module_id]:
+                    return_val = self.state_updates[module_id].pop()
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "check_parameters_request":
+                key = b"P" + request["args"]
+                return_val = None
+
+                if key in self.memory_manager:
+                    del self.memory_manager[key]
+                    return_val = True
+                else:
+                    return_val = False
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+            elif req_type == "check_parameters":
+                module_id = request["args"]
+                key = b"P" + module_id
+                if key in self.memory_manager:
+                    file_name = self.memory_manager[key]
+                    return_val = file_name
+                else:
+                    return_val = None
+                self.response_queue.put({"stats": "SUCCESS", "return": return_val})
+
+            elif req_type == "request_parameters":
+                worker_id, module_id = request["args"]
+                node = self.nodes[worker_id]
+                self.send_parameters_req(node, module_id)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "update_train":
+                worker_id, mode, module_id = request["args"]
+                mode = b"0" if mode is False else b"1"
+                node = self.nodes[worker_id]
+                self.send_to_node(node, b"UPDATE-TRAIN" + mode + module_id)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "check_train":
+                module_id = request["args"]
+                return_val = None
 
                 if module_id in self.modules:
-                    if request["args"] in self.modules[module_id]["forward_queue"]:
-                        return_val = self.modules[module_id]["forward_queue"][request["args"]]
-                        del self.modules[module_id]["forward_queue"][request["args"]]
+                    if "training" in self.modules[module_id].keys():
+                        return_val = self.modules[module_id]["training"]
 
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
-        elif req_type == "check_backward":
-            # Check if backward pass has been received and is loaded in shared mpc
-            args = request["args"]
-            return_val = None
-
-            if self.role == b"W":
-                module_hash = args
-                module = self.modules[module_hash]
-                min_iter, min_micro = -1, -1
-                for (n_iter, n_micro, module_id) in module["backward_queue"].keys():
-                    if n_iter <= min_iter or min_iter == -1:
-                        min_iter = n_iter
-                    if n_micro <= min_micro or min_micro == -1:
-                        min_micro = n_micro
-
-                key = (min_iter, min_micro, module_hash)
-
-                if key in module["backward_queue"]:
-                    return_val = (key, module["backward_queue"][key])
-                    del module["backward_queue"][key]
-
-            else:
-                n_iter, n_micro, module_hash, module_id = args
-                key = (n_iter, n_micro, module_id)
-                if module_hash in self.modules:
-                    if key in self.modules[module_hash]["backward_queue"]:
-                        return_val = self.modules[module_hash]["backward_queue"][key]
-                        del self.modules[module_id]["backward_queue"][key]
-
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
-        elif req_type == "send_optimizer_request":
-            worker_id, module_id, optimizer_fn, optimizer_kwargs = request["args"]
-            node = self.nodes[worker_id]
-            data = pickle.dumps((module_id, optimizer_fn, optimizer_kwargs))
-            self.send_to_node(node, b"OPTIMIZER" + data)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "check_state_update":
-            module_id = request["args"]
-            return_val = None
-            if self.state_updates[module_id]:
-                return_val = self.state_updates[module_id].pop()
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
-        elif req_type == "check_parameters_request":
-            module_id = request["args"]
-            return_val = None
-            key = b"P" + module_id
-
-            if key in self.memory_manager:
+            elif req_type == "release_memory":
+                data_type, module_id, key = tuple(request["args"])
                 del self.memory_manager[key]
-                return_val = True
-            else:
-                return_val = False
+                if key in self.modules[module_id][data_type]:
+                    del self.modules[module_id][data_type][key]
 
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
+                self.response_queue.put({"status": "SUCCESS", "return": None})
 
-        elif req_type == "check_parameters":
-            module_id = request["args"]
-            key = b"P" + module_id
-            if key in self.memory_manager:
-                size, name = self.memory_manager[key]
-                return_val = (size, name)
-            else:
-                return_val = None
-            self.response_queue.put({"stats": "SUCCESS", "return": return_val})
+            elif req_type == "connect_node":
+                node_id, host, port = request["args"]
+                connected = self.connect_node(node_id, host, port)
+                self.response_queue.put({"status": "SUCCESS", "return": connected})
 
-        elif req_type == "request_parameters":
-            worker_id, module_id = request["args"]
-            node = self.nodes[worker_id]
-            self.send_parameters_req(node, module_id)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
+            elif req_type == "info":
+                self.response_queue.put({"status": "SUCCESS", "return": (self.rsa_key_hash, self.host, self.port)})
 
-        elif req_type == "update_train":
-            worker_id, mode, module_id = request["args"]
-            mode = b"0" if mode is False else b"1"
-            node = self.nodes[worker_id]
-            self.send_to_node(node, b"UPDATE-TRAIN" + mode + module_id)
-            self.response_queue.put({"status": "SUCCESS", "return": None})
+            elif req_type == "stop":
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+                self.stop()
 
-        elif req_type == "check_train":
-            module_id = request["args"]
-            return_val = None
+            elif req_type == "check_shutdown":
+                if self.terminate_flag.is_set():
+                    self.response_queue.put({"status": "SUCCESS", "return": True})
+                    t = threading.Thread(target=self.stop_mpc_comms)
+                    t.start()
+                else:
+                    self.response_queue.put({"status": "SUCCESS", "return": False})
 
-            if module_id in self.modules:
-                if "training" in self.modules[module_id].keys():
-                    return_val = self.modules[module_id]["training"]
-
-            self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
-        elif req_type == "release_memory":
-            data_type, module_id, key = tuple(request["args"])
-            del self.memory_manager[key]
-            if key in self.modules[module_id][data_type]:
-                del self.modules[module_id][data_type][key]
-
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-
-        elif req_type == "connect_node":
-            node_id, host, port = request["args"]
-            connected = self.connect_node(node_id, host, port)
-            self.response_queue.put({"status": "SUCCESS", "return": connected})
-
-        elif req_type == "info":
-            self.response_queue.put({"status": "SUCCESS", "return": (self.rsa_key_hash, self.host, self.port)})
-
-        elif req_type == "stop":
-            self.response_queue.put({"status": "SUCCESS", "return": None})
-            self.stop()
-
-        elif req_type == "check_shutdown":
-            if self.terminate_flag.is_set():
-                self.response_queue.put({"status": "SUCCESS", "return": True})
-                t = threading.Thread(target=self.stop_mpc_comms)
-                t.start()
-            else:
+            elif req_type == "debug_print":
+                message = request["args"]
+                self.debug_print(message)
                 self.response_queue.put({"status": "SUCCESS", "return": False})
+                
+        except (OSError, EOFError) as e:
+            if "handle is closed" in str(e):
+                return
+            raise
 
     def send_forward(self, node: Connection, forward_bytes, context):
         """Send forward pass to roles, must contain args (module args) and context (module + epoch id)"""
@@ -466,7 +493,7 @@ class TorchNode(SmartNode):
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
     def send_module(self, file_name: bytes, module_id: bytes, node: Connection):
-        self.debug_print(f"torch_node.py -> Sending module: {module_id} to worker: {node.node_id}")
+        self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}")
         self.store_request(node.node_id, b"MODULE")
         self.state_updates[module_id] = []
         self.send_to_node_from_file(node, file_name, b"MODULE" + module_id)

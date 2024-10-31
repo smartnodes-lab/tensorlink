@@ -4,7 +4,7 @@ from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared
 
 from transformers.utils import ModelOutput
 from collections import defaultdict
-from types import GeneratorType
+from typing import Generator, OrderedDict
 import torch.nn as nn
 import threading
 import hashlib
@@ -16,7 +16,6 @@ import time
 import gc
 
 MAX_WAIT_TIME = 300
-THREAD_STORAGE = threading.local()
 
 
 def contains_offloaded(module: nn.Module):
@@ -83,7 +82,7 @@ class DistributedModel(nn.Module):
         self.worker_info = {}
 
         self.n_pipelines = n_pipelines
-        self.n_micro_batch = n_pipelines
+        self.n_datalines = 1
 
         self.distributed_graph = {}
         self.parameters_storage = {}
@@ -105,28 +104,30 @@ class DistributedModel(nn.Module):
         batch_size = get_batch_size(args)
 
         assert (
-            batch_size % self.n_micro_batch == 0
-        ), "Micro-batch must be divisible by batch."
+            batch_size % self.n_datalines == 0
+        ), "Batch size must be divisible by n_datalines!"
 
-        micro_batch_size = batch_size // self.n_micro_batch
+        assert (
+            batch_size // self.n_datalines % self.n_pipelines == 0
+        ), "Minibatch size must be divisible by n_pipelines!"
 
         # Split the input tensor and kwargs into micro-batches
-        micro_batches_args = chunk(args, self.n_micro_batch)
-        micro_batches_kwargs = chunk(kwargs, self.n_micro_batch)
+        micro_batch_args = chunk(args, self.n_pipelines)
+        micro_batch_kwargs = chunk(kwargs, self.n_pipelines)
 
         # Create queues for forward and backward passes
-        self.model.forward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
-        self.model.backward_queues = {m: queue.Queue() for m in range(self.n_micro_batch)}
-        self.model.outputs = [None] * self.n_micro_batch
-        self.model.intermediates = {m: [] for m in range(self.n_micro_batch)}
+        self.model.forward_queues = {m: queue.Queue() for m in range(self.n_pipelines)}
+        self.model.backward_queues = {m: queue.Queue() for m in range(self.n_pipelines)}
+        self.model.outputs = [None] * self.n_pipelines
+        self.model.intermediates = {m: [] for m in range(self.n_pipelines)}
 
         # Spawn separate threads for each micro batch for pipeline parallelism
         threads = []
-        for micro in range(self.n_micro_batch):
-            batch_args = micro_batches_args[micro]
-            batch_kwargs = micro_batches_kwargs[micro]
+        for micro in range(self.n_pipelines):
+            micro_args = micro_batch_args[micro]
+            micro_kwargs = micro_batch_kwargs[micro]
             t = threading.Thread(
-                target=self._perform_micro_forward, args=(micro, batch_args), kwargs=batch_kwargs
+                target=self._perform_micro_forward, args=(micro, micro_args), kwargs=micro_kwargs
             )
             t.start()
             threads.append(t)
@@ -135,11 +136,14 @@ class DistributedModel(nn.Module):
         for t in threads:
             t.join()
 
+        if not self.training:
+            self.model.n_batch += 1
+
         combined_output = combine_micro_batches(self.model.outputs)
         return CustomAutogradRouter.apply(self, combined_output)
 
     def _perform_micro_forward(self, micro, *args, **kwargs):
-        THREAD_STORAGE.micro = micro
+        kwargs["micro"] = micro
         x = self.model(*args, **kwargs)
         self.model.outputs[micro] = x
 
@@ -152,10 +156,10 @@ class DistributedModel(nn.Module):
             micro_losses = loss.micro_loss
         else:
             # Split the combined loss into micro-batch-specific losses
-            micro_losses = split_into_micro_batches(loss, self.n_micro_batch)
+            micro_losses = split_into_micro_batches(loss, self.n_pipelines)
 
         threads = []
-        for micro in range(self.n_micro_batch):
+        for micro in range(self.n_pipelines):
             t = threading.Thread(
                 target=self._perform_micro_backward, args=(micro, micro_losses[micro])
             )
@@ -166,38 +170,19 @@ class DistributedModel(nn.Module):
         for t in threads:
             t.join()
 
+        self.model.n_batch += 1
+
     def _perform_micro_backward(self, micro, loss):
         """
         Process each backwards stream
         """
-        THREAD_STORAGE.micro = micro
 
         # Get the oldest epoch intermediates from storage via dict key lookup (todo)
         while len(self.model.intermediates[micro]) > 0:
             vals = self.model.intermediates[micro].pop(-1)
 
-            if (
-                len(vals) == 3
-            ):  # Len == 3 means connection info is present TODO: better context creation
-                assoc_input, assoc_output, module_id = vals
-                tag = [self.model.n_batch, micro, module_id]
-
-                if loss is None:
-                    # If loss is None, use the associated output for backward pass
-                    loss = assoc_output
-
-                assoc_output.backward(loss, retain_graph=True)
-                loss = assoc_input.grad
-                worker_id = self.distributed_graph[module_id]
-
-                size, shm_name = store_in_shared_memory((loss, None))
-                self.send_request("send_backward", (worker_id, size, shm_name, tag))
-
-                if self.model.backward_relays.not_empty:
-                    loss = self.model.backward_relays.get()
-
             # Len vals 2 means backwards pass of first & last submodule
-            elif len(vals) == 2:
+            if len(vals) == 2:
                 val1, val2 = vals
 
                 # Pass of the first submodule / section contains tensor in the first position
@@ -299,44 +284,70 @@ class DistributedModel(nn.Module):
             yield self.model
             yield from self.model.children()
 
-    def parameters(self, recurse: bool = True, distributed: bool = True):
+    def parameters(self, recurse: bool = True, distributed: bool = True, load: bool = True) -> Generator:
         """
-        Collects parameters from all modules (including offloaded) asynchronously and returns them.
+        Collects parameters from all modules (including offloaded) asynchronously and returns them as a generator.
         """
         if distributed:
             parameters = []
             parameter_requests = []
+            offloaded_files = {}
 
             def recurse_parameters(module):
                 for children in module.children():
                     if isinstance(children, OffloadedModule):
+                        # Request parameters from offloaded modules
                         self.send_request("request_parameters", (children.worker_id, children.module_id))
-                        t = threading.Thread(
-                            target=self._wait_for_parameters, args=(children.module_id,)
-                        )
+                        # Start a thread to wait for each response
+                        t = threading.Thread(target=self._wait_for_parameters, args=(children.module_id,))
                         t.start()
                         parameter_requests.append(t)
                     elif contains_offloaded(children):
                         recurse_parameters(children)
                     else:
-                        parameters.append(children.parameters())
+                        parameters.extend(list(children.parameters()))
 
             recurse_parameters(self)
 
+            # Wait for all parameter requests to complete
             for req in parameter_requests:
                 req.join()
 
+            # Collect parameters from storage or in-memory as required
             for module_id, module_info in self.distributed_graph.items():
                 if module_info["type"] == "offloaded":
-                    parameters.append(self.parameters_storage[module_id])
+                    file_name = self.parameters_storage[module_id]
+                    if load:
+                        # Load the parameters from the file and append them to the list
+                        with open(file_name, "rb") as f:
+                            state_dict = torch.load(f)
+                            # Extend the parameters list with the loaded state_dict values
+                            parameters.extend(state_dict.values())
+                    else:
+                        # Store the reference to the file in a separate dictionary
+                        offloaded_files[module_id] = file_name
                 else:
                     module, module_name = access_module(self.model, module_info["mod_id"])
-                    parameters.append(list(module.parameters()))
+                    parameters.extend(list(module.parameters()))
+
+            # Create a generator that loads parameters from file if necessary
+            def parameter_generator():
+                # Yield parameters that have been loaded or collected in-memory
+                for param in parameters:
+                    yield param
+
+                # If load is False, lazily load from the file when requested
+                if not load:
+                    for _module_id, _file_name in offloaded_files.items():
+                        with open(_file_name, "rb") as f:
+                            state_dict = torch.load(f)
+                            for param in state_dict.values():
+                                yield param
+
+            return parameter_generator()
 
         else:
-            parameters = self.model.parameters(recurse)
-
-        return parameters
+            return (param for param in self.model.parameters(recurse))
 
     def _wait_for_parameters(self, module_id: bytes):
         """
@@ -351,16 +362,13 @@ class DistributedModel(nn.Module):
 
             if args is not None:
                 waiting = False
-                size, name = args
-                parameters = get_from_shared_memory(size, name, encoded=True)
-                parameters = pickle.loads(parameters)
-                self.parameters_storage[module_id] = parameters
+                file_name = args
+
+                self.parameters_storage[module_id] = file_name
 
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
                 waiting = False
-
-        self.send_request("release_memory", b"P" + module_id)
 
     def _wait_for_state_update(self, module_id, state):
         """
@@ -402,8 +410,11 @@ class DistributedModel(nn.Module):
             worker_id = mod_info["workers"][0]
             self.wrap_module(mod_id, worker_id)
 
+        if len(config) == 1:
+            module, module_name = access_module(self.model, [-1])
+            setattr(module, "entire_model", True)
+
         self.model.n_batch = 0
-        self.model.n_micro_batch = self.n_micro_batch
         self.model.forward_queues = {}
         self.model.backward_queues = {}
         self.model.intermediates = [
@@ -524,13 +535,12 @@ class DistributedModel(nn.Module):
 
         # Assign metadata to child_module
         child_module.id = module_hash
-        child_module.n_micro_batch = self.n_micro_batch
+        child_module.n_batch = 0
 
         file_name = f"{module_hash.decode()}_{worker_id.decode()}.pth"
         torch.save(child_module, file_name)  # Save the module to disk
         module_info = str(child_module)
         offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
-        # offloaded_module.n_micro_batch = 0
 
         # Detach and clear the parameters of the child_module to free memory
 
@@ -607,11 +617,13 @@ class OffloadedModule(nn.Module):
     def __init__(self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes):
         super(OffloadedModule, self).__init__()
 
+        self.entire_model = False
         self.module_name = module_name.split("(")[0]
         self.module_info = module_name.split("(")[1][:-1]
         self.parent_model = parent_model
         self.worker_id = worker_id
         self.module_id = module_id
+        self.n_batch = 0
 
     def children(self):
         # Print the offloaded module and the original model name
@@ -653,16 +665,17 @@ class OffloadedModule(nn.Module):
 
     def forward(self, *args, **kwargs):
         start_time = time.time()
-        n_iter = self.parent_model.model.n_micro_batch - 1
-        n_micro = getattr(THREAD_STORAGE, "micro", None)
+        n_batch = self.parent_model.model.n_batch
+        n_micro = kwargs.pop("micro")
         n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
-        tag = [n_iter, n_micro, self.module_id]
+        tag = [n_batch, n_micro, self.module_id]
 
         # Store the intermediate tensor for backwards pass
-        self.parent_model.model.intermediates[n_micro].append(
-            [handle_output(args), self.module_id]
-        )
+        if not self.entire_model:
+            self.parent_model.model.intermediates[n_micro].append(
+                [handle_output(args), self.module_id]
+            )
 
         detached_args = handle_output(args).clone().detach()
 
@@ -674,7 +687,7 @@ class OffloadedModule(nn.Module):
         waiting = True
         while waiting:
             time.sleep(0.1)
-            key = (n_iter, n_micro, self.module_id)
+            key = (n_batch, n_micro, self.module_id)
             args = self.parent_model.send_request("check_forward", key)
 
             if args is not None:
@@ -707,6 +720,13 @@ class OffloadedModule(nn.Module):
     def parameters(self, recurse=True):
         """Override parameters to return wrapped DistributedParameters."""
         return iter(self._parameters.values())
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """
+        Returns an empty dictionary for the OffloadedModule.
+        This effectively hides the OffloadedModule from the model's state_dict.
+        """
+        return {}
 
     def __repr__(self):
         # Custom representation to prevent recursion when printing or debugging.
