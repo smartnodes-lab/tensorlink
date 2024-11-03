@@ -106,7 +106,7 @@ as input in another. This independent validation ensures consistency across node
 that might impact model accuracy.
 
 
-## Inventives
+## Incentives
 
 Tensorlink is powered by Smartnodes and it's native token, SNO. SNO functions as a vital incentive for encouraging 
 network participation while promoting growth and development. Tokens are allocated to workers as rewards for their 

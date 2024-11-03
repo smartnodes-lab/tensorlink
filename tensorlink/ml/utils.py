@@ -4,6 +4,271 @@ import torch.nn as nn
 import inspect
 import torch
 import ast
+import torch
+import torch.nn as nn
+from typing import Tuple, Dict, Any, List, Optional
+from dataclasses import dataclass
+import math
+from enum import Enum
+import numpy as np
+
+
+class MemoryType(Enum):
+    PARAMETERS = "parameters"
+    GRADIENTS = "gradients"
+    ACTIVATIONS = "activations"
+    OPTIMIZER = "optimizer"
+    TEMPORARY = "temporary"
+
+
+@dataclass
+class MemoryStats:
+    total_bytes: int
+    breakdown: Dict[MemoryType, int]
+    per_layer: Dict[str, Dict[MemoryType, int]]
+    peak_memory: int
+    activation_shapes: List[Tuple[str, List[int]]]
+
+
+class MemoryEstimator:
+    def __init__(self):
+        # Memory multipliers for different optimizer types
+        self.optimizer_memory_multipliers = {
+            'adam': 3,  # Adam keeps 2 momentum terms + parameters
+            'adamw': 3,
+            'sgd': 1,  # SGD with momentum keeps 1 momentum term
+            'rmsprop': 2,
+            'adagrad': 2,
+            'adadelta': 3
+        }
+
+        # Activation memory factors for different layer types
+        self.activation_factors = {
+            nn.Conv2d: self._conv2d_activation_factor,
+            nn.Linear: self._linear_activation_factor,
+            nn.MultiheadAttention: self._attention_activation_factor,
+            nn.TransformerEncoderLayer: self._transformer_activation_factor,
+            nn.LSTM: self._lstm_activation_factor,
+            nn.GRU: self._gru_activation_factor,
+            nn.BatchNorm2d: 2.0,  # Running mean and variance
+            nn.LayerNorm: 2.0,
+            nn.Dropout: 1.0,  # Minimal overhead for mask
+            nn.ReLU: 1.0,
+            nn.MaxPool2d: 1.0,
+            nn.AdaptiveAvgPool2d: 1.0
+        }
+
+    def _get_dtype_size(self, dtype: torch.dtype) -> int:
+        """Get size in bytes for different dtypes."""
+        if dtype == torch.float32:
+            return 4
+        elif dtype == torch.float16 or dtype == torch.bfloat16:
+            return 2
+        elif dtype == torch.float64:
+            return 8
+        elif dtype == torch.int8 or dtype == torch.uint8:
+            return 1
+        elif dtype == torch.int16:
+            return 2
+        elif dtype == torch.int32:
+            return 4
+        elif dtype == torch.int64:
+            return 8
+        else:
+            return 4  # Default to float32 size
+
+    def _conv2d_activation_factor(self, module: nn.Conv2d, input_shape: Tuple) -> float:
+        """Calculate activation factor for Conv2d layers considering intermediate feature maps."""
+        _, _, h, w = input_shape
+        out_channels = module.out_channels
+        kernel_size = module.kernel_size
+        padding = module.padding
+        stride = module.stride
+
+        # Calculate output dimensions
+        h_out = ((h + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
+        w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
+
+        # Consider im2col memory overhead
+        im2col_size = module.in_channels * kernel_size[0] * kernel_size[1] * h_out * w_out
+        output_size = out_channels * h_out * w_out
+
+        return (im2col_size + output_size) / (h * w * module.in_channels)
+
+    def _linear_activation_factor(self, module: nn.Linear, input_shape: Tuple) -> float:
+        """Calculate activation factor for Linear layers."""
+        return 2.0  # Input and output activations
+
+    def _attention_activation_factor(self, module: nn.MultiheadAttention, input_shape: Tuple) -> float:
+        """Calculate activation factor for attention layers considering Q, K, V matrices."""
+        seq_length = input_shape[0]
+        return 4.0 + (seq_length / 100)  # Base factor + sequence length dependent factor
+
+    def _transformer_activation_factor(self, module: nn.TransformerEncoderLayer, input_shape: Tuple) -> float:
+        """Calculate activation factor for transformer layers."""
+        return 6.0  # Multiple attention heads + FFN activations
+
+    def _lstm_activation_factor(self, module: nn.LSTM, input_shape: Tuple) -> float:
+        """Calculate activation factor for LSTM layers considering gates."""
+        return 4.0  # Input, forget, cell, output gates
+
+    def _gru_activation_factor(self, module: nn.GRU, input_shape: Tuple) -> float:
+        """Calculate activation factor for GRU layers."""
+        return 3.0  # Reset, update gates and new memory
+
+    def estimate_layer_memory(self,
+                              module: nn.Module,
+                              input_shape: Tuple,
+                              batch_size: int,
+                              dtype: torch.dtype,
+                              training: bool = True) -> Dict[MemoryType, int]:
+        """Estimate memory usage for a single layer."""
+        memory_breakdown = {mem_type: 0 for mem_type in MemoryType}
+        dtype_size = self._get_dtype_size(dtype)
+
+        # Parameter memory
+        param_memory = sum(p.numel() * self._get_dtype_size(p.dtype) for p in module.parameters())
+        memory_breakdown[MemoryType.PARAMETERS] = param_memory
+
+        # Gradient memory during training
+        if training:
+            memory_breakdown[MemoryType.GRADIENTS] = param_memory
+
+        # Activation memory
+        total_elements = np.prod(input_shape) * batch_size
+        base_activation_memory = total_elements * dtype_size
+
+        # Get activation factor based on layer type
+        activation_factor = 1.0
+        for layer_type, factor_func in self.activation_factors.items():
+            if isinstance(module, layer_type):
+                activation_factor = (factor_func(module, input_shape)
+                                     if callable(factor_func)
+                                     else factor_func)
+                break
+
+        memory_breakdown[MemoryType.ACTIVATIONS] = int(base_activation_memory * activation_factor)
+
+        # Temporary memory buffers (for intermediate computations)
+        memory_breakdown[MemoryType.TEMPORARY] = int(base_activation_memory * 0.5)  # Conservative estimate
+
+        return memory_breakdown
+
+    def estimate_model_memory(self,
+                              model: nn.Module,
+                              input_shape: Tuple,
+                              batch_size: int = 32,
+                              dtype: torch.dtype = torch.float32,
+                              optimizer_type: str = 'adam',
+                              training: bool = True) -> MemoryStats:
+        """
+        Estimate total memory usage for the entire model.
+
+        Args:
+            model: The PyTorch model
+            input_shape: Input tensor shape (excluding batch dimension)
+            batch_size: Training batch size
+            dtype: Model's data type
+            optimizer_type: Type of optimizer used
+            training: Whether the model is in training mode
+
+        Returns:
+            MemoryStats object containing detailed memory analysis
+        """
+        total_memory = 0
+        memory_breakdown = {mem_type: 0 for mem_type in MemoryType}
+        per_layer_memory = {}
+        activation_shapes = []
+
+        # Track cumulative activation memory for peak estimation
+        cumulative_activation = 0
+        peak_memory = 0
+
+        def _analyze_module(module: nn.Module, name: str, curr_input_shape: Tuple):
+            nonlocal total_memory, cumulative_activation, peak_memory
+
+            # Skip container modules
+            if len(list(module.children())) > 0:
+                return curr_input_shape
+
+            # Estimate memory for current layer
+            layer_memory = self.estimate_layer_memory(
+                module, curr_input_shape, batch_size, dtype, training
+            )
+
+            # Update statistics
+            per_layer_memory[name] = layer_memory
+            for mem_type, amount in layer_memory.items():
+                memory_breakdown[mem_type] += amount
+                total_memory += amount
+
+            # Track activation memory for peak estimation
+            if isinstance(module, (nn.Conv2d, nn.Linear, nn.MultiheadAttention)):
+                cumulative_activation += layer_memory[MemoryType.ACTIVATIONS]
+                peak_memory = max(peak_memory, cumulative_activation)
+
+            # Calculate output shape
+            output_shape = self._calculate_output_shape(module, curr_input_shape)
+            activation_shapes.append((name, list(output_shape)))
+
+            return output_shape
+
+        # Recursively analyze model
+        curr_shape = input_shape
+        for name, module in model.named_modules():
+            if len(list(module.children())) == 0:  # Leaf module
+                curr_shape = _analyze_module(module, name, curr_shape)
+
+        # Add optimizer memory if in training mode
+        if training and optimizer_type in self.optimizer_memory_multipliers:
+            optimizer_memory = (memory_breakdown[MemoryType.PARAMETERS] *
+                                self.optimizer_memory_multipliers[optimizer_type])
+            memory_breakdown[MemoryType.OPTIMIZER] = optimizer_memory
+            total_memory += optimizer_memory
+
+        return MemoryStats(
+            total_bytes=total_memory,
+            breakdown=memory_breakdown,
+            per_layer=per_layer_memory,
+            peak_memory=peak_memory,
+            activation_shapes=activation_shapes
+        )
+
+    def _calculate_output_shape(self, module: nn.Module, input_shape: Tuple) -> Tuple:
+        """Calculate output shape for different layer types."""
+        if isinstance(module, nn.Conv2d):
+            _, c, h, w = input_shape
+            padding = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)
+            stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
+            kernel_size = module.kernel_size if isinstance(module.kernel_size, tuple) else (
+            module.kernel_size, module.kernel_size)
+
+            h_out = ((h + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
+            w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
+            return (module.out_channels, h_out, w_out)
+
+        elif isinstance(module, nn.Linear):
+            return (module.out_features,)
+
+        elif isinstance(module, nn.MaxPool2d) or isinstance(module, nn.AvgPool2d):
+            _, c, h, w = input_shape
+            kernel_size = module.kernel_size if isinstance(module.kernel_size, tuple) else (
+            module.kernel_size, module.kernel_size)
+            stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
+            h_out = ((h - kernel_size[0]) // stride[0]) + 1
+            w_out = ((w - kernel_size[1]) // stride[1]) + 1
+            return (c, h_out, w_out)
+
+        return input_shape
+
+
+def format_memory_size(bytes: int) -> str:
+    """Format memory size in human-readable format."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if bytes < 1024:
+            return f"{bytes:.2f} {unit}"
+        bytes /= 1024
+    return f"{bytes:.2f} TB"
 
 
 distributed_module_ids = []

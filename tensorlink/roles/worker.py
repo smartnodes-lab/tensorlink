@@ -6,6 +6,7 @@ from tensorlink.crypto.rsa import get_rsa_pub_key
 from dotenv import get_key
 import torch.nn as nn
 import threading
+import logging
 import hashlib
 import pickle
 import torch
@@ -26,7 +27,8 @@ class Worker(TorchNode):
         self,
         request_queue,
         response_queue,
-        debug: bool = False,
+        debug: bool = True,
+        print_level=logging.INFO,
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
@@ -43,15 +45,16 @@ class Worker(TorchNode):
         )
 
         self.training = False
-        self.role = b"W"
+        self.role = "W"
+        self.print_level = print_level
         self.loss = None
         self.public_key = get_key(".env", "PUBLIC_KEY")
-        self.store_value(hashlib.sha256(b"ADDRESS").hexdigest().encode(), self.public_key)
+        self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
-        self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})")
+        self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
         self.available_memory = 2e9
 
     def handle_data(self, data: bytes, node: Connection):
@@ -71,12 +74,12 @@ class Worker(TorchNode):
             if not handled:
                 # Try worker-related tags
                 if b"STATS-REQUEST" == data[:13]:
-                    self.debug_print(f"Received stats request from: {node.node_id}")
+                    self.debug_print(f"Worker -> Received stats request from: {node.node_id}")
                     self.handle_statistics_request(node)
 
                 elif b"JOB-REQ" == data[:7]:
                     try:
-                        if node.role == b"V":
+                        if node.role == "V":
                             # Accept job request from validator if we can handle it
                             user_id, job_id, module_id, module_size = pickle.loads(data[7:])
 
@@ -86,7 +89,7 @@ class Worker(TorchNode):
                                 # Respond to validator that we can accept the job
                                 # Store a request to wait for the user connection as well
                                 self.store_request(user_id + module_id, b"AWAIT-USER")
-                                data = b"ACCEPT-JOB" + job_id + module_id
+                                data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
 
                                 # Update available memory
                                 self.available_memory -= module_size
@@ -134,7 +137,8 @@ class Worker(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"worker:stream_data:{e}")
+            self.debug_print(f"Worker -> stream data exception: {e}", colour="bright_red",
+                             level=logging.ERROR)
             raise e
 
     def run(self):

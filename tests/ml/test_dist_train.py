@@ -40,11 +40,11 @@ class Dummy(nn.Module):
 
 if __name__ == "__main__":
     # Launch Nodes
-    user = UserNode(upnp=False, debug=True, off_chain_test=True, local_test=False)
+    user = UserNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(0.5)
-    worker = WorkerNode(upnp=False, debug=True, off_chain_test=True, local_test=False)
+    worker = WorkerNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(0.5)
-    validator = ValidatorNode(upnp=False, debug=True, off_chain_test=True, local_test=False)
+    validator = ValidatorNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(0.5)
 
     # Bootstrap roles
@@ -82,7 +82,7 @@ if __name__ == "__main__":
     # d = distributed_model.state_dict()
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
 
-    for _ in range(10):
+    for _ in range(2):
         distributed_optimizer.zero_grad()
         x = torch.zeros((10, 10))
         x = distributed_model(x)

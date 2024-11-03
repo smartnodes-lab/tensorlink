@@ -7,7 +7,7 @@ import os
 
 def get_keys_path(role):
     # Get the current directory of the script
-    keys_dir = os.path.join(os.getcwd(), f"keys/{role.decode()}")
+    keys_dir = os.path.join(os.getcwd(), f"keys/{role}")
 
     # Create the keys directory if it doesn't exist
     os.makedirs(keys_dir, exist_ok=True)

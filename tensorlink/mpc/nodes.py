@@ -52,7 +52,7 @@ class BaseNode:
 
             # If the process is still alive, terminate it
             if self.node_process.is_alive():
-                print("Forcing termination for DistributedWorker process.")
+                print("Forcing termination for node process.")
                 self.node_process.terminate()
 
             # Final join to ensure it's completely shut down

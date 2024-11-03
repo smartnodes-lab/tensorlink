@@ -7,19 +7,20 @@ import time
 
 if __name__ == "__main__":
 
-    # user = UserNode(debug=True, upnp=False, off_chain_test=True)
-    # time.sleep(0.2)
-    # worker = WorkerNode(debug=True, upnp=False, off_chain_test=True)
-    # time.sleep(0.2)
+    user = UserNode(debug=True, upnp=False, off_chain_test=True)
+    time.sleep(0.2)
+    worker = WorkerNode(debug=True, upnp=False, off_chain_test=True)
+    time.sleep(0.2)
     validator = ValidatorNode(debug=True, upnp=False, off_chain_test=True)
 
     time.sleep(0.2)
 
-    # val_key, val_host, val_port = validator.send_request("info", None)
+    val_key, val_host, val_port = validator.send_request("info", None)
 
-    # worker.send_request("connect_node", (val_key, val_host, val_port))
-    # time.sleep(5)
-    # user.send_request("connect_node", (val_key, val_host, val_port))
+    worker.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(3)
+    user.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(3)
     # user.send_request("connect_node", (b"", "142.188.24.158", 38751))
 
     # model = BertModel.from_pretrained("bert-base-uncased")
@@ -31,5 +32,6 @@ if __name__ == "__main__":
     # distributed_model.backward(loss)
 
     validator.cleanup()
-    # worker.cleanup()
-    # user.cleanup()
+    # time.sleep(150)
+    worker.cleanup()
+    user.cleanup()

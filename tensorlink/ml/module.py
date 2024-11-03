@@ -444,7 +444,7 @@ class DistributedModel(nn.Module):
         # Create offloaded module data structure for config file
         def create_offloaded(module: nn.Module, module_index: list, module_size: int):
             module_id = (
-                hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
+                hashlib.sha256(str(random.random()).encode()).hexdigest()
             )
             data = {
                 "type": "offloaded",
@@ -454,7 +454,6 @@ class DistributedModel(nn.Module):
                 ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
-                "parameters": {},
                 "workers": [],
                 "training": True
             }
@@ -463,7 +462,7 @@ class DistributedModel(nn.Module):
         # Create user-loaded module data structure for config file
         def create_loaded(module: nn.Module, module_index: list, module_size: int):
             module_id = (
-                hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
+                hashlib.sha256(str(random.random()).encode()).hexdigest()
             )
             data = {
                 "type": "loaded",
@@ -473,13 +472,12 @@ class DistributedModel(nn.Module):
                 ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
-                "parameters": {},
                 "workers": [],
             }
             return module_id, data
 
         named_children = list(model.named_children())
-        model_size = estimate_memory(model)
+        model_size = MemoryEstimator().estimate_model_memory(model, (3, 100, 100)).total_bytes
         max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
         max_worker_mem = max_worker[1]["memory"]
 
@@ -537,7 +535,7 @@ class DistributedModel(nn.Module):
         child_module.id = module_hash
         child_module.n_batch = 0
 
-        file_name = f"{module_hash.decode()}_{worker_id.decode()}.pth"
+        file_name = f"{module_hash}_{worker_id}.pth"
         torch.save(child_module, file_name)  # Save the module to disk
         module_info = str(child_module)
         offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
@@ -645,7 +643,7 @@ class OffloadedModule(nn.Module):
         start_time = time.time()
         while waiting:
             time.sleep(0.5)
-            args = self.parent_model.send_request("check_loaded", self.worker_id)
+            args = self.parent_model.send_request("check_loaded", (self.worker_id, self.module_id))
 
             if args is True:
                 waiting = False

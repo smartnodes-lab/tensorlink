@@ -36,7 +36,7 @@ class Connection(threading.Thread):
         self.stats = {}
 
         self.node_key = node_key
-        self.node_id = hashlib.sha256(node_key).hexdigest().encode()
+        self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
         self.sock.settimeout(10)
         self.chunk_size = 1024 * 1024 * 4 * 4

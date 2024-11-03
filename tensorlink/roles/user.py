@@ -5,6 +5,7 @@ from tensorlink.crypto.rsa import get_rsa_pub_key
 
 import threading
 import hashlib
+import logging
 import pickle
 import random
 import queue
@@ -16,7 +17,8 @@ class User(TorchNode):
         self,
         request_queue,
         response_queue,
-        debug: bool = False,
+        debug: bool = True,
+        print_level=logging.DEBUG,
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
@@ -33,14 +35,15 @@ class User(TorchNode):
             local_test=local_test
         )
 
-        self.role = b"U"
+        self.role = "U"
+        self.print_level = print_level
         self.distributed_graph = {}
         self.worker_stats = {}
 
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest().encode()
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
-        self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})")
+        self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
 
         self.endpoint = create_endpoint(self)
         self.endpoint_thread = threading.Thread(
@@ -89,11 +92,12 @@ class User(TorchNode):
                 elif b"DECLINE-JOB" == data[:11]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         reason = data[11:]
-                        self.debug_print(f"user.py -> Validator ({node.node_id}) declined job! Reason: {reason}")
+                        self.debug_print(f"User -> Validator ({node.node_id}) declined job! Reason: {reason}",
+                                         colour="bright_red", level=logging.ERROR)
                     else:
                         ghost += 1
                 elif b"WORKERS" == data[:7]:
-                    self.debug_print(f"user.py -> Received workers from: {node.node_id}")
+                    self.debug_print(f"User -> Received workers from: {node.node_id}")
                     workers = pickle.loads(data[7:])
                     for worker, stats in workers.items():
                         self.worker_stats[worker] = stats
@@ -107,7 +111,7 @@ class User(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"user.py -> error handling data {e}")
+            self.debug_print(f"User -> error handling data {e}", colour="bright_red", level=logging.ERROR)
             raise e
 
     def handle_requests(self, req=None):
@@ -120,7 +124,7 @@ class User(TorchNode):
                 return
 
         if req["type"] == "request_job":
-            assert self.role == b"U", "Must be user to request a job!"
+            assert self.role == "U", "Must be user to request a job!"
             n_pipelines, dp_factor, distribution = req["args"]
             dist_config = self.request_job(n_pipelines, dp_factor, distribution)
             self.response_queue.put({"status": "SUCCESS", "return": dist_config})
@@ -147,13 +151,14 @@ class User(TorchNode):
         """
         try:
             if node.node_id in self.jobs[-1]["seed_validators"]:
-                self.debug_print(f"user.py -> Validator ({node.node_id}) accepted job!")
-                job_id = data[10:74]
+                self.debug_print(f"User -> Validator ({node.node_id}) accepted job!", colour="bright_green",
+                                 level=logging.INFO)
+                job_id = data[10:74].decode()
                 job_data = pickle.loads(data[74:])
                 distribution = job_data["distribution"]
 
                 for mod_id, mod_info in distribution.items():
-                    for worker, worker_info in mod_info["worker"]:
+                    for worker, worker_info in mod_info["workers"]:
                         # Connect to workers for each model
                         connected = self.connect_worker(
                             worker_info["id"],
@@ -167,10 +172,12 @@ class User(TorchNode):
 
                 self.requests[node.node_id].remove(job_id)
             else:
-                self.debug_print(f"user.py -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}")
+                self.debug_print(f"User -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
+                                 level=logging.WARNING)
 
         except Exception as e:
-            self.debug_print(f"user.py -> handle job acception error: {e}")
+            self.debug_print(f"User -> handle job acception error: {e}", level=logging.CRITICAL, 
+                             colour="bright_red")
             raise e
 
     def request_job(
@@ -236,7 +243,9 @@ class User(TorchNode):
             if node_info is None:
                 self.delete(validator_id)
                 self.debug_print(
-                    f"user.py -> Could not connect to validator for job initialization, try again."
+                    f"User -> Could not connect to validator for job initialization, try again.",
+                    colour="bright_yellow",
+                    level=logging.WARNING
                 )
                 return False
 
@@ -248,7 +257,9 @@ class User(TorchNode):
             if not connected:
                 self.delete(validator_id)
                 self.debug_print(
-                    f"user.py -> Could not connect to validator for job initialize, try again."
+                    f"User -> Could not connect to validator for job initialize, try again.",
+                    colour = "bright_yellow",
+                    level = logging.WARNING
                 )
                 return False
 
@@ -268,12 +279,11 @@ class User(TorchNode):
             "dp_factor": dp_factor,
             "distribution": distribution,
             "n_workers": n_pipelines * len(distribution),
-            "seed_validators": validator_ids,
-            "workers": [{} for _ in range(n_pipelines)],
+            "seed_validators": validator_ids
         }
 
         # Get unique job id given current parameters
-        job_hash = hashlib.sha256(pickle.dumps(job_request)).hexdigest().encode()
+        job_hash = hashlib.sha256(pickle.dumps(job_request)).hexdigest()
         job_request["id"] = job_hash
         self.jobs.append(job_request)
 
@@ -300,9 +310,9 @@ class User(TorchNode):
 
             # Update job with selected worker
             # TODO Takes the last (most recent model for now, should accommodate all pipelines in the future)
-            job_request["workers"][0][
-                worker_id
-            ] = mod_id  # TODO 0 hardcoded and must be replaced with n_pipelines
+            # job_request["workers"][0][
+            #     worker_id
+            # ] = mod_id  # TODO 0 hardcoded and must be replaced with n_pipelines
             dist_model_config[mod_id] = module.copy()
 
             self.modules[mod_id]["forward_queue"] = {}
@@ -329,7 +339,8 @@ class User(TorchNode):
         while job_info["id"] in self.requests[validator.node_id]:
             if time.time() - start_time > 100:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
-                self.debug_print("SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB")
+                self.debug_print("User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB", colour="bright_yellow",
+                                 level=logging.WARNING)
                 return self.send_job_req(validator, job_info)
         return
 

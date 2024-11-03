@@ -1,12 +1,18 @@
-import pickle
+import logging
 
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 from tensorlink.ml.utils import *
+from collections import deque
 import threading
+import pickle
 import torch
 import queue
 import time
 import os
+
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+os.makedirs("snapshots", exist_ok=True)
 
 
 class DistributedWorker:
@@ -14,6 +20,8 @@ class DistributedWorker:
         self.node_requests = node_requests
         self.node_responses = node_responses
         self.mpc_lock = mpc_lock
+        self.rolling_buffer = deque(maxlen=10)
+        self.storage_path = "./snapshots"
 
         self.modules = {}
         self.optimizers = {}
@@ -118,6 +126,11 @@ class DistributedWorker:
                         if self.device.type != "cpu":
                             torch.cuda.empty_cache()
 
+                        self.store_snapshot(module_id, inp, out, key[0], key[1])
+
+                        if module.training:
+                            module.n_batch += 1
+
     def send_request(self, request_type, args):
         request = {"type": request_type, "args": args}
         try:
@@ -131,6 +144,17 @@ class DistributedWorker:
             self.mpc_lock.release()
 
         return response["return"]
+
+    async def store_snapshot(self, module_id, _input, _output, epoch, micro):
+        params = self.modules[module_id].state_dict()
+        snapshot = {
+            "id": module_id,
+            "params": params,
+            "input": _input,
+            "output": _output
+        }
+        with open(os.path.join("snapshots", f"{module_id}_{epoch},{micro}")) as f:
+            f.write(snapshot)
 
     def check_node(self):
         update_check_interval = 25
@@ -195,20 +219,23 @@ class DistributedWorker:
                                 optimizer_kwargs = state_update[1]
                                 self.optimizers[module_id] = self.optimizers[module_id](module.parameters(), **optimizer_kwargs)
                                 self.send_request("debug_print",
-                                                  "DistributedWorker -> Initialized optimizer.")
+                                                  ("DistributedWorker -> Initialized optimizer.", "bright_blue",
+                                                   logging.INFO))
                                 self.send_request("optimizer_response", (module_id, "loaded"))
 
                             elif state_update[0] == "step":
                                 closure = state_update[1]
                                 self.optimizers[module_id].step(closure)
                                 self.send_request("debug_print",
-                                                  "DistributedWorker -> Optimizer stepped.")
+                                                  ("DistributedWorker -> Optimizer stepped.", "bright_blue",
+                                                   logging.INFO))
                                 self.send_request("optimizer_response", (module_id, "stepped"))
 
                             elif state_update[0] == "zero_grad":
                                 self.optimizers[module_id].zero_grad()
                                 self.send_request("debug_print",
-                                                  "DistributedWorker -> Optimizer zeroed.")
+                                                  ("DistributedWorker -> Optimizer zeroed.", "bright_blue",
+                                                   logging.INFO))
                                 self.send_request("optimizer_response", (module_id, "zeroed"))
 
             # Check for node termination

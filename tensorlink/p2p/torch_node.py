@@ -7,6 +7,7 @@ from multiprocessing import shared_memory
 import torch.optim as optim
 import torch.nn as nn
 import threading
+import logging
 import pickle
 import queue
 import torch
@@ -32,7 +33,7 @@ class TorchNode(SmartNode):
             self,
             request_queue,
             response_queue,
-            debug: bool = False,
+            debug: bool = True,
             max_connections: int = 0,
             upnp=True,
             off_chain_test=False,
@@ -70,12 +71,12 @@ class TorchNode(SmartNode):
             if not handled:
 
                 if b"LOADED" == data[:6]:
-                    pickled = data[6:]
                     self.debug_print(
-                        f"TorchNode -> Successfully offloaded submodule to: {node.node_id}"
+                        f"TorchNode -> Successfully offloaded submodule to: {node.node_id}",
+                        level=logging.INFO, colour="bright_cyan"
                     )
-                    module_id = data[6:]
-                    self.remove_request(node.node_id, b"MODULE")
+                    module_id = data[6:70].decode()
+                    self.remove_request(node.node_id, "MODULE" + module_id)
 
                 elif b"FORWARD" == data[:7]:
                     # Received a forward pass
@@ -111,18 +112,21 @@ class TorchNode(SmartNode):
 
                     if response_type == "loaded":
                         self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}"
+                            f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}",
+                            level=logging.INFO, colour="bright_cyan"
                         )
                     elif response_type == "stepped":
                         self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}"
+                            f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}",
+                            colour="bright_cyan"
                         )
                     elif response_type == "zeroed":
                         self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}"
+                            f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}",
+                            colour="bright_cyan"
                         )
 
-                    self.state_updates[module_id].append(response_type.encode() + node.node_id)
+                    self.state_updates[module_id].append(response_type + node.node_id)
 
                 elif b"OPTIMIZER" == data[:9]:
                     module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
@@ -133,40 +137,41 @@ class TorchNode(SmartNode):
                     self.debug_print(f"TorchNode -> RECEIVED PARAMS REQUEST")
 
                     # TODO Must ensure requesting roles is indeed the master or an overseeing validator
-                    module_id = data[10:74]
-                    self.memory_manager[b"P" + module_id] = True
+                    module_id = data[10:74].decode()
+                    self.memory_manager["P" + module_id] = True
 
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
                     self.debug_print(f"TorchNode -> RECEIVED PARAMS")
-                    module_id = data[10:74]
-                    file_name = f"{module_id.decode()}_parameters"
-                    key = b"P" + module_id
+                    module_id = data[10:74].decode()
+                    file_name = f"{module_id}_parameters"
+                    key = "P" + module_id
                     self.memory_manager[key] = file_name
 
                 elif b"MODULE" == data[:6]:
                     self.debug_print("TorchNode -> RECEIVED MODULE")
-                    module_id = data[6:70]
+                    module_id = data[6:70].decode()
 
                     self.modules[module_id] = {
-                        "mem_info": module_id.decode(),
+                        "mem_info": module_id,
                         "host": node.node_id,
                         "forward_queue": {},
                         "backward_queue": {},
                     }
                     self.state_updates[module_id] = []
 
-                    self.debug_print(f"TorchNode -> Loaded distributed module!")
+                    self.debug_print(f"TorchNode -> Loaded distributed module!",
+                                     colour="bright_cyan", level=logging.INFO)
 
                 elif b"UPDATE-TRAIN" == data[:12]:
                     mode = False if data[12:13] == b"0" else True
-                    module_id = data[13:]
+                    module_id = data[13:77].decode()
                     self.modules[module_id]["training"] = mode
                     self.send_train_updated(node, mode, module_id)
 
                 elif b"TRAIN-UPDATED" == data[:13]:
                     mode = False if data[13:14] == b"0" else True
-                    module_id = data[14:]
+                    module_id = data[14:78].decode()
                     if module_id in self.modules:
                         self.modules[module_id]["training"] = mode
 
@@ -182,7 +187,8 @@ class TorchNode(SmartNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"TorchNode -> Error handling data: {e}")
+            self.debug_print(f"TorchNode -> Error handling data: {e}", colour="bright_red",
+                             level=logging.ERROR)
 
     def handle_requests(self, request=None):
         try:
@@ -212,10 +218,10 @@ class TorchNode(SmartNode):
 
             elif req_type == "check_loaded":
                 # Check if sent module has been received and loaded on the other roles
-                worker_id = request["args"]
+                worker_id, module_id = request["args"]
                 return_val = False
 
-                if b"MODULE" not in self.requests[worker_id]:
+                if "MODULE" + module_id not in self.requests[worker_id]:
                     return_val = True
 
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
@@ -225,7 +231,7 @@ class TorchNode(SmartNode):
                 module_id = request["args"]
                 node_id = self.modules[module_id]["host"]
                 node = self.nodes[node_id]
-                self.send_to_node(node, b"LOADED" + module_id)
+                self.send_to_node(node, b"LOADED" + module_id.encode())
                 self.response_queue.put({"status": "SUCCESS", "return": None})
 
             elif req_type == "optimizer_response":
@@ -275,7 +281,7 @@ class TorchNode(SmartNode):
                 key = None
 
                 if module_id in self.state_updates.keys():
-                    key = request_type.encode() + worker_id
+                    key = request_type + worker_id
 
                 if key in self.state_updates[module_id]:
                     self.state_updates[module_id].remove(key)
@@ -287,7 +293,7 @@ class TorchNode(SmartNode):
                 # Check if forward pass has been received and is loaded in shared mpc
                 return_val = None
 
-                if self.role == b"W":
+                if self.role == "W":
                     module_id = request["args"]
 
                     if module_id in self.modules:
@@ -320,7 +326,7 @@ class TorchNode(SmartNode):
                 args = request["args"]
                 return_val = None
 
-                if self.role == b"W":
+                if self.role == "W":
                     module_hash = args
                     module = self.modules[module_hash]
                     min_iter, min_micro = -1, -1
@@ -361,7 +367,7 @@ class TorchNode(SmartNode):
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
             elif req_type == "check_parameters_request":
-                key = b"P" + request["args"]
+                key = "P" + request["args"]
                 return_val = None
 
                 if key in self.memory_manager:
@@ -374,7 +380,7 @@ class TorchNode(SmartNode):
 
             elif req_type == "check_parameters":
                 module_id = request["args"]
-                key = b"P" + module_id
+                key = "P" + module_id
                 if key in self.memory_manager:
                     file_name = self.memory_manager[key]
                     return_val = file_name
@@ -434,8 +440,13 @@ class TorchNode(SmartNode):
                     self.response_queue.put({"status": "SUCCESS", "return": False})
 
             elif req_type == "debug_print":
-                message = request["args"]
-                self.debug_print(message)
+                if len(request["args"]) == 1:
+                    message = request["args"]
+                    colour = None
+                    level = logging.DEBUG
+                else:
+                    message, colour, level = request["args"]
+                self.debug_print(message, colour=colour, level=level)
                 self.response_queue.put({"status": "SUCCESS", "return": False})
                 
         except (OSError, EOFError) as e:
@@ -492,11 +503,12 @@ class TorchNode(SmartNode):
         mode = b"0" if mode is False else b"1"
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
 
-    def send_module(self, file_name: bytes, module_id: bytes, node: Connection):
-        self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}")
-        self.store_request(node.node_id, b"MODULE")
+    def send_module(self, file_name: bytes, module_id: str, node: Connection):
+        self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",
+                         level=logging.INFO, colour="bright_blue")
+        self.store_request(node.node_id, "MODULE" + module_id)
         self.state_updates[module_id] = []
-        self.send_to_node_from_file(node, file_name, b"MODULE" + module_id)
+        self.send_to_node_from_file(node, file_name, b"MODULE" + module_id.encode())
 
     def listen_requests(self):
         while not self.mpc_terminate_flag.is_set():

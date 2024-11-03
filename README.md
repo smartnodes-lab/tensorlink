@@ -6,26 +6,25 @@
 distributing models across a network of peers. This innovative approach allows for efficient training and execution of 
 large models on consumer hardware, providing a compelling alternative to centralized cloud services. Tensorlink 
 leverages advanced techniques such as automated model parsing and pipeline parallelism to simplify and enhance the 
-training process over the internet, making distributed learning accessible to a wider audience.
+training process over the internet, making larger models accessible to a wider audience.
 
-By implementing straightforward wrappers for `torch.nn.Module` and `torch.optim.Optimizer` objects, Tensorlink enables 
-seamless integration of distributed computing without requiring any modifications to your existing codebase. This ensures 
-that your workflow remains intact while you harness the power of distributed resources. With Tensorlink, users can 
-effectively manage large-scale machine learning tasks, enhance model performance, and maintain data privacy.
+By implementing straightforward wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates 
+seamlessly with existing codebases, preserving model workflows while harnessing distributed resources. Tensorlink 
+enables individuals and organizations to collaborate, share resources, and scale models dynamically—bringing the power 
+of distributed training to a broader community.
 
 ### Key features
-* **Distributed model wrapper for PyTorch**: Effortlessly connect your model to a network of GPUs, enabling you to find 
-peers, parse, and distributes neural networks with ease. 
-* **Seamless integration:** Handles main `nn.Module` methods and queries (e.g., forward, backward, parameters) 
-in a distributed model without requiring code modifications.
-* **Distributed Optimizer:** A linked optimizer that operates in conjunction with the distributed model, supporting
-general methods (e.g., step, zero_grad)
+* **Distributed Model Wrapper**: Effortlessly connect your model to a network of GPUs, enabling you to find 
+peers, distribute and run neural networks with ease. 
+  * Supports `nn.Module` methods and queries (e.g., forward, backward, parameters)
+* **Distributed Optimizer:** A coordinated optimizer that works in tandem with distributed models, supporting
+essential methods like `step` and `zero_grad`
 * **Node Frameworks:** Worker and Validator node frameworks for donating compute and securing the network.
-  * Node architecture allows for the creation of local and private training jobs separate from the Tensorlink network.
+  * Node architecture allows for the creation of public and private training jobs, which can operate independently of 
+  the Tensorlink network.
 
-
-For an in-depth exploration of Tensorlink's features, capabilities, and underlying principles, please refer to the 
-[Lightpaper](docs/Lightpaper v1.md).
+For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
+[Lightpaper](Lightpaper v1.md).
 
 ## Getting Started with Tensorlink
 
