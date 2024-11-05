@@ -9,6 +9,7 @@ from dotenv import get_key
 import threading
 import hashlib
 import logging
+import asyncio
 import pickle
 import time
 import json
@@ -72,13 +73,16 @@ class Validator(TorchNode):
         self.worker_memories = {}
         self.all_workers = {}
         self.proposals = []
+        self.background_tasks = []
 
         # Params for smart contract state aggregation
         self.last_execution_block = 0
         self.last_proposal_timestamp = 0
 
-        self.jobs_to_publish = []
-        self.jobs_to_update = []
+        # Job monitoring and storage
+        self.active_jobs = []
+        self.jobs_to_delete = []
+        self.jobs_to_complete = []
         self.validators_to_clear = []
 
         self.proposal_listener = None
@@ -151,7 +155,7 @@ class Validator(TorchNode):
                             ghost += 1
 
                         else:
-                            self.create_job(job_req)
+                            threading.Thread(target=self.create_job, args=(job_req,)).start()
 
                 elif b"REQUEST-WORKERS" == data[:15]:
                     if node.role == "V":
@@ -210,7 +214,7 @@ class Validator(TorchNode):
                     return False
 
             if ghost > 0:
-                self.update_node_stats(node.node_id, "GHOST")
+                node.ghosts += ghost
                 # TODO: potentially some form of reporting mechanism via ip and port
 
             return True
@@ -372,17 +376,66 @@ class Validator(TorchNode):
         self.jobs.append(job_id)
 
         for module, module_info in job_data["distribution"].items():
+            # Remove worker info and just replace with id
             worker_ids = list(a[0] for a in module_info["workers"])
             module_info["workers"] = worker_ids
 
+        job_data["timestamp"] = time.time()
+        job_data["last_seen"] = time.time()
+
         self.store_value(job_id, job_data)
 
-    def monitor_job(self, job_id: bytes):
-        """Monitor job progress and workers"""
+        # Start monitor_job as a background task and store it in the list
+        t = threading.Thread(target=self.monitor_job, args=(job_id,))
+        self.active_jobs.append(t)
+        t.start()
+
+    def monitor_job(self, job_id: str):
+        """Monitor job progress and workers."""
+        self.debug_print(f"Job monitor beginning for job: {job_id}", colour="blue", level=logging.INFO)
+        online = True
+
         while not self.terminate_flag.is_set():
-            job_data = self.query_dht(job_id)
-            if not job_data["active"]:
-                break
+            job_data = self.routing_table[job_id]
+            user_data = self.query_dht(job_data["author"])
+
+            # Check that user is still online
+            connected = self.connect_node(job_data["author"], user_data["host"], user_data["port"])
+            if not connected:
+                # TODO mark as done
+                online = False
+
+            job_data_from_user = self.query_node(job_id, self.nodes[job_data["author"]])
+            if job_data_from_user is None:
+                online = False
+
+            if not job_data_from_user.get("active"):
+                self.debug_print(f"Validator -> Job {job_id} has been marked inactive by user.", colour="red")
+                online = False
+
+            for module_id, module_info in job_data["distribution"].items():
+                if module_info["type"] == "offloaded":
+                    for worker in module_info["workers"]:
+                        # TODO Request epoch info from workers
+                        pass
+
+            # Check if job can be officially marked as done/offline
+            if not online:
+                # Wait for job to be offline for at least 2 minutes to mark as complete
+                # on SmartnodesCore
+                if time.time() - job_data["last_seen"] > 120:
+                    self.jobs_to_complete.append(job_id)
+
+                # Completely delete jobs that went offline within 2 minutes
+                if time.time() - job_data["timestamp"] < 120:
+                    self.jobs.remove(job_id)
+                    self.delete(job_id)
+
+            else:
+                # If job is still online we can update our record of checking
+                job_data["last_seen"] = time.time()
+
+            time.sleep(30)
 
     def recruit_worker(
             self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int, worker_id: str
@@ -807,7 +860,7 @@ class Validator(TorchNode):
                         validators_to_remove.append(node_address)
 
         # Complete jobs on the contract
-        for job_id in self.jobs_to_update:
+        for job_id in self.jobs_to_complete:
             job = self.query_dht(job_id)
 
             if job:
@@ -828,7 +881,7 @@ class Validator(TorchNode):
                         if not connected:
                             worker_node = self.nodes[worker_id]
                             worker_address = self.query_node(
-                                hashlib.sha256(b"ADDRESS").hexdigest().encode(),
+                                hashlib.sha256(b"ADDRESS").hexdigest(),
                                 worker_node
                             )
 
@@ -983,7 +1036,7 @@ class Validator(TorchNode):
             except KeyboardInterrupt:
                 print(123)
                 self.terminate_flag.set()
-    
+
     def stop(self):
         self.save_dht_state()
         super().stop()
@@ -1047,3 +1100,13 @@ class Validator(TorchNode):
         while not self.terminate_flag.is_set():
             self.save_dht_state()
             time.sleep(600)
+
+    # def update_routing_table(self):
+    #     while not self.terminate_flag.is_set():
+    #         for key, value in self.routing_table.items():
+    #             # Delete unrecognized data from routing table
+    #             if key not in self.nodes or key not in self.jobs:
+    #                 self.debug_print(f"SmartNode -> Cleaning up item: {key} from routing table.")
+    #                 self.delete(key)
+    #         # TODO method / request to delete job after certain time or by request of the user.
+    #         #   Perhaps after a job is finished there is a delete request

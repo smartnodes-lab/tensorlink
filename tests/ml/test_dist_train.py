@@ -82,7 +82,7 @@ if __name__ == "__main__":
     # d = distributed_model.state_dict()
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
 
-    for _ in range(2):
+    for _ in range(10):
         distributed_optimizer.zero_grad()
         x = torch.zeros((10, 10))
         x = distributed_model(x)

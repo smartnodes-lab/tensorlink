@@ -207,9 +207,6 @@ class SmartNode(threading.Thread):
         # Connection Settings
         self.upnp = None
         self.nodes = {}  # node hash: Connection
-        self.node_stats = (
-            {}
-        )  # node-hash: {message counts & other key stats to keep track of}
 
         self.debug_colour = None
         if debug_colour:
@@ -296,13 +293,12 @@ class SmartNode(threading.Thread):
 
             # We received a ping, send a pong
             elif b"PING" == data[:4]:
-                self.update_node_stats(node.node_id, "PING")
                 self.send_to_node(node, b"PONG")
 
             # We received a pong, update latency
             elif b"PONG" == data[:4]:
                 if node.pinged > 0:
-                    node.ping = time.time() - node.pinged
+                    node.stats["ping"] = time.time() - node.pinged
                     node.pinged = -1
                 else:
                     self.debug_print(f"SmartNode -> Received pong with no ping (suspicious?)", colour="red")
@@ -369,7 +365,7 @@ class SmartNode(threading.Thread):
 
             # If ghost was detected
             if ghost > 0:
-                self.update_node_stats(node.node_id, "GHOST")
+                node.ghosts += ghost
                 # TODO: potentially some form of reporting mechanism via ip and port
 
             return True
@@ -442,13 +438,8 @@ class SmartNode(threading.Thread):
 
             # The case where we have the stored value
             elif closest_node[0] == key_hash:
-                # If the stored value is a nodes, send back its info
-                if isinstance(closest_node[1], Connection):
-                    return closest_node[1].stats
-
-                # Else the value is a stored data structure (ie a job) and we can return it
-                else:
-                    return closest_node[1]
+                # The value is a stored data structure and we can return it
+                return closest_node[1]
 
             # We don't have the stored value, and must route the request to the nearest nodes
             else:
@@ -547,13 +538,9 @@ class SmartNode(threading.Thread):
             bucket_index = self.calculate_bucket_index(key)
             bucket = self.buckets[bucket_index]
 
-            if isinstance(val, dict):
-                if val["role"] == "U":
-                    self.users.remove(key)
-                elif val["role"] == "V":
-                    self.validators.remove(key)
-                elif val["role"] == "W":
-                    self.validators.remove(key)
+            if key in self.nodes or self.jobs:
+                # Do not delete information related to active connections or jobs
+                return
 
             del self.routing_table[key]
             self.debug_print(f"SmartNode -> Key {key} deleted from DHT.", colour="blue")
@@ -590,7 +577,7 @@ class SmartNode(threading.Thread):
                     self.handshake(connection, node_address)
 
                 else:
-                    self.close_connection_socket(
+                    self.close_connection(
                         connection,
                         "listen: connection refused, max connections reached",
                     )
@@ -634,7 +621,7 @@ class SmartNode(threading.Thread):
                 proof = float(proof)
 
             except Exception as e:
-                self.close_connection_socket(
+                self.close_connection(
                     connection, f"Proof request was not valid: {e}"
                 )
                 return False
@@ -653,9 +640,8 @@ class SmartNode(threading.Thread):
 
                         # If validator was not found
                         if not is_active or node_id_hash != pub_key_hash:
-                            self.update_node_stats(node_id_hash, "GHOST")
                             # TODO: potentially some form of reporting mechanism via ip and port
-                            raise f"listed on Smart Nodes!: {connected_node_id}"
+                            self.debug_print(f"Validator {connected_node_id} not listed on SmartnodesCore!", colour="red", level=logging.WARNING)
 
                     elif role == "U":
                         # TODO: user handling, to be done once users are required to register (post-alpha)
@@ -670,7 +656,7 @@ class SmartNode(threading.Thread):
                         raise f"listen: connection refused, invalid role: {node_address}"
 
                 except Exception as e:
-                    self.close_connection_socket(
+                    self.close_connection(
                         connection, f"handshake: contract query error: {e}"
                     )
 
@@ -715,11 +701,11 @@ class SmartNode(threading.Thread):
                     connection = new_sock
 
                 except socket.error as e:
-                    self.close_connection_socket(connection, f"Socket error during connection switch: {e}")
+                    self.close_connection(connection, f"Socket error during connection switch: {e}")
                     return False
 
                 except Exception as e:
-                    self.close_connection_socket(
+                    self.close_connection(
                         connection, f"Proof was not valid: {e}"
                     )
                     return False
@@ -817,11 +803,11 @@ class SmartNode(threading.Thread):
                     return False
 
             else:
-                self.close_connection_socket(connection, "Proof request was not valid.")
+                self.close_connection(connection, "Proof request was not valid.")
                 return False
 
         else:
-            self.close_connection_socket(connection, "RSA key was not valid.")
+            self.close_connection(connection, "RSA key was not valid.")
             return False
 
     def connect_node(
@@ -978,12 +964,12 @@ class SmartNode(threading.Thread):
         return True
 
     def send_to_node(
-        self, n: Connection, data: bytes, compression: bool = False
+        self, n: Connection, data: bytes
     ) -> None:
         """Send data to a connected nodes"""
         if n in self.nodes.values():
             self.debug_print(f"SmartNode -> send_to_node: Sending {len(data)} to node: {n.host}:{n.port}")
-            n.send(data, compression=compression)
+            n.send(data)
         else:
             self.debug_print("SmartNode -> send_to_node: node not found!", colour="red")
 
@@ -992,33 +978,6 @@ class SmartNode(threading.Thread):
             n.send_from_file(file, tag)
         else:
             self.debug_print("SmartNode -> send_to_node: node not found!", colour="red")
-
-    def update_node_stats(
-        self,
-        node_hash: bytes,
-        statistic_key: str,
-        additional_context=None,
-        decrement=False,
-    ):
-        """Updates nodes (connection) statistics, acts as an incrementer (default),
-        sets the value if context is specified."""
-        if additional_context is None:
-            if node_hash in self.node_stats.keys():
-                if decrement:
-                    self.node_stats[node_hash][statistic_key] -= 1
-                else:
-                    self.node_stats[node_hash][statistic_key] += 1
-            else:
-                self.node_stats[node_hash] = {statistic_key: 1}
-        else:
-            if node_hash in self.node_stats.keys():
-                self.node_stats[node_hash][statistic_key] = additional_context
-            else:
-                self.node_stats[node_hash] = {statistic_key: additional_context}
-
-    def close_connection(self, n: Connection) -> None:
-        n.stop()
-        self.debug_print(f"SmartNode -> node {n.node_id} disconnected", colour="bright_yellow")
 
     def handle_message(self, node: Connection, data) -> None:
         """Callback method to handles incoming data from connections"""
@@ -1036,7 +995,20 @@ class SmartNode(threading.Thread):
         self.connection_listener = threading.Thread(target=self.listen, daemon=True)
         self.connection_listener.start()
 
-    def close_connection_socket(
+    def disconnect_node(self, node_id: str):
+        if node_id in self.nodes:
+            node = self.nodes[node_id]
+
+            if node_id in self.validators:
+                self.validators.remove(node_id)
+            elif node_id in self.users:
+                self.users.remove(node_id)
+            elif node_id in self.workers:
+                self.workers.remove(node_id)
+
+            self.close_connection(node, "requested disconnection.")
+
+    def close_connection(
         self, n: socket.socket, additional_info: str = None
     ) -> None:
         message = "closing connection"
@@ -1044,6 +1016,7 @@ class SmartNode(threading.Thread):
             message += f": {additional_info}"
 
         self.debug_print("SmartNode -> " + message, colour="red", level=logging.WARNING)
+
         n.close()
 
     def stop_upnp(self) -> None:
@@ -1102,24 +1075,6 @@ class SmartNode(threading.Thread):
                     raise e
             else:
                 port += random.randint(1, 300)
-
-    def update_routing_table(self):
-        while not self.terminate_flag.is_set():
-            for key, value in self.routing_table.items():
-                if key in self.nodes:
-                    pass
-                elif key in self.jobs:
-                    # TODO method / request to delete job after certain time or by request of the user.
-                    #   Perhaps after a job is finished there is a delete request
-                    pass
-                else:
-                    self.debug_print(f"SmartNode -> Cleaning up item: {key} from routing table.")
-                    self.delete(key)
-
-            for key, node in self.nodes.items():
-                if key not in self.routing_table:
-                    self.debug_print(f"SmartNode -> Adding: {key} to routing table.")
-                    self.routing_table[key] = get_connection_info(node, upnp=False if self.upnp is None else True)
 
     """Methods for Smart Contract Interactions"""
     def get_validator_count(self):

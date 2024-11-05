@@ -121,6 +121,7 @@ class UserNode(BaseNode):
         time.sleep(3)
         workers = self.send_request("check_workers", None)
         if len(workers) == 0:
+            self.send_request("request_workers", None)
             time.sleep(5)
             workers = self.send_request("check_workers", None)
 

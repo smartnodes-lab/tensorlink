@@ -53,10 +53,10 @@ model’s layers. Data batches are fed into the pipeline in a staggered fashion,
 one stage, the next batch can start processing in a different stage. This overlapping reduces idle time and can 
 significantly speed up training by maximizing throughput.
 
-<div style="text-align: center; width: 520px; margin: 0 auto">
-    <img src="docs/pipeline.png" alt="Distributed model architecture."/>
-    <p style="font-style: italic;"><strong>Figure 1: Pipeline parallelism micro-batching to mitigate latency in distributed learning environments.</strong></p>
-</div>
+<p align="center">
+  <img src="docs/pipeline.png" alt="Distributed model architecture." width="520"/>
+</p>
+<p align="center"><strong>Figure 1:</strong> <em>Pipeline parallelism micro-batching to mitigate latency in distributed learning environments.</em></p>
 
 
 ### Model Parsing and Distribution
@@ -74,11 +74,13 @@ which the processing of a small portion of the model on the user side before the
 This effectively obfuscates sensitive model and training data, ensuring a more secure training environment, potentially 
 at the potential sacrifice of additional training time or computational cost.
 
-<div style="text-align: center; width: 650px; margin: 0 auto">
-    <img src="docs/ML Flow Chart.png" alt="Distributed model architecture."/>
-    <p style="font-style: italic;"><strong>Figure 2: An example distributed model with Tensorlink illustrates model 
-distribution and parallelization among workers, as well as intermediate computations on the user side.</strong></p>
-</div>
+
+<p align="center">
+  <img src="docs/ML Flow Chart.png" alt="Distributed model architecture." width="520"/>
+</p>
+<p align="center"><strong>Figure 2:</strong> <em>An example illustrating model distribution and parallelization among
+workers, as well as intermediate computation by the user.</em></p>
+
 
 ### Proof of Learning
 ***Currently in development***

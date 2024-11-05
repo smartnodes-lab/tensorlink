@@ -32,6 +32,5 @@ if __name__ == "__main__":
     # distributed_model.backward(loss)
 
     validator.cleanup()
-    # time.sleep(150)
     worker.cleanup()
     user.cleanup()

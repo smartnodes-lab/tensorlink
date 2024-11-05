@@ -105,7 +105,7 @@ class User(TorchNode):
                     ghost += 1
 
             if ghost > 0:
-                self.update_node_stats(node.node_id, "GHOST")
+                node.ghosts += ghost
                 # TODO: potentially some form of reporting mechanism via ip and port
 
             return True
@@ -273,7 +273,7 @@ class User(TorchNode):
         # Create job request
         job_request = {
             "author": self.rsa_key_hash,
-            "active": False,
+            "active": True,
             "capacity": capacity,
             "n_pipelines": n_pipelines,
             "dp_factor": dp_factor,

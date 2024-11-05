@@ -24,11 +24,11 @@ essential methods like `step` and `zero_grad`
   the Tensorlink network.
 
 For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
-[Lightpaper](Lightpaper v1.md).
+[Lightpaper](Lightpaper%20v1.md).
 
 ## Getting Started with Tensorlink
 
-**YouTube tutorial coming soon…**
+**Video tutorial coming soon…**
 
 ### Installation
 

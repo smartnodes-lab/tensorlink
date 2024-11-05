@@ -181,7 +181,7 @@ class TorchNode(SmartNode):
                     return False
 
             if ghost > 0:
-                self.update_node_stats(node.node_id, "GHOST")
+                node.ghosts += ghost
                 # TODO: potentially some form of reporting mechanism via ip and port
 
             return True

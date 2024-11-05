@@ -1,11 +1,12 @@
-import hashlib
-from typing import Union
-import socket
-import time
-import threading
 from datetime import datetime
-import zlib
+from typing import Union
+import threading
+import logging
+import hashlib
+import socket
 import base64
+import time
+import zlib
 import os
 import gc
 
@@ -25,6 +26,7 @@ class Connection(threading.Thread):
         self.ping = -1
         self.pinged = -1
         self.reputation = 50
+        self.ghosts = 0
 
         self.host = host
         self.port = port
@@ -54,7 +56,8 @@ class Connection(threading.Thread):
         try:
             compressed = base64.b64encode(zlib.compress(data, 6))
         except Exception as e:
-            self.main_node.debug_print(f"compression-error: {e}")
+            self.main_node.debug_print(f"Connection -> compression-error: {e}", level=logging.CRITICAL,
+                                       colour="bright_red")
 
         return compressed
 
@@ -64,7 +67,8 @@ class Connection(threading.Thread):
         try:
             decompressed = zlib.decompress(decompressed)
         except Exception as e:
-            self.main_node.debug_print(f"decompression-error: {e}")
+            self.main_node.debug_print(f"Connection -> decompression-error: {e}", colour="bright_red",
+                                       level=logging.CRITICAL)
 
         return decompressed
 
@@ -91,12 +95,14 @@ class Connection(threading.Thread):
 
                     # Print debug information for every chunk, or you can choose an interval.
                     if chunk_number % 100 == 0:
-                        self.main_node.debug_print(f"Sent chunk {chunk_number} of {num_chunks}")
+                        self.main_node.debug_print(f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                                                   colour="magenta")
 
                 self.sock.sendall(self.EOT_CHAR)
 
         except Exception as e:
-            self.main_node.debug_print(f"connection send error: {e}")
+            self.main_node.debug_print(f"Connection -> connection send error: {e}", colour="bright_red",
+                                       level=logging.ERROR)
             self.stop()
 
     def send_from_file(self, file_name: str, tag: bytes):
@@ -119,8 +125,9 @@ class Connection(threading.Thread):
 
                     # Optionally print or log the number of bytes left
                     if chunk_number % 10 == 0:
-                        self.main_node.debug_print(f"Bytes left to send: {bytes_left}")
-                        self.main_node.debug_print(f"Sent chunk {chunk_number} of {num_chunks}")
+                        self.main_node.debug_print(f"Connection -> Bytes left to send: {bytes_left}", colour="magenta")
+                        self.main_node.debug_print(f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                                                   colour="magenta")
 
                     chunk = file.read(chunk_size)
                     if not chunk:
@@ -137,7 +144,8 @@ class Connection(threading.Thread):
             os.remove(file_name)
 
         except Exception as e:
-            self.main_node.debug_print(f"Error sending file: {e}")
+            self.main_node.debug_print(f"Connection -> Error sending file: {e}", colour="bright_red",
+                                       level=logging.ERROR)
             self.stop()
 
     def stop(self) -> None:
@@ -177,7 +185,7 @@ class Connection(threading.Thread):
                 continue
             except Exception as e:
                 self.terminate_flag.set()
-                self.main_node.debug_print(f"unexpected error: {e}")
+                self.main_node.debug_print(f"Connection -> unexpected error: {e}", colour="bright_red", level=logging.ERROR)
                 break
 
             if chunk:
@@ -200,7 +208,7 @@ class Connection(threading.Thread):
                         with open(file_name, "ab") as f:
                             f.write(packet)
                     except Exception as e:
-                        self.main_node.debug_print(f"file writing error: {e}")
+                        self.main_node.debug_print(f"Connection -> file writing error: {e}", colour="bright_red", level=logging.ERROR)
 
                     buffer = buffer[eot_pos + len(self.EOT_CHAR):]
                     self.main_node.handle_message(self, b"DONE STREAM" + prefix)
@@ -218,9 +226,6 @@ class Connection(threading.Thread):
 
                     buffer = b""
 
-            else:
-                buffer += chunk
-
             gc.collect()
 
         self.sock.settimeout(None)
@@ -231,13 +236,5 @@ class Connection(threading.Thread):
             with open(file_name, "ab") as f:
                 f.write(buffer)
         except Exception as e:
-            self.main_node.debug_print(f"file writing error: {e}")
-
-    """
-    Connection thread between two roles that are able to send/stream data from/to
-    the connected roles.
-
-    TODO
-        Send message size before to prepare accordingly.
-        Switch between saving bytes to loading directly based on packet size.
-    """
+            self.main_node.debug_print(f"Connection -> file writing error: {e}", level=logging.ERROR,
+                                       colour="bright_red")
