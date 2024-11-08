@@ -9,7 +9,6 @@ import threading
 import requests
 import logging
 import hashlib
-import pickle
 import random
 import socket
 import json
@@ -66,7 +65,7 @@ log_handler = TimedRotatingFileHandler(
 log_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
 log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(logging.DEBUG)
 BASE_PORT = 38751
 
 
@@ -319,12 +318,13 @@ class SmartNode(threading.Thread):
                     value_id = data[22:86].decode()
 
                     # We have received data that we have requested
-                    if value_id in self.requests[node.node_id]:
-                        value = pickle.loads(data[86:])
-                        self.requests[node.node_id].remove(value_id)
-                        self.store_value(value_id, value)
+                    if "REQUEST-VALUE" + value_id in self.requests[node.node_id]:
+                        value = json.loads(data[86:])
+                        self.requests[node.node_id].remove("REQUEST-VALUE" + value_id)
+                        self.store_request(value_id, value)
                     else:
-                        self.debug_print("SmartNode -> Received ghost data from node!", colour="red")
+                        self.debug_print(f"SmartNode -> Received ghost data from node: {node.node_id}",
+                                         colour="red")
                         # Report being sent data we have not requested
                         ghost += 1
                 else:
@@ -336,7 +336,7 @@ class SmartNode(threading.Thread):
             elif b"REQUEST-VALUE" == data[:13]:
                 # TODO Check of how many requests they have sent recently to prevent spam
                 self.debug_print(f"SmartNode -> node ({node.host}:{node.port}) requested value.", colour="blue")
-                validator_info = None
+                value = None
                 value_hash = None
 
                 if len(data) < 141:
@@ -347,14 +347,14 @@ class SmartNode(threading.Thread):
                     requester = data[77:141].decode()
 
                     # Get nodes info
-                    validator_info = self.query_dht(value_hash, requester)
+                    value = self.query_dht(value_hash, requester)
 
                 # Send back response
                 self.send_to_node(
                     node,
                     b"REQUEST-VALUE-RESPONSE"
                     + value_hash.encode()
-                    + pickle.dumps(validator_info)
+                    + json.dumps(value).encode()
                 )
 
             # No recognized tag
@@ -466,18 +466,21 @@ class SmartNode(threading.Thread):
         if requester is None:
             requester = self.rsa_key_hash
 
+        if node.terminate_flag.is_set():
+            return
+
         start_time = time.time()
         message = b"REQUEST-VALUE" + key_hash.encode() + requester.encode()
         self.send_to_node(node, message)
 
         # Logs what value were requesting and from what nodes
-        self.store_request(node.node_id, key_hash)
+        self.store_request(node.node_id, "REQUEST-VALUE" + key_hash)
 
         # Blocking wait to receive the data
-        while key_hash not in self.routing_table:
+        while "REQUEST-VALUE" + key_hash in self.requests[node.node_id]:
             # TODO some better timeout management
             # Wait for 3 seconds and then find a new nodes to query
-            if time.time() - start_time > 100:
+            if time.time() - start_time > 3:
                 if ids_to_exclude is not None:
                     if len(ids_to_exclude) > 1:
                         return None
@@ -492,7 +495,9 @@ class SmartNode(threading.Thread):
             if ids_to_exclude and len(ids_to_exclude) > 1:
                 return None
 
-        return self.routing_table[key_hash]
+        return_val = self.requests[key_hash][-1]
+
+        return return_val
 
     def store_value(self, key: str, value: object, replicate: object = 0) -> object:
         """Store value in routing table and replicate if specified"""
@@ -518,11 +523,10 @@ class SmartNode(threading.Thread):
 
     def store_request(self, node_id: str, key: str):
         """Stores a log of the request we have made to a nodes and for what value"""
-        if node_id in self.nodes.keys():
-            if node_id in self.requests:
-                self.requests[node_id].append(key)
-            else:
-                self.requests[node_id] = [key]
+        if node_id in self.requests:
+            self.requests[node_id].append(key)
+        else:
+            self.requests[node_id] = [key]
 
     def remove_request(self, node_id: str, key: str):
         if node_id in self.requests:
@@ -555,10 +559,6 @@ class SmartNode(threading.Thread):
         bucket_index = key_int % len(self.buckets)
 
         return bucket_index
-
-    def clean_up_dht(self):
-        # TODO Remove old nodes, old jobs, store some things in files
-        pass
 
     """Peer-to-peer methods"""
     def listen(self):
@@ -597,24 +597,33 @@ class SmartNode(threading.Thread):
     ) -> bool:
         """Validates incoming node's keys via a random number swap, along with SC verification of connecting user"""
         id_info = connection.recv(1024)
-        _, role, id_no, connected_node_id = pickle.loads(id_info)
+        _, role, id_no, connected_node_id = json.loads(id_info)
+        connected_node_id = connected_node_id.encode()
         node_id_hash = hashlib.sha256(connected_node_id).hexdigest()
 
-        # Query node info/history from dht for reputation if we are a validator
-        if self.role == "V":
-            if len(self.nodes) > 0:
-                node_info = self.query_dht(node_id_hash, ids_to_exclude=[self.rsa_key_hash, node_id_hash])
-                if node_info:
-                    if node_info["reputation"] == 0:
-                        self.debug_print(
-                            f"SmartNode -> User with poor reputation attempting connection: {node_id_hash}",
-                            colour="red", level=logging.WARNING
-                        )
-                        connection.close()
+        # Query node info/history from dht for reputation if we're already connected to network
+        if len(self.nodes) > 0:
+            # Get node information from any other node
+            node_info = self.query_dht(node_id_hash, ids_to_exclude=[node_id_hash])
+
+            if node_info:
+                if node_info["reputation"] == 0:
+                    self.debug_print(
+                        f"SmartNode -> User with poor reputation attempting connection: {node_id_hash}",
+                        colour="red", level=logging.WARNING
+                    )
+                    connection.close()
+
+        # Check that we have been assigned to the user by a validator
+        if role == "U" and self.role == "W":
+            if node_id_hash not in self.requests:
+                self.close_connection(connection, f"Was not assigned to user: {node_id_hash}")
+                return False
+            self.remove_request(node_id_hash, self.requests[node_id_hash][-1])
 
         # If we are the instigator of the connection, we will have received a request to verify our id
         if instigator:
-            encrypted_number = _
+            encrypted_number = _.encode()
             proof = decrypt(encrypted_number, self.role)
 
             try:
@@ -643,16 +652,14 @@ class SmartNode(threading.Thread):
                             # TODO: potentially some form of reporting mechanism via ip and port
                             self.debug_print(f"Validator {connected_node_id} not listed on SmartnodesCore!", colour="red", level=logging.WARNING)
 
-                    elif role == "U":
-                        # TODO: user handling, to be done once users are required to register (post-alpha)
-                        pass
-
-                    elif role == "W":
-                        # TODO: worker handling
+                    elif role == "W" or role == "U":
+                        # TODO: worker/user handling
                         pass
 
                     else:
                         # TODO: potentially some form of reporting mechanism via ip and port
+                        self.close_connection(connection,
+                                              f"SmartNode -> connection refused, invalid role: {node_address}")
                         raise f"listen: connection refused, invalid role: {node_address}"
 
                 except Exception as e:
@@ -668,13 +675,14 @@ class SmartNode(threading.Thread):
             # If we are the instigator, we will also need to send our proof
             if instigator:
                 # Send main port if we are the instigator
-                message = pickle.dumps((self.port, proof, encrypted_number))
+                port = connection.getsockname()[1]
+                message = json.dumps((self.port, proof, encrypted_number.decode()))
             else:
-                message = pickle.dumps(
-                    (encrypted_number, self.role, self.id, self.rsa_pub_key)
+                message = json.dumps(
+                    (encrypted_number.decode(), self.role, self.id, self.rsa_pub_key.decode())
                 )
 
-            connection.send(message)
+            connection.send(message.encode())
 
             # Await response
             response = connection.recv(1024)
@@ -682,7 +690,7 @@ class SmartNode(threading.Thread):
             if instigator:
                 # We have already verified ours and just want to confirm theirs
                 try:
-                    new_port, rand_n_proof = pickle.loads(response)
+                    new_port, rand_n_proof = json.loads(response)
                     rand_n_proof = float(rand_n_proof)
                     main_port = node_address[1]
 
@@ -711,9 +719,9 @@ class SmartNode(threading.Thread):
                     return False
             else:
                 # Unpack response (verification of their ID along with a request to verify ours)
-                response = pickle.loads(response)
+                response = json.loads(response)
                 main_port, rand_n_proof, verification = response
-                verification = decrypt(verification, self.role)
+                verification = decrypt(verification.encode(), self.role)
 
                 # Select a new port for the node to use if we are not the instigator
                 our_new_port = self.get_next_port()
@@ -721,8 +729,8 @@ class SmartNode(threading.Thread):
                 self.add_port_mapping(our_new_port, our_new_port)
 
                 # Send the new port and proof of random number
-                response = pickle.dumps((our_new_port, verification))
-                connection.send(response)
+                response = json.dumps((our_new_port, verification.decode()))
+                connection.send(response.encode())
 
                 # Close the current connection and listen on the new port
                 connection.close()
@@ -829,10 +837,21 @@ class SmartNode(threading.Thread):
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     our_port = self.get_next_port()
                     self.add_port_mapping(our_port, our_port)
+                    self.debug_print(f"SmartNode -> Selected next port: {our_port} for new connection")
+
                     sock.bind((self.host, our_port))
                     sock.connect((host, port))
                     sock.settimeout(10)
-                    break  # Successful connection, exit loop
+
+                    self.debug_print(f"SmartNode -> connect_node: connecting to {host}:{port}", colour="blue",
+                                     level=logging.INFO)
+                    message = json.dumps((None, self.role, self.id, self.rsa_pub_key.decode()))
+                    sock.send(message.encode())
+
+                    # Perform handshake and ensure socket is closed after use
+                    success = self.handshake(sock, (host, port), instigator=True)
+                    sock.close()  # Close the socket after the handshake
+                    return success
 
                 except Exception as e:
                     self.debug_print(f"Attempt {attempt + 1}: could not connect to {host}:{port} -> {e}",
@@ -841,15 +860,6 @@ class SmartNode(threading.Thread):
                     if attempt == 2:  # Last attempt
                         return False
 
-            self.debug_print(f"SmartNode -> connect_node: connecting to {host}:{port}", colour="blue",
-                             level=logging.INFO)
-            message = pickle.dumps((None, self.role, self.id, self.rsa_pub_key))
-            sock.send(message)
-
-            # Perform handshake and ensure socket is closed after use
-            success = self.handshake(sock, (host, port), instigator=True)
-            sock.close()  # Close the socket after the handshake
-            return success
         else:
             return False
 
@@ -1006,7 +1016,8 @@ class SmartNode(threading.Thread):
             elif node_id in self.workers:
                 self.workers.remove(node_id)
 
-            self.close_connection(node, "requested disconnection.")
+            node.terminate_flag.set()
+            del self.nodes[node_id]
 
     def close_connection(
         self, n: socket.socket, additional_info: str = None
@@ -1015,7 +1026,7 @@ class SmartNode(threading.Thread):
         if additional_info:
             message += f": {additional_info}"
 
-        self.debug_print("SmartNode -> " + message, colour="red", level=logging.WARNING)
+        self.debug_print("SmartNode -> " + message, colour="red", level=logging.DEBUG)
 
         n.close()
 

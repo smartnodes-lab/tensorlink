@@ -140,7 +140,9 @@ class DistributedModel(nn.Module):
             self.model.n_batch += 1
 
         combined_output = combine_micro_batches(self.model.outputs)
-        return CustomAutogradRouter.apply(self, combined_output)
+        output_tensor = handle_output(combined_output)
+        custom_grad_output = CustomAutogradRouter.apply(self, output_tensor)
+        return replace_output_with_custom_grad(combined_output, custom_grad_output)
 
     def _perform_micro_forward(self, micro, *args, **kwargs):
         kwargs["micro"] = micro
@@ -254,18 +256,18 @@ class DistributedModel(nn.Module):
         threads = []
 
         def recurse_modules(module):
-            for children in module.children():
-                if isinstance(children, OffloadedModule):
-                    self.send_request("update_train", (children.worker_id, mode, children.module_id))
-                    t = threading.Thread(
-                        target=self._wait_for_state_update,
-                        args=(children.module_id, mode),
-                    )
-                    t.start()
-                    threads.append(t)
+            if isinstance(module, OffloadedModule):
+                self.send_request("update_train", (module.worker_id, mode, module.module_id))
+                t = threading.Thread(
+                    target=self._wait_for_state_update,
+                    args=(module.module_id, mode),
+                )
+                t.start()
+                threads.append(t)
 
-                elif contains_offloaded(children):
-                    recurse_modules(children)
+            elif contains_offloaded(module):
+                for child in module.children():
+                    recurse_modules(child)
 
         recurse_modules(self.model)
 

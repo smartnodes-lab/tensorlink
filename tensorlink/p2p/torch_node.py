@@ -79,58 +79,71 @@ class TorchNode(SmartNode):
                     self.remove_request(node.node_id, "MODULE" + module_id)
 
                 elif b"FORWARD" == data[:7]:
-                    # Received a forward pass
-                    eos = data.find(b"::")
-                    size = int(data[7:eos])
-                    formatted_size = format_size(size)
-                    self.debug_print(f"TorchNode -> RECEIVED FORWARD: {formatted_size}")
+                    # Basic check, must be upgraded to check if we are expecting the request
+                    if self.role == "V" or node.node_id not in self.nodes:
+                        ghost += 1
+                    else:
+                        # Received a forward pass
+                        eos = data.find(b"::")
+                        size = int(data[7:eos])
+                        formatted_size = format_size(size)
+                        self.debug_print(f"TorchNode -> RECEIVED FORWARD: {formatted_size}")
 
-                    # TODO we must check that the forward received corresponds to a sent pass/specific module
-                    # must also do with backwards
-                    tensor = data[eos + 2: eos + 2 + size]
-                    key = tuple(pickle.loads(data[eos + 2 + size:]))
+                        # TODO we must check that the forward received corresponds to a sent pass/specific module
+                        # must also do with backwards
+                        tensor = data[eos + 2: eos + 2 + size]
+                        key = tuple(pickle.loads(data[eos + 2 + size:]))
 
-                    # Create shared mpc block and store tensor
-                    self.store_tensor_in_shared_memory(key, tensor)
+                        # Create shared mpc block and store tensor
+                        self.store_tensor_in_shared_memory(key, tensor)
 
                 elif b"BACKWARD" == data[:8]:
-                    eos = data.find(b"::")
-                    size = int(data[8:eos])
-                    formatted_size = format_size(size)
-                    self.debug_print(f"TorchNode -> RECEIVED BACKWARD: {formatted_size}")
+                    if self.role == "V" or node.node_id not in self.nodes:
+                        ghost += 1
+                    else:
+                        eos = data.find(b"::")
+                        size = int(data[8:eos])
+                        formatted_size = format_size(size)
+                        self.debug_print(f"TorchNode -> RECEIVED BACKWARD: {formatted_size}")
 
-                    # TODO we must check that the forward received corresponds to a sent pass/specific module
-                    # must also do with backwards
-                    tensor = data[eos + 2: eos + 2 + size]
-                    key = tuple(pickle.loads(data[eos + 2 + size:]))
+                        # TODO we must check that the forward received corresponds to a sent pass/specific module
+                        # must also do with backwards
+                        tensor = data[eos + 2: eos + 2 + size]
+                        key = tuple(pickle.loads(data[eos + 2 + size:]))
 
-                    # Create shared mpc block and store tensor
-                    self.store_tensor_in_shared_memory(key, tensor, backward=True)
+                        # Create shared mpc block and store tensor
+                        self.store_tensor_in_shared_memory(key, tensor, backward=True)
 
                 elif b"OPTIMIZER-RESPONSE" == data[:18]:
-                    module_id, response_type = pickle.loads(data[18:])
+                    if self.role == "V" or node.node_id not in self.nodes:
+                        ghost += 1
+                    else:
+                        module_id, response_type = pickle.loads(data[18:])
 
-                    if response_type == "loaded":
-                        self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}",
-                            level=logging.INFO, colour="bright_cyan"
-                        )
-                    elif response_type == "stepped":
-                        self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}",
-                            colour="bright_cyan"
-                        )
-                    elif response_type == "zeroed":
-                        self.debug_print(
-                            f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}",
-                            colour="bright_cyan"
-                        )
+                        if response_type == "loaded":
+                            self.debug_print(
+                                f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}",
+                                level=logging.INFO, colour="bright_cyan"
+                            )
+                        elif response_type == "stepped":
+                            self.debug_print(
+                                f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}",
+                                colour="bright_cyan"
+                            )
+                        elif response_type == "zeroed":
+                            self.debug_print(
+                                f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}",
+                                colour="bright_cyan"
+                            )
 
                     self.state_updates[module_id].append(response_type + node.node_id)
 
                 elif b"OPTIMIZER" == data[:9]:
-                    module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
-                    self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
+                    if self.role == "V" or node.node_id not in self.nodes:
+                        ghost += 1
+                    else:
+                        module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
+                        self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
 
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
@@ -272,6 +285,9 @@ class TorchNode(SmartNode):
                         name = module["mem_info"]
                         return_val = (name, module_id, module["host"])
                         del module["mem_info"]
+                    elif "termination" in module:
+                        return_val = module_id
+                        del module["termination"]
 
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -398,7 +414,7 @@ class TorchNode(SmartNode):
                 worker_id, mode, module_id = request["args"]
                 mode = b"0" if mode is False else b"1"
                 node = self.nodes[worker_id]
-                self.send_to_node(node, b"UPDATE-TRAIN" + mode + module_id)
+                self.send_to_node(node, b"UPDATE-TRAIN" + mode + module_id.encode())
                 self.response_queue.put({"status": "SUCCESS", "return": None})
 
             elif req_type == "check_train":
@@ -458,7 +474,6 @@ class TorchNode(SmartNode):
         """Send forward pass to roles, must contain args (module args) and context (module + epoch id)"""
         size = str(len(forward_bytes)).encode() + b"::"
         pickled_data = b"FORWARD" + size + forward_bytes + pickle.dumps(context)
-        # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
     def store_tensor_in_shared_memory(self, key, tensor: bytes, backward=False):
@@ -492,16 +507,15 @@ class TorchNode(SmartNode):
         """Send backward pass to roles, must contain args (module args) and context (module + epoch id)"""
         size = str(len(backward_bytes)).encode() + b"::"
         pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
-        # self.store_request(roles.node_id, )
         self.send_to_node(node, pickled_data)
 
     def send_parameters_req(self, node: Connection, module_id):
         """Request parameters from a specific worker"""
         self.send_to_node(node, b"PARAMS-REQ" + module_id)
 
-    def send_train_updated(self, node: Connection, mode: bool, module_id: bytes):
+    def send_train_updated(self, node: Connection, mode: bool, module_id: str):
         mode = b"0" if mode is False else b"1"
-        self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id)
+        self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id.encode())
 
     def send_module(self, file_name: bytes, module_id: str, node: Connection):
         self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",

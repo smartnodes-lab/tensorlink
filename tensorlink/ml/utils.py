@@ -397,15 +397,6 @@ def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
     return analysis
 
 
-# Handle different wrapped outputs from huggingface models
-def handle_output(tensor):
-    if hasattr(tensor, "last_hidden_state"):
-        tensor = tensor.last_hidden_state
-    if isinstance(tensor, tuple):
-        tensor = tensor[0]
-    return tensor
-
-
 def get_first_layer(model: nn.Module):
     if len(list(model.children())) > 0:
         submodule = next(model.children())
@@ -495,22 +486,64 @@ def attach_tensor(tensor, device):
 
 
 def enable_grad(tensor):
+    """
+    Enables gradient computation on floating-point Tensors within nested structures.
+    """
     if isinstance(tensor, torch.Tensor):
+        # Enable grad if the tensor is a floating-point type
         if tensor.is_floating_point():
-            return tensor.clone().detach().requires_grad_()  # Enable gradient for floating-point Tensors
-        else:
-            return tensor
-    elif isinstance(tensor, ModelOutput):
-        for key, value in tensor.items():
-            if isinstance(value, torch.Tensor):
-                tensor[key] = value.detach().requires_grad_()
+            return tensor.detach().clone().requires_grad_(True)
         return tensor
+
+    elif isinstance(tensor, ModelOutput):
+        # Iterate through ModelOutput fields, enabling grad for any Tensors
+        for key, value in tensor.items():
+            if isinstance(value, torch.Tensor) and value.is_floating_point():
+                tensor[key] = value.detach().clone().requires_grad_(True)
+        return tensor
+
     elif isinstance(tensor, (list, tuple)):
-        return type(tensor)(enable_grad(t) if isinstance(t, (torch.Tensor, ModelOutput)) else t for t in tensor)
+        # Recursively apply to each element in lists or tuples
+        return type(tensor)(enable_grad(t) for t in tensor)
+
     elif isinstance(tensor, dict):
-        return {key: enable_grad(value) if isinstance(value, (torch.Tensor, ModelOutput)) else value for key, value in tensor.items()}
+        # Recursively apply to each item in dictionaries
+        return {key: enable_grad(value) for key, value in tensor.items()}
+
     else:
-        raise TypeError("Unsupported input type")
+        raise TypeError(f"Unsupported input type: {type(tensor)}")
+
+# Example usage:
+# Assuming `model_output` is a ModelOutput instance with various nested structures
+# enabled_output = enable_grad(model_output)
+
+
+def handle_output(tensor):
+    """
+    Handle various output types from models:
+    - Check for specific attributes like `logits` and `last_hidden_state`.
+    - If output is a tuple, return the first element (assumed to be the main output tensor).
+    - If output is a dictionary, check common keys or return the first tensor found.
+    - If it's already a tensor, return as-is.
+    """
+    if hasattr(tensor, "logits"):
+        return tensor.logits
+    elif hasattr(tensor, "last_hidden_state"):
+        return tensor.last_hidden_state
+    elif isinstance(tensor, tuple):
+        return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+    elif isinstance(tensor, dict):
+        # Look for common keys like 'logits' or 'last_hidden_state'
+        for key in ["logits", "last_hidden_state"]:
+            if key in tensor and isinstance(tensor[key], torch.Tensor):
+                return tensor[key]
+        # Fallback to first tensor found in dict
+        for value in tensor.values():
+            if isinstance(value, torch.Tensor):
+                return value
+    elif isinstance(tensor, torch.Tensor):
+        return tensor
+    raise ValueError("Unsupported output format: could not find a tensor.")
 
 
 def combine_micro_batches(micro_batches):
@@ -552,6 +585,26 @@ def combine_micro_batches(micro_batches):
 
     else:
         raise TypeError("Unsupported output type")
+
+
+def replace_output_with_custom_grad(combined_output, custom_grad_output):
+    """
+    Replace the main output tensor (logits, last_hidden_state, etc.) in the combined_output
+    with the custom_grad_output, preserving the original structure.
+    """
+    if hasattr(combined_output, "logits"):
+        return combined_output.__class__(**{**combined_output, "logits": custom_grad_output})
+    elif hasattr(combined_output, "last_hidden_state"):
+        return combined_output.__class__(**{**combined_output, "last_hidden_state": custom_grad_output})
+    elif isinstance(combined_output, torch.Tensor):
+        return custom_grad_output
+    else:
+        # For custom ModelOutput-like structures, replace the first tensor found
+        for key, value in combined_output.items():
+            if isinstance(value, torch.Tensor):
+                combined_output[key] = custom_grad_output
+                break
+        return combined_output
 
 
 def split_into_micro_batches(combined_output, n_micro_batch):

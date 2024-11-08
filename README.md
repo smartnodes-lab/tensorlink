@@ -2,26 +2,26 @@
 
 ## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch
 
-**Tensorlink** is a decentralized platform designed to scale neural network training and inference in PyTorch by 
-distributing models across a network of peers. This innovative approach allows for efficient training and execution of 
-large models on consumer hardware, providing a compelling alternative to centralized cloud services. Tensorlink 
-leverages advanced techniques such as automated model parsing and pipeline parallelism to simplify and enhance the 
-training process over the internet, making larger models accessible to a wider audience.
+**Tensorlink** is a peer-to-peer platform designed to scale neural network training and inference in PyTorch. By breaking
+down and distributing models across a network of peers, Tensorlink allows for efficient training and execution of 
+large models on consumer hardware, providing a compelling alternative to cloud services. Tensorlink leverages advanced 
+techniques such as automated model parsing and pipeline parallelism to simplify and enhance the training process, 
+making large, state-of-the-art models accessible to a wider audience.
 
-By implementing straightforward wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates 
-seamlessly with existing codebases, preserving model workflows while harnessing distributed resources. Tensorlink 
-enables individuals and organizations to collaborate, share resources, and scale models dynamically—bringing the power 
-of distributed training to a broader community.
+By implementing wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates with existing codebases, 
+preserving model workflows while seamlessly harnessing distributed resources. Tensorlink enables individuals and 
+organizations to collaborate, share resources, and scale models dynamically—bringing the power of distributed training 
+to a broader community.
 
 ### Key features
-* **Distributed Model Wrapper**: Effortlessly connect your model to a network of GPUs, enabling you to find 
-peers, distribute and run neural networks with ease. 
+* **Distributed Model Wrapper**: connects your model to a network of GPUs, managing everything from model distribution 
+to execution behind the scenes
   * Supports `nn.Module` methods and queries (e.g., forward, backward, parameters)
 * **Distributed Optimizer:** A coordinated optimizer that works in tandem with distributed models, supporting
 essential methods like `step` and `zero_grad`
-* **Node Frameworks:** Worker and Validator node frameworks for donating compute and securing the network.
-  * Node architecture allows for the creation of public and private training jobs, which can operate independently of 
-  the Tensorlink network.
+* **Node Frameworks:** Worker and Validator node frameworks for sharing computing power and securing network activities.
+  * The architecture enables the creation of private networks/jobs that can function independently of the Tensorlink 
+  network while benefiting from its design.
 
 For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
 [Lightpaper](Lightpaper%20v1.md).

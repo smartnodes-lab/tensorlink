@@ -8,8 +8,8 @@ import torch.nn as nn
 import threading
 import logging
 import hashlib
-import pickle
 import torch
+import json
 
 
 class Worker(TorchNode):
@@ -55,7 +55,7 @@ class Worker(TorchNode):
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
         self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
-        self.available_memory = 2e9
+        self.available_memory = 4e9  # get_gpu_memory()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -77,18 +77,24 @@ class Worker(TorchNode):
                     self.debug_print(f"Worker -> Received stats request from: {node.node_id}")
                     self.handle_statistics_request(node)
 
+                elif b"SHUTDOWN-JOB" == data[:12]:
+                    if node.role == "V":
+                        module_id = data[12:76].decode()
+                        self.modules[module_id]["termination"] = True
+
                 elif b"JOB-REQ" == data[:7]:
                     try:
                         if node.role == "V":
                             # Accept job request from validator if we can handle it
-                            user_id, job_id, module_id, module_size = pickle.loads(data[7:])
+                            user_id, job_id, module_id, module_size = json.loads(data[7:])
 
                             if (
                                 self.available_memory >= module_size
                             ):  # TODO Ensure were active?
                                 # Respond to validator that we can accept the job
-                                # Store a request to wait for the user connection as well
-                                self.store_request(user_id + module_id, b"AWAIT-USER")
+
+                                # Store a request to wait for the user connection
+                                self.store_request(user_id, module_id)
                                 data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
 
                                 # Update available memory
@@ -179,7 +185,7 @@ class Worker(TorchNode):
                 if k not in stats.keys():
                     stats[k] = v
 
-        stats_bytes = pickle.dumps(stats)
+        stats_bytes = json.dumps(stats).encode()
         stats_bytes = b"STATS-RESPONSE" + stats_bytes
         self.send_to_node(callee, stats_bytes)
 
@@ -187,18 +193,6 @@ class Worker(TorchNode):
         self.training = True
 
     """Key Methods to Implement"""
-    # def request_worker(self, roles, module_memory: int, module_type: int):
-    #     # module_type = 0 when model is modular , select worker based on lowest latency and having enough mpc
-    #     if module_type == 0:
-    #         candidate_node = max(roles, key=lambda x: x["mpc"])
-    #
-    #     # module_type = 1 when model is not modular, select the new master based on both the minimum of a latency
-    #     # matrix (low latency to other good workers), and mpc
-    #     elif module_type == 1:
-    #         candidate_node = max(roles, key=lambda x: x["latency"])
-
-    # def acknowledge(self):
-    #     pass
 
     # def host_job(self, model: nn.Module):
     #     """

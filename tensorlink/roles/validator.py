@@ -9,8 +9,6 @@ from dotenv import get_key
 import threading
 import hashlib
 import logging
-import asyncio
-import pickle
 import time
 import json
 import os
@@ -73,14 +71,13 @@ class Validator(TorchNode):
         self.worker_memories = {}
         self.all_workers = {}
         self.proposals = []
-        self.background_tasks = []
 
         # Params for smart contract state aggregation
         self.last_execution_block = 0
         self.last_proposal_timestamp = 0
 
         # Job monitoring and storage
-        self.active_jobs = []
+        self.active_jobs = {}
         self.jobs_to_delete = []
         self.jobs_to_complete = []
         self.validators_to_clear = []
@@ -94,7 +91,7 @@ class Validator(TorchNode):
 
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest().encode(), self.public_key)
+            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
     def handle_data(self, data, node: Connection):
         """
@@ -139,7 +136,7 @@ class Validator(TorchNode):
                 elif b"JOB-REQ" == data[:7]:
                     self.debug_print(f"Validator -> User: {node.node_id} requested job.", colour="bright_blue",
                                      level=logging.INFO)
-                    job_req = pickle.loads(data[7:])
+                    job_req = json.loads(data[7:])
 
                     # Ensure all job data is present
                     if assert_job_req(job_req, node.node_id) is False:
@@ -169,7 +166,7 @@ class Validator(TorchNode):
                 elif b"ALL-WORKER-STATS" == data[:16]:
                     if node.node_id in self.requests.keys() and b"ALL-WORKER-STATS" in self.requests[node.node_id]:
                         self.requests[node.node_id].remove(b"ALL-WORKER-STATS")
-                        workers = pickle.loads(data[16:])
+                        workers = json.loads(data[16:])
                         # TODO thread for aggregation and worker stats aggregation (ie average/most common values)
                         for worker, stats in workers.items():
                             self.all_workers[worker] = stats
@@ -189,7 +186,7 @@ class Validator(TorchNode):
                         ghost += 1
 
                     else:
-                        stats = pickle.loads(data[14:])
+                        stats = json.loads(data[14:])
                         self.requests[node.node_id].remove(b"STATS")
                         self.nodes[node.node_id].stats = stats
                         self.worker_memories[node.node_id] = stats["memory"]
@@ -207,8 +204,8 @@ class Validator(TorchNode):
                     for worker in self.workers:
                         stats[worker] = self.nodes[worker].stats
 
-                    stats = pickle.dumps(stats)
-                    self.send_to_node(node, b"WORKERS" + stats)
+                    stats = json.dumps(stats)
+                    self.send_to_node(node, b"WORKERS" + stats.encode())
 
                 else:
                     return False
@@ -344,7 +341,7 @@ class Validator(TorchNode):
                             worker_assignment.append(worker_id)  # Assign worker to this pipeline's module
                             worker_found = True
                             time.sleep(0.25)
-                            break  # Move to the next pipeline
+                            break  # Move to the next pipeline for now, multi-worker pipelines coming soon...
 
                 # If no suitable worker found for this pipeline, decline job
                 if not worker_found:
@@ -370,7 +367,7 @@ class Validator(TorchNode):
         requesting_node = self.nodes[author]
         self.send_to_node(
             requesting_node,
-            b"ACCEPT-JOB" + job_id.encode() + pickle.dumps(job_data)
+            b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode()
         )
 
         self.jobs.append(job_id)
@@ -387,61 +384,88 @@ class Validator(TorchNode):
 
         # Start monitor_job as a background task and store it in the list
         t = threading.Thread(target=self.monitor_job, args=(job_id,))
-        self.active_jobs.append(t)
+        self.active_jobs[job_id] = t
         t.start()
 
     def monitor_job(self, job_id: str):
         """Monitor job progress and workers."""
         self.debug_print(f"Job monitor beginning for job: {job_id}", colour="blue", level=logging.INFO)
+        job_data = self.query_dht(job_id)
         online = True
 
-        while not self.terminate_flag.is_set():
-            job_data = self.routing_table[job_id]
-            user_data = self.query_dht(job_data["author"])
+        try:
+            while not self.terminate_flag.is_set():
+                time.sleep(30)
+                self.debug_print(f"Validator -> Inspecting job: {job_id}", colour="blue")
 
-            # Check that user is still online
-            connected = self.connect_node(job_data["author"], user_data["host"], user_data["port"])
-            if not connected:
-                # TODO mark as done
-                online = False
+                try:
+                    user_data = self.query_dht(job_data["author"])
 
-            job_data_from_user = self.query_node(job_id, self.nodes[job_data["author"]])
-            if job_data_from_user is None:
-                online = False
+                    # Check that user is still online
+                    connected = self.connect_node(job_data["author"], user_data["host"], user_data["port"])
+                    if not connected:
+                        online = False
 
-            if not job_data_from_user.get("active"):
-                self.debug_print(f"Validator -> Job {job_id} has been marked inactive by user.", colour="red")
-                online = False
+                    if online:
+                        # job_data_from_user = self.query_node(job_id, self.nodes[job_data["author"]])
+                        # if job_data_from_user is None:
+                        #     online = False
+                        #
+                        # if job_data_from_user is None or not job_data_from_user.get("active"):
+                        #     self.debug_print(f"Validator -> Job {job_id} has been marked inactive by user.",
+                        #                      colour="red")
+                        #     online = False
 
-            for module_id, module_info in job_data["distribution"].items():
-                if module_info["type"] == "offloaded":
-                    for worker in module_info["workers"]:
-                        # TODO Request epoch info from workers
-                        pass
+                        for module_id, module_info in job_data["distribution"].items():
+                            if module_info["type"] == "offloaded":
+                                for worker in module_info["workers"]:
+                                    # TODO Request epoch info from workers
+                                    pass
 
-            # Check if job can be officially marked as done/offline
-            if not online:
-                # Wait for job to be offline for at least 2 minutes to mark as complete
-                # on SmartnodesCore
-                if time.time() - job_data["last_seen"] > 120:
-                    self.jobs_to_complete.append(job_id)
+                    # Check if job can be officially marked as done/offline
+                    if not online:
+                        # Wait for job to be offline for at least 2 minutes to mark as complete
+                        if time.time() - job_data["last_seen"] > 60:
+                            # Completely delete jobs that went offline within first 3 minutes
+                            if time.time() - job_data["timestamp"] < 180:
+                                self.debug_print("Validator -> Job timed out during creation.", colour="red")
+                            else:
+                                self.debug_print("Validator -> Job timed out, marking as complete for Smartnodes...",
+                                                 colour="red")
+                                job_data["active"] = False
+                                self.jobs_to_complete.append(job_id)
+                            break
 
-                # Completely delete jobs that went offline within 2 minutes
-                if time.time() - job_data["timestamp"] < 120:
-                    self.jobs.remove(job_id)
-                    self.delete(job_id)
+                        self.debug_print("Validator -> User timed out, awaiting user...", colour="red")
 
-            else:
-                # If job is still online we can update our record of checking
-                job_data["last_seen"] = time.time()
+                    else:
+                        self.debug_print(f"Validator -> Job inspection complete for job: {job_id}", colour="blue")
+                        job_data["last_seen"] = time.time()
+                        self.routing_table[job_id] = job_data
 
-            time.sleep(30)
+                except Exception as e:
+                    self.debug_print(f"Error monitoring job: {e}", colour="bright_red", level=logging.CRITICAL)
+                    break
+
+        finally:
+            # Ensure shutdown job is always called at the end
+            self.shutdown_job(job_data)
+
+    def shutdown_job(self, job_data):
+        del self.active_jobs[job_data["id"]]
+
+        for module_id, module_info in job_data["distribution"].items():
+            if module_info["type"] == "offloaded":
+                for worker in module_info["workers"]:
+                    # TODO Request epoch info from workers
+                    node = self.nodes[worker]
+                    self.send_to_node(node, b"SHUTDOWN-JOB" + module_id.encode())
 
     def recruit_worker(
             self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int, worker_id: str
     ) -> bool:
-        data = pickle.dumps([user_id, job_id, module_id, module_size])
-        data = b"JOB-REQ" + data
+        data = json.dumps([user_id, job_id, module_id, module_size])
+        data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
 
         # Check worker's available memory
@@ -498,7 +522,7 @@ class Validator(TorchNode):
                 if stats:
                     workers[worker] = stats
 
-            self.send_to_node(node, b"ALL-WORKER-STATS" + pickle.dumps(workers))
+            self.send_to_node(node, b"ALL-WORKER-STATS" + json.dumps(workers).encode())
 
     def distribute_job(self):
         """Distribute job to a few other non-seed validators"""
@@ -508,7 +532,7 @@ class Validator(TorchNode):
 
     def update_job(self, job_bytes: bytes):
         """Update non-seed validators, loss, accuracy, other info"""
-        job = pickle.loads(job_bytes)
+        job = json.loads(job_bytes)
 
     """For more intensive, paid jobs that are requested directly from SmartnodesCore"""
     # def get_jobs(self):
@@ -735,21 +759,27 @@ class Validator(TorchNode):
         reason = ""
 
         time.sleep(2)
-        proposal_data = self.query_dht(proposal_hash)
-        validators_to_remove, job_hashes, job_capacities, job_workers, total_capacity = proposal_data
-        proposal_data_hash = self.hash_proposal_data(
-            validators_to_remove,
-            job_hashes,
-            job_capacities,
-            job_workers,
-            total_capacity
-        ).hex().encode()
-
-        if proposal_data_hash != proposal_hash:
-            self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
-            flag = True
+        proposal_data = self.query_dht(proposal_hash.decode())
+        if proposal_data is None:
+            proposal_id, validators = self.multi_sig_contract.functions.getState().call()
+            if self.public_key not in validators:
+                self.debug_print(f"Validator -> Proposal {proposal_hash} not found in DHT!")
+                return
         else:
-            pass
+            validators_to_remove, job_hashes, job_capacities, job_workers, total_capacity = proposal_data
+            proposal_data_hash = self.hash_proposal_data(
+                validators_to_remove,
+                job_hashes,
+                job_capacities,
+                job_workers,
+                total_capacity
+            ).hex().encode()
+
+            if proposal_data_hash != proposal_hash:
+                self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
+                flag = True
+            else:
+                pass
             # for function_type, call_data in proposal_data:
             #     if self.proposal_flag.is_set():
             #         self.debug_print(f"Validator -> Validation interrupted for proposal {proposal_data_hash}!")
@@ -909,7 +939,7 @@ class Validator(TorchNode):
             job_workers,
             sum(job_capacities)
         ]
-        self.store_value(proposal_hash.hex().encode(), proposal)
+        self.store_value(proposal_hash.hex(), proposal)
 
         try:
             tx = self.multi_sig_contract.functions.createProposal(
@@ -1032,9 +1062,13 @@ class Validator(TorchNode):
         while not self.terminate_flag.is_set():
             try:
                 # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-                pass
+                if self.jobs:
+                    job = self.routing_table[self.jobs[-1]]
+                    if job is None:
+                        print("Job data was deleted!")
+                        time.sleep(1)
+
             except KeyboardInterrupt:
-                print(123)
                 self.terminate_flag.set()
 
     def stop(self):
@@ -1101,12 +1135,37 @@ class Validator(TorchNode):
             self.save_dht_state()
             time.sleep(600)
 
-    # def update_routing_table(self):
-    #     while not self.terminate_flag.is_set():
-    #         for key, value in self.routing_table.items():
-    #             # Delete unrecognized data from routing table
-    #             if key not in self.nodes or key not in self.jobs:
-    #                 self.debug_print(f"SmartNode -> Cleaning up item: {key} from routing table.")
-    #                 self.delete(key)
-    #         # TODO method / request to delete job after certain time or by request of the user.
-    #         #   Perhaps after a job is finished there is a delete request
+    def clean_node(self):
+        """Periodically clean up node storage"""
+        def clean_nodes(nodes):
+            nodes_to_remove = []
+            for node_id in nodes:
+                # Remove any ghost user_ids in self.users
+                if node_id not in self.nodes:
+                    nodes_to_remove.append(node_id)
+                # Remove any terminated connections
+                elif self.nodes[node_id].terminate_flag.is_set():
+                    nodes_to_remove.append(node_id)
+                    del self.nodes[node_id]
+
+            for node in nodes_to_remove:
+                nodes.remove(node)
+
+        while not self.terminate_flag.is_set():
+            for job_id in self.jobs:
+                job_data = self.query_dht(job_id)
+
+                if job_data["active"] is False:
+                    # Remove old jobs (not in jobs to upload to contract or in ones to delete
+                    if job_id not in self.jobs_to_complete or job_id in self.jobs_to_delete:
+                        self.jobs.remove(job_id)
+                        self.delete(job_id)
+
+            clean_nodes(self.workers)
+            clean_nodes(self.validators)
+            clean_nodes(self.users)
+
+            time.sleep(600)
+
+            # TODO method / request to delete job after certain time or by request of the user.
+            #   Perhaps after a job is finished there is a delete request

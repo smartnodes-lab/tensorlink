@@ -132,10 +132,14 @@ class UserNode(BaseNode):
         distribution = dist_model.parse_model(model, handle_layer=False)
         distributed_config = self.send_request("request_job", (n_pipelines, 1, distribution))
 
-        for module_id, module_info in distributed_config.items():
-            if module_info["type"] == "offloaded":
-                module, module_name = access_module(model, module_info["mod_id"])
-                setattr(module, "optimizer", optimizer_type)
+        if distributed_config:
+            for module_id, module_info in distributed_config.items():
+                if module_info["type"] == "offloaded":
+                    module, module_name = access_module(model, module_info["mod_id"])
+                    setattr(module, "optimizer", optimizer_type)
+        else:
+            print("Could not obtain job from network... Please try again.")
+            return False
 
         dist_model.distribute_model(distributed_config)
 

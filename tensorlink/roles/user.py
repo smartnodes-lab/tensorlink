@@ -6,10 +6,10 @@ from tensorlink.crypto.rsa import get_rsa_pub_key
 import threading
 import hashlib
 import logging
-import pickle
 import random
 import queue
 import time
+import json
 
 
 class User(TorchNode):
@@ -98,7 +98,7 @@ class User(TorchNode):
                         ghost += 1
                 elif b"WORKERS" == data[:7]:
                     self.debug_print(f"User -> Received workers from: {node.node_id}")
-                    workers = pickle.loads(data[7:])
+                    workers = json.loads(data[7:])
                     for worker, stats in workers.items():
                         self.worker_stats[worker] = stats
                 else:
@@ -154,7 +154,7 @@ class User(TorchNode):
                 self.debug_print(f"User -> Validator ({node.node_id}) accepted job!", colour="bright_green",
                                  level=logging.INFO)
                 job_id = data[10:74].decode()
-                job_data = pickle.loads(data[74:])
+                job_data = json.loads(data[74:])
                 distribution = job_data["distribution"]
 
                 for mod_id, mod_info in distribution.items():
@@ -176,7 +176,7 @@ class User(TorchNode):
                                  level=logging.WARNING)
 
         except Exception as e:
-            self.debug_print(f"User -> handle job acception error: {e}", level=logging.CRITICAL, 
+            self.debug_print(f"User -> handle job acception error: {e}", level=logging.CRITICAL,
                              colour="bright_red")
             raise e
 
@@ -257,9 +257,9 @@ class User(TorchNode):
             if not connected:
                 self.delete(validator_id)
                 self.debug_print(
-                    f"User -> Could not connect to validator for job initialize, try again.",
-                    colour = "bright_yellow",
-                    level = logging.WARNING
+                    f"User -> Could not connect to validator for job initialization, try again.",
+                    colour="bright_yellow",
+                    level=logging.WARNING
                 )
                 return False
 
@@ -283,7 +283,7 @@ class User(TorchNode):
         }
 
         # Get unique job id given current parameters
-        job_hash = hashlib.sha256(pickle.dumps(job_request)).hexdigest()
+        job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
         job_request["id"] = job_hash
         self.jobs.append(job_request)
 
@@ -305,6 +305,10 @@ class User(TorchNode):
         for mod_id, module in distribution.items():
             # Wait for loading confirmation from worker roles
             worker_info = self.modules[mod_id]
+            if len(worker_info["workers"]) < 1:
+                self.debug_print(f"Network could not find workers for job.", level=logging.INFO, colour="red")
+                return
+
             worker_id = worker_info["workers"][0]
             # module, name = access_module(model, config[mod_id]["mod_id"])
 
@@ -330,7 +334,7 @@ class User(TorchNode):
         """Send a request to a validator to oversee our job"""
         if validator.node_id not in job_info["seed_validators"]:
             raise "Validator not a seed validator"
-        message = b"JOB-REQ" + pickle.dumps(job_info)
+        message = b"JOB-REQ" + json.dumps(job_info).encode()
         self.store_request(validator.node_id, job_info["id"])
         self.send_to_node(validator, message)
         start_time = time.time()
@@ -341,7 +345,7 @@ class User(TorchNode):
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print("User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB", colour="bright_yellow",
                                  level=logging.WARNING)
-                return self.send_job_req(validator, job_info)
+                return
         return
 
     def connect_worker(
@@ -360,7 +364,7 @@ class User(TorchNode):
 
     def send_job_status_update(self, node, job: dict):
         # Update the job state to the overseeing validators
-        job_bytes = b"JOB-UPDATE" + pickle.dumps(job)
+        job_bytes = b"JOB-UPDATE" + json.dumps(job).encode()
         self.send_to_node(node, job_bytes)
 
     def get_self_info(self):

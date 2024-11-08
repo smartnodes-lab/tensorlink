@@ -11,6 +11,9 @@ import os
 import gc
 
 
+CHUNK_SIZE = 10_000_000
+
+
 class Connection(threading.Thread):
     def __init__(
         self,
@@ -40,8 +43,8 @@ class Connection(threading.Thread):
         self.node_key = node_key
         self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
-        self.sock.settimeout(10)
-        self.chunk_size = 1024 * 1024 * 4 * 4
+        self.sock.settimeout(5)
+        self.chunk_size = CHUNK_SIZE
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
@@ -49,6 +52,80 @@ class Connection(threading.Thread):
 
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
+
+    def run(self):
+        buffer = b""
+        b_size = 0
+        prefix = b""
+        writing_threads = []
+
+        while not self.terminate_flag.is_set():
+            chunk = b""
+
+            file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
+            try:
+                chunk = self.sock.recv(self.chunk_size)
+            except socket.timeout:
+                # self.main_node.debug_print("connection timeout")
+                continue
+
+            except (ConnectionResetError, ConnectionAbortedError) as e:
+                # Handle disconnections
+                self.terminate_flag.set()
+                self.main_node.debug_print(f"Connection -> Connection lost: {e}", colour="bright_red", level=logging.ERROR)
+                self.main_node.disconnect_node(self.node_id)
+                break
+
+            except Exception as e:
+                self.terminate_flag.set()
+                self.main_node.debug_print(f"Connection -> unexpected error: {e}", colour="bright_red", level=logging.ERROR)
+                self.main_node.disconnect_node(self.node_id)
+                break
+
+            if chunk:
+                self.last_seen = datetime.now()
+
+                if b"MODULE" == chunk[:6]:
+                    prefix = chunk[:70]
+                    buffer += chunk[70:]
+                elif b"PARAMETERS" == chunk[:10]:
+                    prefix = chunk[:74]
+                    buffer += chunk[74:]
+                else:
+                    buffer += chunk
+
+                eot_pos = buffer.find(self.EOT_CHAR)
+
+                if eot_pos >= 0:
+                    packet = buffer[:eot_pos]
+                    try:
+                        with open(file_name, "ab") as f:
+                            f.write(packet)
+                    except Exception as e:
+                        self.main_node.debug_print(f"Connection -> file writing error: {e}", colour="bright_red", level=logging.ERROR)
+
+                    buffer = buffer[eot_pos + len(self.EOT_CHAR):]
+                    self.main_node.handle_message(self, b"DONE STREAM" + prefix)
+                    prefix = b""
+
+                    for t in writing_threads:
+                        t.join()
+
+                    writing_threads = []
+
+                    self.chunk_size = CHUNK_SIZE
+
+                elif len(buffer) > 20_000_000:
+                    t = threading.Thread(target=self.write_to_file, args=(file_name, buffer))
+                    writing_threads.append(t)
+                    t.start()
+
+                    buffer = b""
+
+            gc.collect()
+
+        self.sock.settimeout(None)
+        self.sock.close()
 
     def compress(self, data):
         compressed = data
@@ -135,8 +212,8 @@ class Connection(threading.Thread):
 
                     self.sock.sendall(chunk)
                     chunk_number += 1
-
-                    gc.collect()
+                    #
+                    # gc.collect()
 
                 self.sock.sendall(self.EOT_CHAR)
                 print(time.time() - start_time)
@@ -167,69 +244,6 @@ class Connection(threading.Thread):
         #
         # except UnicodeDecodeError:
         #     return packet
-
-    def run(self):
-        buffer = b""
-        b_size = 0
-        prefix = b""
-        writing_threads = []
-
-        while not self.terminate_flag.is_set():
-            chunk = b""
-
-            file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
-            try:
-                chunk = self.sock.recv(self.chunk_size)
-            except socket.timeout:
-                # self.main_node.debug_print("connection timeout")
-                continue
-            except Exception as e:
-                self.terminate_flag.set()
-                self.main_node.debug_print(f"Connection -> unexpected error: {e}", colour="bright_red", level=logging.ERROR)
-                break
-
-            if chunk:
-                self.last_seen = datetime.now()
-
-                if b"MODULE" == chunk[:6]:
-                    prefix = chunk[:70]
-                    buffer += chunk[70:]
-                elif b"PARAMETERS" == chunk[:10]:
-                    prefix = chunk[:74]
-                    buffer += chunk[74:]
-                else:
-                    buffer += chunk
-
-                eot_pos = buffer.find(self.EOT_CHAR)
-
-                if eot_pos >= 0:
-                    packet = buffer[:eot_pos]
-                    try:
-                        with open(file_name, "ab") as f:
-                            f.write(packet)
-                    except Exception as e:
-                        self.main_node.debug_print(f"Connection -> file writing error: {e}", colour="bright_red", level=logging.ERROR)
-
-                    buffer = buffer[eot_pos + len(self.EOT_CHAR):]
-                    self.main_node.handle_message(self, b"DONE STREAM" + prefix)
-                    prefix = b""
-
-                    for t in writing_threads:
-                        t.join()
-
-                    writing_threads = []
-
-                elif len(buffer) > 20_000_000:
-                    t = threading.Thread(target=self.write_to_file, args=(file_name, buffer))
-                    writing_threads.append(t)
-                    t.start()
-
-                    buffer = b""
-
-            gc.collect()
-
-        self.sock.settimeout(None)
-        self.sock.close()
 
     def write_to_file(self, file_name, buffer):
         try:

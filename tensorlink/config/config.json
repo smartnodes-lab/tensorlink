@@ -1,7 +1,7 @@
 {
   "api": {
-    "core": "0xe23E21E58c348D6F6d66b61e90E4efA02624AdC8",
-    "multi-sig": "0xa93BBC938664fCFea144105032E953b89338DB42",
+    "core": "0x89cEf874219d0E31BC0818D50177ACE786b5b51e",
+    "multi-sig": "0x14fC7c400Ca4fbB88c2c6e2A436c679C041A35Dc",
     "chain-url": "http://127.0.0.1:7545",
     "endpoint-url": "http://127.0.0.1:5029"
   }

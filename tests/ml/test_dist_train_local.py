@@ -1,11 +1,40 @@
-from tensorlink.mpc.nodes import UserNode, WorkerNode, ValidatorNode
-from useful_scripts import *
+"""
+TensorLink Job Distribution Test Script
 
-import torch
-import torch.nn as nn
-from torch.nn.functional import mse_loss
-import time
+This script demonstrates how a machine learning job is distributed across the TensorLink network using off-chain and local connections on the user's PC. It simulates a distributed setup where user, worker, and validator nodes collaborate to perform training on a simple model. The script utilizes TensorLink's networking features to establish connections among the nodes and set up a basic distributed machine learning workflow.
+
+Description:
+------------
+1. Node Initialization:
+    - Launches `UserNode`, `WorkerNode`, and `ValidatorNode` instances.
+    - Each node simulates different roles in a distributed system:
+      - `UserNode`: Initiates and coordinates the job.
+      - `WorkerNode`: Processes data as part of the distributed model.
+      - `ValidatorNode`: Verifies and approves job-related tasks.
+
+2. Node Connectivity:
+    - Establishes peer-to-peer connections among the nodes.
+    - Uses off-chain testing to simulate realistic job distribution without requiring a blockchain connection.
+    - Connects `WorkerNode` and `UserNode` to the `ValidatorNode`.
+
+3. Model and Optimizer Setup:
+    - Defines a basic neural network model (`Dummy`) to test the distributed training setup.
+    - Uses `create_distributed_model()` from the `UserNode` to distribute the model across the nodes.
+    - Sets up an optimizer for training, demonstrating distributed gradient updates and optimization.
+
+4. Distributed Training:
+    - Runs a training loop on the distributed model.
+    - Demonstrates how the `UserNode`, `WorkerNode`, and `ValidatorNode` interact to handle backpropagation and model updates.
+    - Logs training progress, including model connection details, loss calculations, and optimizer steps.
+"""
+
+
+from tensorlink.mpc.nodes import UserNode, WorkerNode, ValidatorNode
 from transformers import BertTokenizer, BertForSequenceClassification
+from torch.nn.functional import mse_loss
+import torch.nn as nn
+import torch
+import time
 import logging
 import json
 
@@ -75,21 +104,23 @@ if __name__ == "__main__":
     )
     del model
 
-    validator.cleanup()
-
     # p1 = list(distributed_model.parameters())
     # p2 = list(distributed_model.parameters(load=False))
     # d = distributed_model.state_dict()
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    distributed_model.train()
 
-    for _ in range(10):
+    for _ in range(1):
         distributed_optimizer.zero_grad()
-        x = torch.zeros((10, 10))
-        x = distributed_model(x)
-        loss = mse_loss(x, x)
+        x = torch.zeros((1, 10), dtype=torch.float)
+        outputs = distributed_model(x)
+        # outputs = outputs.logits
+        loss = mse_loss(outputs, outputs)
         loss.backward()
         distributed_optimizer.step()
+        user.cleanup()
 
     # train(distributed_model, distributed_optimizer, tokenizer, device, batch_size=BATCH_SIZE)
-    user.cleanup()
+    time.sleep(300)
+    validator.cleanup()
     worker.cleanup()

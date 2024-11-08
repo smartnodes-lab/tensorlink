@@ -7,6 +7,7 @@ import threading
 import pickle
 import torch
 import queue
+import json
 import time
 import os
 
@@ -75,7 +76,10 @@ class DistributedWorker:
                                 torch.cuda.synchronize()
 
                             # Detach gradients and prepare for next node
-                            dvalues = detach_tensor(assoc_input.grad)
+                            if assoc_input.grad is None:
+                                dvalues = detach_tensor(torch.zeros_like(assoc_input, dtype=torch.float32))
+                            else:
+                                dvalues = detach_tensor(assoc_input.grad)
 
                             # Clean up to avoid memory leaks
                             del assoc_input, assoc_output
@@ -126,7 +130,7 @@ class DistributedWorker:
                         if self.device.type != "cpu":
                             torch.cuda.empty_cache()
 
-                        self.store_snapshot(module_id, inp, out, key[0], key[1])
+                        # self.store_snapshot(module_id, inp, out, key[0], key[1])
 
                         if module.training:
                             module.n_batch += 1
@@ -145,16 +149,33 @@ class DistributedWorker:
 
         return response["return"]
 
-    async def store_snapshot(self, module_id, _input, _output, epoch, micro):
-        params = self.modules[module_id].state_dict()
+    def store_snapshot(self, module_id, _input, _output, epoch, micro):
+        # Ensure the snapshots directory exists
+        os.makedirs("snapshots", exist_ok=True)
+
+        # Get parameters (state_dict) and convert tensors to a serializable format
+        params = {k: v.cpu().numpy().tolist() for k, v in self.modules[module_id].state_dict().items()}
+
+        # Prepare snapshot data
         snapshot = {
             "id": module_id,
             "params": params,
-            "input": _input,
-            "output": _output
+            "input": _input.cpu().numpy().tolist(),  # Assuming _input is a tensor
+            "output": _output.cpu().numpy().tolist(),  # Assuming _output is a tensor
+            "epoch": epoch,
+            "micro": micro
         }
-        with open(os.path.join("snapshots", f"{module_id}_{epoch},{micro}")) as f:
-            f.write(snapshot)
+
+        # Define the filename
+        file_path = os.path.join("snapshots", f"{module_id}_epoch{epoch}_micro{micro}.json")
+
+        # Write the snapshot to a JSON file
+        try:
+            with open(file_path, "w") as f:
+                json.dump(snapshot, f)
+            print(f"Snapshot saved successfully: {file_path}")
+        except IOError as e:
+            print(f"Error saving snapshot: {e}")
 
     def check_node(self):
         update_check_interval = 25
@@ -181,6 +202,11 @@ class DistributedWorker:
                         self.optimizers[module_id] = module.optimizer
                         delattr(module, "optimizer")
                         self.send_request("module_loaded", module_id)
+                elif isinstance(args, str):
+                    if args in self.modules:
+                        del self.modules[args]
+                        del self.optimizers[args]
+                        self.send_request("debug_print", (f"Module{args} removed.",))
 
             # Process training, forward, and backward queues
             if self.modules:
