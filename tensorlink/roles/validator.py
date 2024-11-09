@@ -92,6 +92,7 @@ class Validator(TorchNode):
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
 
     def handle_data(self, data, node: Connection):
         """
@@ -427,7 +428,7 @@ class Validator(TorchNode):
                         # Wait for job to be offline for at least 2 minutes to mark as complete
                         if time.time() - job_data["last_seen"] > 60:
                             # Completely delete jobs that went offline within first 3 minutes
-                            if time.time() - job_data["timestamp"] < 180:
+                            if time.time() - job_data["timestamp"] < 120:
                                 self.debug_print("Validator -> Job timed out during creation.", colour="red")
                             else:
                                 self.debug_print("Validator -> Job timed out, marking as complete for Smartnodes...",
@@ -896,33 +897,29 @@ class Validator(TorchNode):
             if job:
                 user_id = job["author"]
                 job_hash = bytes.fromhex(job_id)
-                user_hash = bytes.fromhex(user_id)
-                worker_addresses = []
                 capacities = job["capacity"]
 
-                for worker_id in job["workers"]:
-                    worker_info = self.query_dht(worker_id)
+                for module_id, module_info in job["distribution"].items():
+                    for worker_id in module_info["workers"]:
+                        worker_info = self.query_dht(worker_id)
 
-                    if worker_info:
-                        worker_host, worker_port = worker_info["host"], worker_info["port"]
-                        connected = self.connect_node(worker_info["id"], worker_host, worker_port)
+                        if worker_info:
+                            worker_host, worker_port = worker_info["host"], worker_info["port"]
+                            connected = self.connect_node(worker_info["id"], worker_host, worker_port)
 
-                        # Verify the roles is online and in the network
-                        if not connected:
-                            worker_node = self.nodes[worker_id]
-                            worker_address = self.query_node(
-                                hashlib.sha256(b"ADDRESS").hexdigest(),
-                                worker_node
-                            )
+                            # Verify the roles is online and in the network
+                            if connected:
+                                worker_node = self.nodes[worker_id]
+                                worker_address = self.query_node(
+                                    hashlib.sha256(b"ADDRESS").hexdigest(),
+                                    worker_node
+                                )
 
-                            if worker_address:
-                                connection = self.nodes[worker_id]
-                                self.close_connection_socket(connection, "Check complete.")
-                                worker_addresses.append(worker_address)
+                                if worker_address:
+                                    job_workers.append(worker_address)
 
                 job_hashes.append(job_hash)
                 job_capacities.append(capacities)
-                job_workers.append(worker_addresses)
 
         proposal_hash = self.hash_proposal_data(
             validators_to_remove,
@@ -939,6 +936,7 @@ class Validator(TorchNode):
             job_workers,
             sum(job_capacities)
         ]
+
         self.store_value(proposal_hash.hex(), proposal)
 
         try:
@@ -1035,6 +1033,8 @@ class Validator(TorchNode):
         workers,
         total_capacity
     ):
+        validators_to_remove = [self.chain.to_checksum_address(validator) for validator in validators_to_remove]
+        workers = [self.chain.to_checksum_address(worker) for worker in workers]
         encoded_data = encode(
             ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
             [
@@ -1079,7 +1079,7 @@ class Validator(TorchNode):
         """Serialize and save the DHT state to a file."""
         try:
             # Load existing data if available
-            existing_data = {"workers": {}, "validators": {}, "users": {}, "jobs": {}}
+            existing_data = {"workers": {}, "validators": {}, "users": {}, "jobs": {}, "proposals": {}}
 
             if os.path.exists(STATE_FILE):
                 try:
@@ -1105,6 +1105,9 @@ class Validator(TorchNode):
             for job_id in self.jobs:
                 job = self.query_dht(job_id)
                 existing_data["jobs"][job_id] = job
+
+            for proposal_id in self.proposals:
+                pass
 
             # Save updated data back to the file
             with open(STATE_FILE, "w") as f:

@@ -1,7 +1,7 @@
 """
 TensorLink Job Distribution Test Script
 
-This script demonstrates how a machine learning job is distributed across the TensorLink network using off-chain and local connections on the user's PC. It simulates a distributed setup where user, worker, and validator nodes collaborate to perform training on a simple model. The script utilizes TensorLink's networking features to establish connections among the nodes and set up a basic distributed machine learning workflow.
+This script demonstrates how a machine learning job is distributed across the tensorlink network using off-chain and local connections on the user's PC. It simulates a distributed setup where user, worker, and validator nodes collaborate to perform training on a simple model. The script utilizes TensorLink's networking features to establish connections among the nodes and set up a basic distributed machine learning workflow.
 
 Description:
 ------------
@@ -27,8 +27,6 @@ Description:
     - Demonstrates how the `UserNode`, `WorkerNode`, and `ValidatorNode` interact to handle backpropagation and model updates.
     - Logs training progress, including model connection details, loss calculations, and optimizer steps.
 """
-
-
 from tensorlink.mpc.nodes import UserNode, WorkerNode, ValidatorNode
 from transformers import BertTokenizer, BertForSequenceClassification
 from torch.nn.functional import mse_loss

@@ -648,7 +648,7 @@ class SmartNode(threading.Thread):
                         ).call()
 
                         # If validator was not found
-                        if not is_active or node_id_hash != pub_key_hash:
+                        if not is_active or node_id_hash != bytes.hex(pub_key_hash):
                             # TODO: potentially some form of reporting mechanism via ip and port
                             self.debug_print(f"Validator {connected_node_id} not listed on SmartnodesCore!", colour="red", level=logging.WARNING)
 

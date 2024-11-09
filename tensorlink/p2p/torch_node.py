@@ -457,7 +457,7 @@ class TorchNode(SmartNode):
 
             elif req_type == "debug_print":
                 if len(request["args"]) == 1:
-                    message = request["args"]
+                    message = request["args"][0]
                     colour = None
                     level = logging.DEBUG
                 else:
