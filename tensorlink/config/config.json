@@ -1,8 +1,8 @@
 {
   "api": {
-    "core": "0x89cEf874219d0E31BC0818D50177ACE786b5b51e",
-    "multi-sig": "0x14fC7c400Ca4fbB88c2c6e2A436c679C041A35Dc",
-    "chain-url": "http://127.0.0.1:7545",
+    "core": "0xCFBA2E673eeDeBF49dB70DCa32800a23AE2E2845",
+    "multi-sig": "0x439b167260611e75E0171A4889477d3EaDA314D6",
+    "chain-url": "https://sepolia.base.org",
     "endpoint-url": "http://127.0.0.1:5029"
   }
 }

@@ -27,7 +27,7 @@ Description:
     - Demonstrates how the `UserNode`, `WorkerNode`, and `ValidatorNode` interact to handle backpropagation and model updates.
     - Logs training progress, including model connection details, loss calculations, and optimizer steps.
 """
-from tensorlink.mpc.nodes import UserNode, WorkerNode, ValidatorNode
+from tensorlink import UserNode, WorkerNode, ValidatorNode
 from transformers import BertTokenizer, BertForSequenceClassification
 from torch.nn.functional import mse_loss
 import torch.nn as nn
@@ -79,7 +79,7 @@ if __name__ == "__main__":
 
     worker.send_request("connect_node", (val_key, val_host, val_port))
     time.sleep(1)
-    # user.send_request("connect_node", (b"b", "142.188.24.158", 38752))
+
     user.send_request("connect_node", (val_key, val_host, val_port))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -104,21 +104,21 @@ if __name__ == "__main__":
 
     # p1 = list(distributed_model.parameters())
     # p2 = list(distributed_model.parameters(load=False))
-    # d = distributed_model.state_dict()
-    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
-    distributed_model.train()
+    d = distributed_model.state_dict()
 
-    for _ in range(1):
-        distributed_optimizer.zero_grad()
-        x = torch.zeros((1, 10), dtype=torch.float)
-        outputs = distributed_model(x)
-        # outputs = outputs.logits
-        loss = mse_loss(outputs, outputs)
-        loss.backward()
-        distributed_optimizer.step()
-        user.cleanup()
+    # distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    # distributed_model.train()
+    #
+    # for _ in range(1):
+    #     distributed_optimizer.zero_grad()
+    #     x = torch.zeros((1, 10), dtype=torch.float)
+    #     outputs = distributed_model(x)
+    #     # outputs = outputs.logits
+    #     loss = mse_loss(outputs, outputs)
+    #     loss.backward()
+    #     distributed_optimizer.step()
 
-    # train(distributed_model, distributed_optimizer, tokenizer, device, batch_size=BATCH_SIZE)
-    time.sleep(300)
+    # time.sleep(300)
+    user.cleanup()
     validator.cleanup()
     worker.cleanup()

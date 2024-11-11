@@ -156,6 +156,8 @@ class Worker(TorchNode):
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
             pass
 
+        self.stop()
+
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
 

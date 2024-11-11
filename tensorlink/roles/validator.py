@@ -559,7 +559,7 @@ class Validator(TorchNode):
         # Proposal-specific event listening
         try:
             latest_block = self.chain.eth.block_number
-            start_block = max(0, latest_block - 50)
+            start_block = max(0, latest_block - 100)
             first_time = True
 
             event_filter = self.multi_sig_contract.events.ProposalCreated.create_filter(
@@ -1070,6 +1070,8 @@ class Validator(TorchNode):
 
             except KeyboardInterrupt:
                 self.terminate_flag.set()
+
+        self.stop()
 
     def stop(self):
         self.save_dht_state()

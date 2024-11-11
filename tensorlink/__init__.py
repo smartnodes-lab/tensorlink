@@ -1,1 +1,1 @@
-from .mpc import nodes
+from .mpc.nodes import UserNode, ValidatorNode, WorkerNode

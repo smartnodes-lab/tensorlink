@@ -281,7 +281,7 @@ class SmartNode(threading.Thread):
 
                 elif b"PARAMETERS" in data[11:]:
                     streamed_bytes = data[11:]
-                    os.rename(file_name, data[21:] + b"_parameters")
+                    os.rename(file_name, data[21:].decode() + "_parameters")
 
                 else:
                     with open(file_name, "rb") as file:
@@ -1054,6 +1054,7 @@ class SmartNode(threading.Thread):
 
         self.connection_listener.join()
         self.stop_upnp()
+        clean()
 
         self.debug_print("Node stopped.", colour="bright_yellow", level=logging.INFO)
 

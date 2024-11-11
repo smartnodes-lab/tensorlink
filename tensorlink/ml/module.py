@@ -286,70 +286,72 @@ class DistributedModel(nn.Module):
             yield self.model
             yield from self.model.children()
 
+    from typing import Generator
+    import threading
+    import torch
+
     def parameters(self, recurse: bool = True, distributed: bool = True, load: bool = True) -> Generator:
         """
         Collects parameters from all modules (including offloaded) asynchronously and returns them as a generator.
         """
         if distributed:
             parameters = []
-            parameter_requests = []
-            offloaded_files = {}
+            request_threads = []
+            file_references = {}
 
-            def recurse_parameters(module):
-                for children in module.children():
-                    if isinstance(children, OffloadedModule):
-                        # Request parameters from offloaded modules
-                        self.send_request("request_parameters", (children.worker_id, children.module_id))
+            def collect_parameters(module):
+                for child in module.children():
+                    if isinstance(child, OffloadedModule):
+                        # Asynchronously request parameters from offloaded modules
+                        self.send_request("request_parameters", (child.worker_id, child.module_id))
                         # Start a thread to wait for each response
-                        t = threading.Thread(target=self._wait_for_parameters, args=(children.module_id,))
-                        t.start()
-                        parameter_requests.append(t)
-                    elif contains_offloaded(children):
-                        recurse_parameters(children)
+                        thread = threading.Thread(target=self._wait_for_parameters, args=(child.module_id,))
+                        thread.start()
+                        request_threads.append(thread)
+                    elif contains_offloaded(child):
+                        collect_parameters(child)
                     else:
-                        parameters.extend(list(children.parameters()))
+                        parameters.extend(list(child.parameters()))
 
-            recurse_parameters(self)
+            # Recursively collect parameters from main and offloaded modules
+            collect_parameters(self)
 
-            # Wait for all parameter requests to complete
-            for req in parameter_requests:
-                req.join()
+            # Ensure all parameter requests are completed
+            for thread in request_threads:
+                thread.join()
 
-            # Collect parameters from storage or in-memory as required
+            # Handle each module's parameters, loading only if `load` is True
             for module_id, module_info in self.distributed_graph.items():
                 if module_info["type"] == "offloaded":
                     file_name = self.parameters_storage[module_id]
                     if load:
-                        # Load the parameters from the file and append them to the list
+                        # Load parameters from file
                         with open(file_name, "rb") as f:
                             state_dict = torch.load(f)
-                            # Extend the parameters list with the loaded state_dict values
                             parameters.extend(state_dict.values())
                     else:
-                        # Store the reference to the file in a separate dictionary
-                        offloaded_files[module_id] = file_name
+                        # Store the reference to the file for lazy access
+                        file_references[module_id] = file_name
                 else:
-                    module, module_name = access_module(self.model, module_info["mod_id"])
+                    # Directly collect parameters for in-memory modules
+                    module, _ = access_module(self.model, module_info["mod_id"])
                     parameters.extend(list(module.parameters()))
 
-            # Create a generator that loads parameters from file if necessary
+            # Define a generator to yield either parameters or file references
             def parameter_generator():
-                # Yield parameters that have been loaded or collected in-memory
-                for param in parameters:
-                    yield param
-
-                # If load is False, lazily load from the file when requested
-                if not load:
-                    for _module_id, _file_name in offloaded_files.items():
-                        with open(_file_name, "rb") as f:
-                            state_dict = torch.load(f)
-                            for param in state_dict.values():
-                                yield param
+                if load:
+                    # Yield loaded or in-memory parameters directly
+                    for param in parameters:
+                        yield param
+                else:
+                    # Yield file references instead of loading parameters
+                    for _module_id, file_name in file_references.items():
+                        yield file_name  # Yield file paths if `load` is False
 
             return parameter_generator()
 
-        else:
-            return (param for param in self.model.parameters(recurse))
+        # If not distributed, return parameters from the model directly
+        return (param for param in self.model.parameters(recurse))
 
     def _wait_for_parameters(self, module_id: bytes):
         """

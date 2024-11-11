@@ -394,3 +394,5 @@ class User(TorchNode):
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
             pass
+
+        self.stop()

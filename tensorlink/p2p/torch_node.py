@@ -155,15 +155,15 @@ class TorchNode(SmartNode):
 
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
-                    self.debug_print(f"TorchNode -> RECEIVED PARAMS")
                     module_id = data[10:74].decode()
+                    self.debug_print(f"TorchNode -> Received Parameters for: {module_id}", colour="blue")
                     file_name = f"{module_id}_parameters"
                     key = "P" + module_id
                     self.memory_manager[key] = file_name
 
                 elif b"MODULE" == data[:6]:
-                    self.debug_print("TorchNode -> RECEIVED MODULE")
                     module_id = data[6:70].decode()
+                    self.debug_print(f"TorchNode -> Received Module: {module_id}")
 
                     self.modules[module_id] = {
                         "mem_info": module_id,
@@ -275,7 +275,7 @@ class TorchNode(SmartNode):
             elif req_type == "send_parameters":
                 node_id, module_id = request["args"]
                 node = self.nodes[node_id]
-                self.send_to_node_from_file(node, f"parameters_{module_id.decode()}", b"PARAMETERS" + module_id)
+                self.send_to_node_from_file(node, f"parameters_{module_id}", b"PARAMETERS" + module_id.encode())
 
             elif req_type == "check_module":
                 # Check if module has been received and is loaded in shared mpc
@@ -445,7 +445,7 @@ class TorchNode(SmartNode):
 
             elif req_type == "stop":
                 self.response_queue.put({"status": "SUCCESS", "return": None})
-                self.stop()
+                self.terminate_flag.set()
 
             elif req_type == "check_shutdown":
                 if self.terminate_flag.is_set():
@@ -509,9 +509,9 @@ class TorchNode(SmartNode):
         pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
         self.send_to_node(node, pickled_data)
 
-    def send_parameters_req(self, node: Connection, module_id):
+    def send_parameters_req(self, node: Connection, module_id: str):
         """Request parameters from a specific worker"""
-        self.send_to_node(node, b"PARAMS-REQ" + module_id)
+        self.send_to_node(node, b"PARAMS-REQ" + module_id.encode())
 
     def send_train_updated(self, node: Connection, mode: bool, module_id: str):
         mode = b"0" if mode is False else b"1"
@@ -527,6 +527,7 @@ class TorchNode(SmartNode):
     def listen_requests(self):
         while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
+            time.sleep(0.01)
 
     def get_module_hash_from_id(self, mod_id: bytes):
         for mod_hash in self.modules:

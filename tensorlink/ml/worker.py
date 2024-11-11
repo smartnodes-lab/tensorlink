@@ -182,9 +182,11 @@ class DistributedWorker:
         counter = 0
 
         while not self.terminate:
+            # Check for new jobs and shutdown requests
             if counter % update_check_interval == 0:
                 args = self.send_request("check_module", None)
 
+                # Check for new modules/jobs
                 if isinstance(args, tuple):
                     file_name, module_id, node_id = args
 
@@ -202,11 +204,16 @@ class DistributedWorker:
                         self.optimizers[module_id] = module.optimizer
                         delattr(module, "optimizer")
                         self.send_request("module_loaded", module_id)
+
+                # Check for job completion/deletion requests
                 elif isinstance(args, str):
                     if args in self.modules:
                         del self.modules[args]
                         del self.optimizers[args]
-                        self.send_request("debug_print", (f"Module{args} removed.",))
+                        self.send_request("debug_print", (f"Module {args} removed.",))
+
+                # Check for node termination requests
+                self.check_for_termination()
 
             # Process training, forward, and backward queues
             if self.modules:
@@ -221,9 +228,8 @@ class DistributedWorker:
                     # Check for parameters requests
                     params_req = self.send_request("check_parameters_request", module_id)
                     if params_req:
-                        self.send_request("debug_print", "DistributedWorker -> Sending parameters.")
-                        with open(f"parameters_{module_id.decode()}", "wb") as file:
-                            file.write(b"PARAMETERS" + module_id)
+                        self.send_request("debug_print", ("DistributedWorker -> Sending parameters.",))
+                        with open(f"parameters_{module_id}", "wb") as file:
                             torch.save(module.state_dict(), file)
 
                         self.send_request("send_parameters", (module.host, module_id))
@@ -264,11 +270,8 @@ class DistributedWorker:
                                                    logging.INFO))
                                 self.send_request("optimizer_response", (module_id, "zeroed"))
 
-            # Check for node termination
-            # self.check_for_termination()
-
             counter += 1
-            time.sleep(0.1)
+            time.sleep(0.05)
 
     def check_for_termination(self):
         # Send a request to check if the node is shutting down

@@ -18,17 +18,7 @@ multiprocessing.set_start_method('spawn', force=True)
 class BaseNode:
     _instance = None
 
-    # def __new__(cls, *args, **kwargs):
-    #     if cls._instance is None:
-    #         cls._instance = super(BaseNode, cls).__new__(cls)
-    #         cls._instance._initialized = False
-    #         cls._instance._init_kwargs = kwargs
-    #     return cls._instance
-
     def __init__(self, **kwargs):
-        # if self._initialized:
-        #     return
-
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
         self.mpc_lock = multiprocessing.Lock()
@@ -97,6 +87,7 @@ class ValidatorNode(BaseNode):
         )
         role_instance.start()
         self.node_process = role_instance
+        role_instance.join()
 
 
 class UserNode(BaseNode):
@@ -114,6 +105,7 @@ class UserNode(BaseNode):
         )
         role_instance.start()
         self.node_process = role_instance
+        role_instance.join()
 
     def create_distributed_model(self, model, n_pipelines, optimizer_type=None, dp_factor=None):  # TODO Max module size etc?
         dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, n_pipelines)
@@ -146,7 +138,17 @@ class UserNode(BaseNode):
         def _create_distributed_optimizer(**optimizer_kwargs):
             return create_distributed_optimizer(dist_model, optimizer_type, **optimizer_kwargs)
 
+        setattr(self, "distributed_model", dist_model)
+
         return dist_model, _create_distributed_optimizer
+
+    def cleanup(self):
+        """Downloads parameters from workers before shutting down"""
+        if hasattr(self, "distributed_model"):
+            if self.distributed_model.training:
+                self.distributed_model.parameters(distributed=True, load=False)
+
+        super().cleanup()
 
 
 class WorkerNode(BaseNode):
@@ -165,8 +167,8 @@ class WorkerNode(BaseNode):
         role_instance.start()
         role_instance.activate()
         self.node_process = role_instance
-
         self.run_distributed_worker()
+        role_instance.join()
 
     def run_distributed_worker(self):
         distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)

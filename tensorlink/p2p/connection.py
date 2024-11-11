@@ -86,10 +86,10 @@ class Connection(threading.Thread):
                 self.last_seen = datetime.now()
 
                 if b"MODULE" == chunk[:6]:
-                    prefix = chunk[:70]
+                    prefix = chunk[:70]  # MODULE + module_id
                     buffer += chunk[70:]
                 elif b"PARAMETERS" == chunk[:10]:
-                    prefix = chunk[:74]
+                    prefix = chunk[:74] # PARAMETERS + module_id
                     buffer += chunk[74:]
                 else:
                     buffer += chunk
