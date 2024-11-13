@@ -275,6 +275,7 @@ class SmartNode(threading.Thread):
                     f"streamed_data_{node.host}_{node.port}_{self.host}_{self.port}"
                 )
 
+                # Instead of loading file we can keep if need. This is gross code and should be changed
                 if b"MODULE" in data[11:]:
                     streamed_bytes = data[11:]
                     os.rename(file_name, data[17:].decode())
@@ -931,15 +932,21 @@ class SmartNode(threading.Thread):
 
     def add_port_mapping(self, external_port, internal_port):
         if self.upnp:
-            result = self.upnp.addportmapping(
-                external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
-            )
+            try:
+                result = self.upnp.addportmapping(
+                    external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
+                )
 
-            if result:
-                self.debug_print(f"SmartNode -> UPnP port forward successful on port {self.port}")
-            else:
-                self.debug_print(f"SmartNode -> Failed to initialize UPnP. (internal port: {internal_port},"
-                                 f" external port: {external_port})", level=logging.CRITICAL, colour="bright_red")
+                if result:
+                    self.debug_print(f"SmartNode -> UPnP port forward successful on port {self.port}")
+                else:
+                    self.debug_print(f"SmartNode -> Failed to initialize UPnP. (internal port: {internal_port},"
+                                     f" external port: {external_port})", level=logging.CRITICAL, colour="bright_red")
+            except Exception as e:
+                if "ConflictInMapping" in str(e):
+                    pass
+                else:
+                    raise e
 
     def get_external_ip(self):
         """Get public IP address"""

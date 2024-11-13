@@ -177,33 +177,34 @@ class DistributedWorker:
         except IOError as e:
             print(f"Error saving snapshot: {e}")
 
+    def load_module(self, file_name, module_id, node_id):
+
+        # Load the module in a separate thread
+        module = torch.load(file_name).to(self.device)
+        os.remove(file_name)
+
+        # Initialize queues and states
+        module.forward_queue = queue.Queue()
+        module.backward_queue = queue.Queue()
+        module.intermediates = {}
+        module.host = node_id
+
+        self.modules[module_id] = module
+        self.optimizers[module_id] = module.optimizer
+        delattr(module, "optimizer")
+        self.send_request("module_loaded", module_id)
+
     def check_node(self):
-        update_check_interval = 25
+        update_check_interval = 50
         counter = 0
 
         while not self.terminate:
-            # Check for new jobs and shutdown requests
             if counter % update_check_interval == 0:
                 args = self.send_request("check_module", None)
 
-                # Check for new modules/jobs
                 if isinstance(args, tuple):
                     file_name, module_id, node_id = args
-
-                    with self.lock:
-                        module = torch.load(file_name).to(self.device)
-                        os.remove(file_name)
-
-                        # Initialize module queues and states
-                        module.forward_queue = queue.Queue()
-                        module.backward_queue = queue.Queue()
-                        module.intermediates = {}
-                        module.host = node_id
-
-                        self.modules[module_id] = module
-                        self.optimizers[module_id] = module.optimizer
-                        delattr(module, "optimizer")
-                        self.send_request("module_loaded", module_id)
+                    self.load_module(file_name, module_id, node_id)
 
                 # Check for job completion/deletion requests
                 elif isinstance(args, str):

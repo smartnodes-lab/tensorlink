@@ -396,7 +396,7 @@ class Validator(TorchNode):
 
         try:
             while not self.terminate_flag.is_set():
-                time.sleep(30)
+                time.sleep(45)
                 self.debug_print(f"Validator -> Inspecting job: {job_id}", colour="blue")
 
                 try:
@@ -887,7 +887,7 @@ class Validator(TorchNode):
 
                     if node_address:
                         connection = self.nodes[node_info]
-                        self.close_connection_socket(connection, "Heart beat complete.")
+                        self.close_connection(connection, "Heart beat complete.")
                         validators_to_remove.append(node_address)
 
         # Complete jobs on the contract
@@ -1067,6 +1067,7 @@ class Validator(TorchNode):
                     if job is None:
                         print("Job data was deleted!")
                         time.sleep(1)
+                time.sleep(1)
 
             except KeyboardInterrupt:
                 self.terminate_flag.set()

@@ -68,19 +68,19 @@ class Dummy(nn.Module):
 if __name__ == "__main__":
     # Launch Nodes
     user = UserNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    time.sleep(0.5)
+    time.sleep(3)
     worker = WorkerNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(0.5)
     validator = ValidatorNode(upnp=False, debug=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    time.sleep(0.5)
+    time.sleep(1)
 
     # Bootstrap roles
     val_key, val_host, val_port = validator.send_request("info", None)
 
     worker.send_request("connect_node", (val_key, val_host, val_port))
     time.sleep(1)
-
     user.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -94,8 +94,6 @@ if __name__ == "__main__":
 
     distributed_model, distributed_optimizer = user.create_distributed_model(
         model=model,
-        # max_input_size=(2, 2),
-        # max_batch_size=64,
         n_pipelines=PIPELINES,
         optimizer_type=torch.optim.Adam,
         dp_factor=1
@@ -104,21 +102,20 @@ if __name__ == "__main__":
 
     # p1 = list(distributed_model.parameters())
     # p2 = list(distributed_model.parameters(load=False))
-    d = distributed_model.state_dict()
+    # d = distributed_model.state_dict()
 
-    # distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
-    # distributed_model.train()
-    #
-    # for _ in range(1):
-    #     distributed_optimizer.zero_grad()
-    #     x = torch.zeros((1, 10), dtype=torch.float)
-    #     outputs = distributed_model(x)
-    #     # outputs = outputs.logits
-    #     loss = mse_loss(outputs, outputs)
-    #     loss.backward()
-    #     distributed_optimizer.step()
+    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    distributed_model.train()
 
-    # time.sleep(300)
+    for _ in range(10):
+        distributed_optimizer.zero_grad()
+        x = torch.zeros((1, 10), dtype=torch.float)
+        outputs = distributed_model(x)
+        # outputs = outputs.logits
+        loss = mse_loss(outputs, outputs)
+        loss.backward()
+        distributed_optimizer.step()
+
     user.cleanup()
     validator.cleanup()
     worker.cleanup()

@@ -1,3 +1,5 @@
+import time
+
 from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.ml.utils import estimate_memory, handle_output, get_gpu_memory
@@ -154,7 +156,7 @@ class Worker(TorchNode):
 
         while not self.terminate_flag.is_set():
             # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-            pass
+            time.sleep(3)
 
         self.stop()
 

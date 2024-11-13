@@ -8,8 +8,10 @@ from tensorlink.ml.graphing import handle_layers
 from tensorlink.ml.utils import access_module
 
 import multiprocessing
+import threading
 import torch
 import time
+
 
 # Set the start method to 'spawn'
 multiprocessing.set_start_method('spawn', force=True)
@@ -72,6 +74,32 @@ class BaseNode:
         raise NotImplementedError("Subclasses must implement this method")
 
 
+class WorkerNode(BaseNode):
+    distributed_worker = None
+
+    def run_role(self):
+        kwargs = self.init_kwargs.copy()
+        kwargs.update({
+            'debug': kwargs.get('debug', False),
+            'upnp': kwargs.get('upnp', True),
+            'off_chain_test': kwargs.get('off_chain_test', False)
+        })
+        role_instance = Worker(
+            self.node_requests,
+            self.node_responses,
+            **kwargs
+        )
+        role_instance.start()
+        role_instance.activate()
+        role_instance.join()
+
+    def setup(self):
+        super().setup()
+        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
+        t = threading.Thread(target=distributed_worker.run)
+        t.start()
+
+
 class ValidatorNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
@@ -86,7 +114,6 @@ class ValidatorNode(BaseNode):
             **kwargs
         )
         role_instance.start()
-        self.node_process = role_instance
         role_instance.join()
 
 
@@ -104,7 +131,6 @@ class UserNode(BaseNode):
             **kwargs
         )
         role_instance.start()
-        self.node_process = role_instance
         role_instance.join()
 
     def create_distributed_model(self, model, n_pipelines, optimizer_type=None, dp_factor=None):  # TODO Max module size etc?
@@ -149,28 +175,3 @@ class UserNode(BaseNode):
                 self.distributed_model.parameters(distributed=True, load=False)
 
         super().cleanup()
-
-
-class WorkerNode(BaseNode):
-    def run_role(self):
-        kwargs = self.init_kwargs.copy()
-        kwargs.update({
-            'debug': kwargs.get('debug', False),
-            'upnp': kwargs.get('upnp', True),
-            'off_chain_test': kwargs.get('off_chain_test', False)
-        })
-        role_instance = Worker(
-            self.node_requests,
-            self.node_responses,
-            **kwargs
-        )
-        role_instance.start()
-        role_instance.activate()
-        self.node_process = role_instance
-        self.run_distributed_worker()
-        role_instance.join()
-
-    def run_distributed_worker(self):
-        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
-        distributed_worker = multiprocessing.Process(target=distributed_worker.run)
-        distributed_worker.run()

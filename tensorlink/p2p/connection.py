@@ -11,7 +11,7 @@ import os
 import gc
 
 
-CHUNK_SIZE = 10_000_000
+CHUNK_SIZE = 4096
 
 
 class Connection(threading.Thread):
@@ -43,12 +43,15 @@ class Connection(threading.Thread):
         self.node_key = node_key
         self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
-        self.sock.settimeout(5)
-        self.chunk_size = CHUNK_SIZE
+        self.sock.settimeout(10)
+        self.chunk_size = 16_777_216
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
+
+        if self.main_node.role == "V":
+            self.chunk_size = 4096
 
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
@@ -112,8 +115,6 @@ class Connection(threading.Thread):
                         t.join()
 
                     writing_threads = []
-
-                    self.chunk_size = CHUNK_SIZE
 
                 elif len(buffer) > 20_000_000:
                     t = threading.Thread(target=self.write_to_file, args=(file_name, buffer))
@@ -216,7 +217,6 @@ class Connection(threading.Thread):
                     # gc.collect()
 
                 self.sock.sendall(self.EOT_CHAR)
-                print(time.time() - start_time)
 
             os.remove(file_name)
 
