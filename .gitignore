@@ -2,9 +2,13 @@
 target/
 venv/
 keys/
-.DS_Store
+dist/
+logs/
+models/
+tmp/
 .idea
 .env
+.DS_Store
 *.rs.bk
 *.pem
 **/seed.txt

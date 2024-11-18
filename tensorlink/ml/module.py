@@ -1,3 +1,5 @@
+import os
+
 from tensorlink.ml.optim import create_distributed_optimizer, DistributedParameter
 from tensorlink.ml.utils import *
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
@@ -70,6 +72,7 @@ class DistributedModel(nn.Module):
         device=None
     ):
         super(DistributedModel, self).__init__()
+        self.name = str(model).split("(")[0]
 
         # Node process communication params
         self.node_requests = node_requests
@@ -305,9 +308,9 @@ class DistributedModel(nn.Module):
                         # Asynchronously request parameters from offloaded modules
                         self.send_request("request_parameters", (child.worker_id, child.module_id))
                         # Start a thread to wait for each response
-                        thread = threading.Thread(target=self._wait_for_parameters, args=(child.module_id,))
-                        thread.start()
-                        request_threads.append(thread)
+                        t = threading.Thread(target=self._wait_for_parameters, args=(child.module_id,))
+                        t.start()
+                        request_threads.append(t)
                     elif contains_offloaded(child):
                         collect_parameters(child)
                     else:
@@ -332,6 +335,9 @@ class DistributedModel(nn.Module):
                     else:
                         # Store the reference to the file for lazy access
                         file_references[module_id] = file_name
+                        os.makedirs("models", exist_ok=True)
+                        os.makedirs(f"models/{self.name}", exist_ok=True)
+                        os.rename(file_name, os.path.join("models", self.name, file_name.split("/")[1]))
                 else:
                     # Directly collect parameters for in-memory modules
                     module, _ = access_module(self.model, module_info["mod_id"])

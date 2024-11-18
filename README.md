@@ -1,4 +1,5 @@
-# Tensorlink
+# Tensorlink ![Static Badge](https://img.shields.io/badge/v0.1.0-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg)
+
 
 ## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch
 

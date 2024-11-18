@@ -3,6 +3,7 @@ from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.node_api import *
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
+from dotenv import get_key
 import threading
 import hashlib
 import logging
@@ -17,40 +18,34 @@ class User(TorchNode):
         self,
         request_queue,
         response_queue,
-        debug: bool = True,
         print_level=logging.DEBUG,
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
-        private_key=None,
         local_test=False
     ):
         super(User, self).__init__(
             request_queue,
             response_queue,
-            debug=debug,
+            "U",
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
             local_test=local_test
         )
-
-        self.role = "U"
         self.print_level = print_level
         self.distributed_graph = {}
         self.worker_stats = {}
 
-        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
-
         self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
 
-        self.endpoint = create_endpoint(self)
-        self.endpoint_thread = threading.Thread(
-            target=self.endpoint.run, args=("127.0.0.1", 5029), daemon=True
-        )
-        self.endpoint_thread.start()
+        # self.endpoint = create_endpoint(self)
+        # self.endpoint_thread = threading.Thread(
+        #     target=self.endpoint.run, args=("127.0.0.1", 5029), daemon=True
+        # )
+        # self.endpoint_thread.start()
 
+        # Some sort of user verification/sign-in could be implemented
         # user_id = self.contract.functions.userIdByHash(
         #     self.rsa_key_hash.decode()
         # ).call()
@@ -67,10 +62,10 @@ class User(TorchNode):
         #     ):
         #         time.sleep(5)
 
-        if private_key:
-            self.account = self.chain.eth.account.from_key(private_key)
-
-            self.chain.eth.default_account = self.account.address
+        if not self.off_chain_test:
+            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.bootstrap()
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -94,6 +89,8 @@ class User(TorchNode):
                         reason = data[11:]
                         self.debug_print(f"User -> Validator ({node.node_id}) declined job! Reason: {reason}",
                                          colour="bright_red", level=logging.ERROR)
+                        self.stop()
+
                     else:
                         ghost += 1
                 elif b"WORKERS" == data[:7]:

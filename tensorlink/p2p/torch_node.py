@@ -33,14 +33,14 @@ class TorchNode(SmartNode):
             self,
             request_queue,
             response_queue,
-            debug: bool = True,
+            role,
             max_connections: int = 0,
             upnp=True,
             off_chain_test=False,
             local_test=False
     ):
         super(TorchNode, self).__init__(
-            debug=debug,
+            role=role,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
@@ -157,7 +157,7 @@ class TorchNode(SmartNode):
                 elif b"PARAMETERS" == data[:10]:
                     module_id = data[10:74].decode()
                     self.debug_print(f"TorchNode -> Received Parameters for: {module_id}", colour="blue")
-                    file_name = f"{module_id}_parameters"
+                    file_name = f"tmp/{module_id}_parameters"
                     key = "P" + module_id
                     self.memory_manager[key] = file_name
 

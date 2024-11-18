@@ -29,7 +29,6 @@ class Worker(TorchNode):
         self,
         request_queue,
         response_queue,
-        debug: bool = True,
         print_level=logging.INFO,
         max_connections: int = 0,
         upnp=True,
@@ -39,7 +38,7 @@ class Worker(TorchNode):
         super(Worker, self).__init__(
             request_queue,
             response_queue,
-            debug=debug,
+            "W",
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
@@ -53,11 +52,13 @@ class Worker(TorchNode):
         self.public_key = get_key(".env", "PUBLIC_KEY")
         self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
-
         self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
-        self.available_memory = 4e9  # get_gpu_memory()
+        self.available_memory = get_gpu_memory()
+
+        if self.off_chain_test is False:
+            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.bootstrap()
 
     def handle_data(self, data: bytes, node: Connection):
         """

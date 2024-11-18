@@ -1,0 +1,29 @@
+{
+    "api": {
+        "core": "0x26e293d30e8C7E9D41331b91aDb27827b9d203bd",
+        "multi-sig": "0x3C9EB394e4e506eEae867AafB8501E4284edeb98",
+        "chain-url": "http://127.0.0.1:7545",
+        "endpoint-url": "http://127.0.0.1:5029"
+    },
+    "network": {
+        "mainnet": {
+            "seeds": [
+                [
+                    "58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e",
+                    "jumbomeats.ddns.net",
+                    38751
+                ]
+            ]
+        },
+        "testnet": []
+    },
+    "58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e": {
+        "port": 38751
+    },
+    "b54c26174b5fc449d2b628852b6b0e801d900deff0de20c292549f38e96b696e": {
+        "port": 38812
+    },
+    "509d89bf56704c67873c328e4f706a705b2fdc1671ebacab1083c9c6d2df650f": {
+        "port": 39024
+    }
+}

@@ -38,26 +38,27 @@ COLOURS = {
 
 # Grab smart contract information
 base_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(base_dir, '..', 'config', 'SmartnodesCore.json')
-ms_config_path = os.path.join(base_dir, '..', 'config', 'SmartnodesMultiSig.json')
+CONFIG_PATH = os.path.join(base_dir, '../..', 'config')
+SM_CONFIG_PATH = os.path.join(CONFIG_PATH, 'SmartnodesCore.json')
+MS_CONFIG_PATH = os.path.join(CONFIG_PATH, 'SmartnodesMultiSig.json')
 
-with open(os.path.join(base_dir, "..", "config", "config.json"), "r") as f:
+with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
     CHAIN_URL = config["api"]["chain-url"]
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
 
-with open(config_path, "r") as f:
+with open(SM_CONFIG_PATH, "r") as f:
     METADATA = json.load(f)
 ABI = METADATA["abi"]
 
-with open(ms_config_path, "r") as f:
+with open(MS_CONFIG_PATH, "r") as f:
     MS_METADATA = json.load(f)
 MULTI_SIG_ABI = MS_METADATA["abi"]
 
 # Configure logging with TimedRotatingFileHandler
 os.makedirs("logs", exist_ok=True)
-os.makedirs("temp", exist_ok=True)
+os.makedirs("tmp", exist_ok=True)
 
 log_handler = TimedRotatingFileHandler(
     "logs/dht_logs.log", when="midnight", interval=1, backupCount=30
@@ -137,9 +138,9 @@ def log_entry(node, metadata):
 
 
 def clean():
-    for file in os.listdir(os.path.join(os.getcwd(), "temp")):
+    for file in os.listdir(os.path.join(os.getcwd(), "tmp")):
         if "streamed_data" in file.title():
-            path = os.path.join(os.path.join(os.getcwd(), "temp"), file)
+            path = os.path.join(os.path.join(os.getcwd(), "tmp"), file)
             os.remove(path)
 
 
@@ -171,7 +172,7 @@ class SmartNode(threading.Thread):
 
     def __init__(
         self,
-        debug: bool = True,
+        role,
         max_connections: int = 0,
         upnp: bool = True,
         off_chain_test: bool = False,
@@ -199,7 +200,6 @@ class SmartNode(threading.Thread):
 
         self.port = BASE_PORT
         self.used_ports = set()
-        self.debug = debug
         self.max_connections = max_connections
         self.print_level = logging.INFO
 
@@ -219,9 +219,9 @@ class SmartNode(threading.Thread):
         self.requests = {}
 
         # More parameters for smart contract / p2p info
-        self.rsa_pub_key = None
-        self.rsa_key_hash = None
-        self.role = ""
+        self.role = role
+        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
+        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
         self.id = 0
 
         # Stores key of stored values
@@ -272,7 +272,7 @@ class SmartNode(threading.Thread):
             # Larger data streams are stored in secondary storage during streaming to improve efficiency
             if b"DONE STREAM" == data[:11]:
                 file_name = (
-                    f"streamed_data_{node.host}_{node.port}_{self.host}_{self.port}"
+                    f"tmp/streamed_data_{node.host}_{node.port}_{self.host}_{self.port}"
                 )
 
                 # Instead of loading file we can keep if need. This is gross code and should be changed
@@ -282,7 +282,7 @@ class SmartNode(threading.Thread):
 
                 elif b"PARAMETERS" in data[11:]:
                     streamed_bytes = data[11:]
-                    os.rename(file_name, data[21:].decode() + "_parameters")
+                    os.rename(file_name, "tmp/" + data[21:].decode() + "_parameters")
 
                 else:
                     with open(file_name, "rb") as file:
@@ -651,7 +651,10 @@ class SmartNode(threading.Thread):
                         # If validator was not found
                         if not is_active or node_id_hash != bytes.hex(pub_key_hash):
                             # TODO: potentially some form of reporting mechanism via ip and port
-                            self.debug_print(f"Validator {connected_node_id} not listed on SmartnodesCore!", colour="red", level=logging.WARNING)
+                            self.close_connection(
+                                connection,
+                                f"Validator {connected_node_id} not listed on SmartnodesCore!"
+                            )
 
                     elif role == "W" or role == "U":
                         # TODO: worker/user handling
@@ -870,64 +873,122 @@ class SmartNode(threading.Thread):
             return
 
         n_validators = self.get_validator_count()
-        sample_size = min(n_validators, 6)
+        sample_size = min(n_validators, 1)
         candidates = []
 
-        # Connect to randomly selected validators
-        while len(candidates) < sample_size and len(self.validators) < sample_size:
-            # Random validator id
-            validator_id = random.randrange(1, n_validators + 1)
-
-            # Get key validator information from smart contract
-            validator_contract_info = self.get_validator_info(validator_id)
-
-            if validator_contract_info is not None:
-                is_active, id_hash = validator_contract_info
-                id_hash = id_hash.encode()
-                validator_p2p_info = self.query_dht(id_hash)
-
-                if validator_p2p_info is None:
+        with open(os.path.join(CONFIG_PATH, "config.json"), "r") as file:
+            _config = json.load(file)
+            seed_validators = _config["network"]["mainnet"]["seeds"]
+            for seed_validator in seed_validators:
+                id_hash, host, port = seed_validator
+                connected = self.connect_node(id_hash, host, port)
+                if connected:
+                    candidates.append(id_hash)
+                else:
                     self.delete(id_hash)
-                    continue
 
-                # Check to see if we are already connected
-                already_connected = False
-                for node in self.nodes.values():
-                    if (
-                        node.host == validator_p2p_info["host"]
-                        and node.port == validator_p2p_info["port"]
-                    ):
-                        already_connected = True
-                        break
+        # # Connect to randomly selected  validators
+        # for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
+        #     # Random validator id
+        #     validator_id = random.randrange(1, n_validators + 1)
+        #
+        #     # Get key validator information from smart contract
+        #     validator_contract_info = self.get_validator_info(validator_id)
+        #
+        #     if validator_contract_info is not None:
+        #         is_active, id_hash = validator_contract_info
+        #         id_hash = id_hash.hex()
+        #         validator_p2p_info = self.query_dht(id_hash)
+        #
+        #         if validator_p2p_info is None:
+        #             self.delete(id_hash)
+        #             continue
+        #
+        #         # Connect to the validator's node and exchange information
+        #         # TODO what if we receive false connection info from validator: how to report?
+        #         connected = self.connect_node(
+        #             id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
+        #         )
+        #
+        #         if not connected:
+        #             self.delete(id_hash)
+        #             continue
+        #
+        #         candidates.append(validator_id)
 
-                # Connect to the validator's node and exchange information
-                # TODO what if we receive false connection info from validator: how to report?
-                connected = self.connect_node(
-                    id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
-                )
-
-                if not connected:
-                    self.delete(id_hash)
-                    continue
-
-                candidates.append(validator_id)
+        return candidates
 
     def init_sock(self) -> None:
-        """Initializes the main socket for handling incoming connections"""
+        """Initializes the main socket for handling incoming connections."""
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        port = self.get_next_port()
+
+        # Read the current config
+        with open(os.path.join(CONFIG_PATH, "config.json"), "r") as file:
+            _config = json.load(file)
+
+        # Check for prior port usage (best to maintain same port for simple bootstrapping)
+        connection_stats = _config.get(self.rsa_key_hash, {})
+        port = connection_stats.get("port")
+
+        if not port:  # If no port is found, get the next available one
+            port = self.get_next_port()
+
         self.port = port
-        self.add_port_mapping(port, port)
+        self.add_port_mapping(port, port)  # Forward the port using UPnP
         self.sock.bind((self.host, port))
         self.sock.settimeout(3)
         self.sock.listen(5)
+
+        # Update the port in the config if necessary
+        connection_stats["port"] = port
+        _config[self.rsa_key_hash] = connection_stats  # Update the local section with the new port
+
+        # Save the updated configuration back to config.json
+        with open(os.path.join(CONFIG_PATH, "config.json"), "w") as file:
+            json.dump(_config, file, indent=4)
 
     def init_upnp(self) -> None:
         """Enables UPnP on main socket to allow connections"""
         self.upnp = UPnP()
         self.upnp.discoverdelay = 2_000
-        self.upnp.discover()
+        devices_found = self.upnp.discover()
         self.upnp.selectigd()
+
+        # Clean up mappings previously created by this application.
+        try:
+            if devices_found == 0:
+                self.debug_print("No UPnP devices found.")
+                return
+
+            self.upnp.selectigd()  # Select Internet Gateway Device
+            local_ip = self.upnp.lanaddr
+            removed_count = 0
+
+            self.debug_print("Scanning existing UPnP port mappings...")
+            i = 0
+            while True:
+                try:
+                    mapping = self.upnp.getgenericportmapping(i)
+                    if mapping is None:
+                        break  # No more mappings
+
+                    ext_port, protocol, (int_ip, int_port), desc = mapping[:4]
+
+                    # Check if mapping matches our application
+                    if int_ip == local_ip and desc == "SmartNode":
+                        self.debug_print(f"Removing UPnP mapping: {ext_port}/{protocol} -> {int_ip}:{int_port}")
+                        self.upnp.deleteportmapping(ext_port, protocol)
+                        removed_count += 1
+
+                    i += 1
+                except Exception:
+                    break  # End of list or error during retrieval
+
+            self.debug_print(f"Cleanup complete. Removed {removed_count} UPnP mappings.")
+
+        except Exception as e:
+            self.debug_print(f"Error during UPnP cleanup: {e}")
+
         self.add_port_mapping(self.port, self.port)
 
     def add_port_mapping(self, external_port, internal_port):
@@ -1098,17 +1159,16 @@ class SmartNode(threading.Thread):
     """Methods for Smart Contract Interactions"""
     def get_validator_count(self):
         """Get number of listed validators on Smart Nodes"""
-        num_validators = self.contract.functions.getValidatorCount().call()
-        return num_validators
+        num_validators = self.contract.functions.validatorCounter().call()
+        return num_validators - 1
 
     def get_validator_info(self, validator_ind: int):
         """Get validator info from Smart Nodes"""
-        validator_state = self.contract.functions.getValidatorInfo(validator_ind).call()
+        try:
+            is_active, pub_key_hash, wallet_address = self.contract.functions.getValidatorInfo(
+                validator_ind
+            ).call()
+            return is_active, pub_key_hash
 
-        # If validator was active at last state update, retrieve id and request connection info
-        if validator_state:
-            # Get validator information from smart contract
-            return validator_state[0], validator_state[1]
-
-        else:
-            return None
+        except Exception as e:
+            self.debug_print(f"Validator with the ID {validator_ind} not found!.\nException: {e}")

@@ -65,7 +65,7 @@ class Connection(threading.Thread):
         while not self.terminate_flag.is_set():
             chunk = b""
 
-            file_name = f"streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
+            file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
                 chunk = self.sock.recv(self.chunk_size)
             except socket.timeout:

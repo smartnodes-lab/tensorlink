@@ -67,11 +67,11 @@ class Dummy(nn.Module):
 
 if __name__ == "__main__":
     # Launch Nodes
-    validator = ValidatorNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    time.sleep(1)
-    user = UserNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.WARNING)
-    time.sleep(1)
-    worker = WorkerNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    user = UserNode(upnp=False, off_chain_test=True, local_test=True, print_level=logging.DEBUG)
+    time.sleep(3)
+    worker = WorkerNode(upnp=False, off_chain_test=True, local_test=True, print_level=logging.DEBUG)
+    time.sleep(0.5)
+    validator = ValidatorNode(upnp=False, off_chain_test=True, local_test=True, print_level=logging.DEBUG)
     time.sleep(1)
 
     # Bootstrap roles

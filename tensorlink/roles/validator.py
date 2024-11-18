@@ -42,7 +42,6 @@ class Validator(TorchNode):
         self,
         request_queue,
         response_queue,
-        debug=True,
         print_level=logging.DEBUG,
         max_connections: int = 0,
         upnp=True,
@@ -52,7 +51,7 @@ class Validator(TorchNode):
         super(Validator, self).__init__(
             request_queue,
             response_queue,
-            debug=debug,
+            "V",
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
@@ -60,11 +59,7 @@ class Validator(TorchNode):
         )
 
         # Additional attributes specific to the Validator class
-        self.role = "V"
         self.print_level = print_level
-
-        self.rsa_pub_key = get_rsa_pub_key(self.role, True)
-        self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
 
         self.debug_print(f"Launching Validator: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
 
@@ -93,6 +88,7 @@ class Validator(TorchNode):
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
+            # self.bootstrap()
 
     def handle_data(self, data, node: Connection):
         """
@@ -311,13 +307,14 @@ class Validator(TorchNode):
         job_id = job_data["id"]
         author = job_data["author"]
         n_pipelines = job_data["n_pipelines"]
+        requesting_node = self.nodes[author]
 
         # Check network availability for job request
         assigned_workers = self.check_job_availability(job_data)
 
         # If no workers available, decline job
         if not assigned_workers:
-            self.decline_job()
+            self.send_to_node(requesting_node, b"DECLINE-JOB")
             return
 
         self.store_value(job_id, job_data)
@@ -365,7 +362,6 @@ class Validator(TorchNode):
                 return
 
         # Send the updated job data with worker info to the user
-        requesting_node = self.nodes[author]
         self.send_to_node(
             requesting_node,
             b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode()
@@ -387,6 +383,9 @@ class Validator(TorchNode):
         t = threading.Thread(target=self.monitor_job, args=(job_id,))
         self.active_jobs[job_id] = t
         t.start()
+
+    def decline_job(self):
+        pass
 
     def monitor_job(self, job_id: str):
         """Monitor job progress and workers."""
@@ -522,7 +521,6 @@ class Validator(TorchNode):
                 stats = self.nodes[worker].stats
                 if stats:
                     workers[worker] = stats
-
             self.send_to_node(node, b"ALL-WORKER-STATS" + json.dumps(workers).encode())
 
     def distribute_job(self):
@@ -567,12 +565,14 @@ class Validator(TorchNode):
                 to_block="latest"
             )
             # Initialize last_execution_block from existing proposals
-            new_entries = event_filter.get_all_entries()[-1:]
+            new_entries = event_filter.get_all_entries()
 
             while not self.terminate_flag.is_set():
                 try:
                     if first_time:
                         first_time = False
+                        if new_entries:
+                            new_entries = new_entries[-1:]
                     else:
                         new_entries = event_filter.get_new_entries()
 
@@ -591,12 +591,11 @@ class Validator(TorchNode):
                             self.proposals.append(t)
                             t.start()
 
-                    time.sleep(30)
-
                 except Exception as e:
                     self.debug_print(f"Validator -> Error while fetching ProposalCreation events: {e}",
                                      colour="bright_red", level=logging.ERROR)
-                    time.sleep(5)
+
+                time.sleep(30)
 
         except Exception as e:
             self.debug_print(f"Validator -> Critical error in proposal validator: {e}", colour="bright_red",
@@ -917,6 +916,8 @@ class Validator(TorchNode):
 
                                 if worker_address:
                                     job_workers.append(worker_address)
+                                else:
+                                    job_workers.append(self.public_key)
 
                 job_hashes.append(job_hash)
                 job_capacities.append(capacities)
@@ -1059,8 +1060,8 @@ class Validator(TorchNode):
             self.execution_listener.start()
 
         # Loop for active job and network moderation
-        while not self.terminate_flag.is_set():
-            try:
+        try:
+            while not self.terminate_flag.is_set():
                 # Handle job oversight, and inspect other jobs (includes job verification and reporting)
                 if self.jobs:
                     job = self.routing_table[self.jobs[-1]]
@@ -1069,10 +1070,11 @@ class Validator(TorchNode):
                         time.sleep(1)
                 time.sleep(1)
 
-            except KeyboardInterrupt:
-                self.terminate_flag.set()
+        except KeyboardInterrupt:
+            self.terminate_flag.set()
 
-        self.stop()
+        finally:
+            self.stop()
 
     def stop(self):
         self.save_dht_state()

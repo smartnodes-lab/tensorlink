@@ -287,8 +287,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        # TODO CPU should be able to handle 100 MB (temporary fix)
-        # memory += 400e6
+        # TODO CPU should be able to handle 1 GB? (temporary fix)
         memory += 1e9
 
     return memory

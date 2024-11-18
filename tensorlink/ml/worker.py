@@ -1,10 +1,8 @@
-import logging
-
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 from tensorlink.ml.utils import *
 from collections import deque
 import threading
-import pickle
+import logging
 import torch
 import queue
 import json
@@ -13,7 +11,6 @@ import os
 
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-os.makedirs("snapshots", exist_ok=True)
 
 
 class DistributedWorker:
@@ -22,7 +19,7 @@ class DistributedWorker:
         self.node_responses = node_responses
         self.mpc_lock = mpc_lock
         self.rolling_buffer = deque(maxlen=10)
-        self.storage_path = "./snapshots"
+        self.storage_path = "./tmp/snapshots"
 
         self.modules = {}
         self.optimizers = {}
@@ -151,7 +148,7 @@ class DistributedWorker:
 
     def store_snapshot(self, module_id, _input, _output, epoch, micro):
         # Ensure the snapshots directory exists
-        os.makedirs("snapshots", exist_ok=True)
+        os.makedirs("tmp/snapshots", exist_ok=True)
 
         # Get parameters (state_dict) and convert tensors to a serializable format
         params = {k: v.cpu().numpy().tolist() for k, v in self.modules[module_id].state_dict().items()}
@@ -167,7 +164,7 @@ class DistributedWorker:
         }
 
         # Define the filename
-        file_path = os.path.join("snapshots", f"{module_id}_epoch{epoch}_micro{micro}.json")
+        file_path = os.path.join("tmp", "snapshots", f"{module_id}_{epoch}_{micro}.json")
 
         # Write the snapshot to a JSON file
         try:
