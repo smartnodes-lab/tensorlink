@@ -546,7 +546,10 @@ class DistributedModel(nn.Module):
         child_module.n_batch = 0
 
         file_name = f"{module_hash}_{worker_id}.pth"
-        torch.save(child_module, file_name)  # Save the module to disk
+        # TODO Custom pickle function OR send state dict and recreate a model on other side
+        with open(file_name, "wb") as f:
+            pickle.dump(child_module, f)  # Save the module to disk
+
         module_info = str(child_module)
         offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
 

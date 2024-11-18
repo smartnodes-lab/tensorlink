@@ -3,6 +3,7 @@ from tensorlink.ml.utils import *
 from collections import deque
 import threading
 import logging
+import pickle
 import torch
 import queue
 import json
@@ -177,7 +178,9 @@ class DistributedWorker:
     def load_module(self, file_name, module_id, node_id):
 
         # Load the module in a separate thread
-        module = torch.load(file_name).to(self.device)
+        with open(file_name, "rb") as file:
+            module = pickle.load(file)
+
         os.remove(file_name)
 
         # Initialize queues and states

@@ -66,7 +66,7 @@ class BaseNode:
         self.node_process = None
 
         signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl+C
-        signal.signal(signal.SIGTERM, self.signal_handler)
+        # signal.signal(signal.SIGTERM, self.signal_handler)
         atexit.register(self.cleanup)
 
         self._initialized = True

@@ -69,16 +69,16 @@ if __name__ == "__main__":
     # Launch Nodes
     validator = ValidatorNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    user = UserNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.WARNING)
+    user = UserNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    worker = WorkerNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    time.sleep(1)
+    # worker = WorkerNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    # time.sleep(1)
 
     # Bootstrap roles
     val_key, val_host, val_port = validator.send_request("info", None)
 
-    worker.send_request("connect_node", (val_key, val_host, val_port))
-    time.sleep(1)
+    # worker.send_request("connect_node", (val_key, val_host, val_port))
+    # time.sleep(1)
     user.send_request("connect_node", (val_key, val_host, val_port))
     time.sleep(1)
 
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
     distributed_model.train()
 
-    for _ in range(10):
+    for _ in range(2):
         distributed_optimizer.zero_grad()
         x = torch.zeros((1, 10), dtype=torch.float)
         outputs = distributed_model(x)
@@ -118,4 +118,4 @@ if __name__ == "__main__":
 
     user.cleanup()
     validator.cleanup()
-    worker.cleanup()
+    # worker.cleanup()
