@@ -335,7 +335,8 @@ class Validator(TorchNode):
 
                     # Ensure worker isn't already assigned this module in a different pipeline
                     if worker_id not in worker_assignment:
-                        if self.recruit_worker(author, job_id, module_id, module["size"], worker_id):
+                        if self.recruit_worker(author, job_id, module_id, module["size"], worker_id, module["name"],
+                                               module["optimizer"]):
                             worker_assignment.append(worker_id)  # Assign worker to this pipeline's module
                             worker_found = True
                             time.sleep(0.25)
@@ -462,9 +463,16 @@ class Validator(TorchNode):
                     self.send_to_node(node, b"SHUTDOWN-JOB" + module_id.encode())
 
     def recruit_worker(
-            self, user_id: bytes, job_id: bytes, module_id: bytes, module_size: int, worker_id: str
+            self,
+            user_id: bytes,
+            job_id: bytes,
+            module_id: bytes,
+            module_size: int,
+            worker_id: str,
+            module_name: str,
+            optimizer_name: str
     ) -> bool:
-        data = json.dumps([user_id, job_id, module_id, module_size])
+        data = json.dumps([user_id, job_id, module_id, module_size, module_name, optimizer_name])
         data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
 
@@ -473,7 +481,7 @@ class Validator(TorchNode):
         if worker_stats["memory"] < module_size:
             return False
 
-        self.store_request(node.node_id, job_id + module_id)
+        self._store_request(node.node_id, job_id + module_id)
         self.send_to_node(node, data)
 
         start_time = time.time()
@@ -495,7 +503,7 @@ class Validator(TorchNode):
         for node_id, node in self.nodes.items():
             if node.role == "V":
                 self.send_to_node(node, b"REQUEST-WORKERS")
-                self.store_request(node_id, b"ALL-WORKER-STATS")
+                self._store_request(node_id, b"ALL-WORKER-STATS")
 
         time.sleep(6)
 
@@ -508,7 +516,7 @@ class Validator(TorchNode):
             connection = self.nodes[worker_id]
             message = b"STATS-REQUEST"
             self.send_to_node(connection, message)
-            self.store_request(connection.node_id, b"STATS")
+            self._store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
 
         time.sleep(2)
@@ -1167,7 +1175,7 @@ class Validator(TorchNode):
                     # Remove old jobs (not in jobs to upload to contract or in ones to delete
                     if job_id not in self.jobs_to_complete or job_id in self.jobs_to_delete:
                         self.jobs.remove(job_id)
-                        self.delete(job_id)
+                        self.__delete(job_id)
 
             clean_nodes(self.workers)
             clean_nodes(self.validators)

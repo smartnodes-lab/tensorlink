@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 from tensorlink.crypto.rsa import *
 from tensorlink.p2p.connection import Connection
 
@@ -206,6 +208,9 @@ class SmartNode(threading.Thread):
         # Connection Settings
         self.upnp = None
         self.nodes = {}  # node hash: Connection
+        self.rate_limit = defaultdict(lambda: {"attempts": 0, "last_attempt": 0, "blocked_until": 0})
+        self.max_attempts_per_minute = 5
+        self.block_duration = 600
 
         self.debug_colour = None
         if debug_colour:
@@ -322,7 +327,7 @@ class SmartNode(threading.Thread):
                     if "REQUEST-VALUE" + value_id in self.requests[node.node_id]:
                         value = json.loads(data[86:])
                         self.requests[node.node_id].remove("REQUEST-VALUE" + value_id)
-                        self.store_request(value_id, value)
+                        self._store_request(value_id, value)
                     else:
                         self.debug_print(f"SmartNode -> Received ghost data from node: {node.node_id}",
                                          colour="red")
@@ -432,7 +437,7 @@ class SmartNode(threading.Thread):
         if closest_node is not None:
             # The case where the stored value was not properly deleted (ie is None)
             if closest_node[1] is None:
-                self.delete(closest_node[0])
+                self.__delete(closest_node[0])
 
                 # Get another closest nodes
                 return self.query_dht(key_hash, requester, ids_to_exclude)
@@ -475,7 +480,7 @@ class SmartNode(threading.Thread):
         self.send_to_node(node, message)
 
         # Logs what value were requesting and from what nodes
-        self.store_request(node.node_id, "REQUEST-VALUE" + key_hash)
+        self._store_request(node.node_id, "REQUEST-VALUE" + key_hash)
 
         # Blocking wait to receive the data
         while "REQUEST-VALUE" + key_hash in self.requests[node.node_id]:
@@ -522,18 +527,18 @@ class SmartNode(threading.Thread):
     def request_store_value(self):
         pass
 
-    def store_request(self, node_id: str, key: str):
+    def _store_request(self, node_id: str, key: str):
         """Stores a log of the request we have made to a nodes and for what value"""
         if node_id in self.requests:
             self.requests[node_id].append(key)
         else:
             self.requests[node_id] = [key]
 
-    def remove_request(self, node_id: str, key: str):
+    def _remove_request(self, node_id: str, key: str):
         if node_id in self.requests:
             self.requests[node_id].remove(key)
 
-    def delete(self, key: str):
+    def __delete(self, key: str):
         """
         Delete a key-value pair from the DHT.
         """
@@ -561,6 +566,30 @@ class SmartNode(threading.Thread):
 
         return bucket_index
 
+    def is_blocked(self, ip_address):
+        """Check if an IP address is currently blocked."""
+        current_time = int(time.time())
+        block_info = self.rate_limit[ip_address]
+        if block_info["blocked_until"] > current_time:
+            return True
+        return False
+
+    def record_attempt(self, ip_address):
+        """Record a connection attempt for an IP address."""
+        current_time = time.time()
+        block_info = self.rate_limit[ip_address]
+
+        # Reset the attempt count if the last attempt was over a minute ago
+        if current_time - block_info["last_attempt"] > 60:
+            self.rate_limit[ip_address] = {"attempts": 0, "last_attempt": 0, "blocked_until": 0}
+
+        self.rate_limit[ip_address]["attempts"] += 1
+        self.rate_limit[ip_address]["last_attempt"] = current_time
+
+        # Block the IP if it exceeds the limit
+        if self.rate_limit[ip_address]["attempts"] > self.max_attempts_per_minute:
+            self.rate_limit[ip_address]["blocked_until"] = current_time + self.block_duration
+
     """Peer-to-peer methods"""
     def listen(self):
 
@@ -572,6 +601,17 @@ class SmartNode(threading.Thread):
 
                 # Unpack nodes info
                 connection, node_address = self.sock.accept()
+                ip_address = node_address[0]
+
+                # Check rate limiting
+                if self.is_blocked(ip_address):
+                    self.close_connection(
+                        connection,
+                        f"listen: connection refused, rate limit exceeded for {ip_address}",
+                    )
+                    continue
+
+                self.record_attempt(ip_address)
 
                 # Attempt custom handshake
                 if self.max_connections == 0 or len(self.nodes) < self.max_connections:
@@ -620,7 +660,6 @@ class SmartNode(threading.Thread):
             if node_id_hash not in self.requests:
                 self.close_connection(connection, f"Was not assigned to user: {node_id_hash}")
                 return False
-            self.remove_request(node_id_hash, self.requests[node_id_hash][-1])
 
         # If we are the instigator of the connection, we will have received a request to verify our id
         if instigator:
@@ -702,6 +741,7 @@ class SmartNode(threading.Thread):
                     our_new_port = self.get_next_port()
                     self.add_port_mapping(our_new_port, our_new_port)
                     connection.close()
+
                     self.debug_print(f"SmartNode -> Selected next port: {our_new_port} for new connection")
                     self.debug_print(f"SmartNode -> Switching connection to the new port: {node_address[0]}:{new_port}")
 
@@ -804,6 +844,10 @@ class SmartNode(threading.Thread):
                     elif role == "U":
                         self.users.append(node_id_hash)
 
+                        # If we are connecting to a user (for a job), boost connection speed
+                        if self.role == "W":
+                            thread_client.adjust_chunk_size("large")    
+
                     self.debug_print(
                         f"SmartNode -> Connected to node: {thread_client.host}:{thread_client.port}",
                         level=logging.INFO,
@@ -885,7 +929,7 @@ class SmartNode(threading.Thread):
                 if connected:
                     candidates.append(id_hash)
                 else:
-                    self.delete(id_hash)
+                    self.__delete(id_hash)
 
         # # Connect to randomly selected  validators
         # for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
@@ -901,7 +945,7 @@ class SmartNode(threading.Thread):
         #         validator_p2p_info = self.query_dht(id_hash)
         #
         #         if validator_p2p_info is None:
-        #             self.delete(id_hash)
+        #             self.__delete(id_hash)
         #             continue
         #
         #         # Connect to the validator's node and exchange information
@@ -911,7 +955,7 @@ class SmartNode(threading.Thread):
         #         )
         #
         #         if not connected:
-        #             self.delete(id_hash)
+        #             self.__delete(id_hash)
         #             continue
         #
         #         candidates.append(validator_id)
@@ -1005,9 +1049,25 @@ class SmartNode(threading.Thread):
                                      f" external port: {external_port})", level=logging.CRITICAL, colour="bright_red")
             except Exception as e:
                 if "ConflictInMapping" in str(e):
-                    pass
+                    self.debug_print(f"SmartNode -> Port {external_port} is already mapped.", level=logging.WARNING)
                 else:
                     raise e
+
+    def remove_port_mapping(self, external_port):
+        if self.upnp:
+            try:
+                # Attempt to delete the port mapping
+                result = self.upnp.deleteportmapping(external_port, "TCP")
+
+                if result is True:  # Some UPnP implementations return None on success
+                    self.debug_print(
+                        f"SmartNode -> Successfully removed UPnP port mapping for external port {external_port}")
+                else:
+                    self.debug_print(f"SmartNode -> Unexpected result when removing port mapping: {result}",
+                                     level=logging.WARNING, colour="yellow")
+            except Exception as e:
+                self.debug_print(f"SmartNode -> Error removing UPnP port mapping for port {external_port}: {e}",
+                                 level=logging.ERROR, colour="bright_red")
 
     def get_external_ip(self):
         """Get public IP address"""
@@ -1085,6 +1145,7 @@ class SmartNode(threading.Thread):
                 self.workers.remove(node_id)
 
             node.terminate_flag.set()
+            self.remove_port_mapping(node.port)
             del self.nodes[node_id]
 
     def close_connection(
@@ -1095,14 +1156,17 @@ class SmartNode(threading.Thread):
             message += f": {additional_info}"
 
         self.debug_print("SmartNode -> " + message, colour="red", level=logging.DEBUG)
-
+        self.remove_port_mapping(n.getsockname()[1])
         n.close()
 
     def stop_upnp(self) -> None:
         """Shuts down UPnP on port"""
         if self.upnp:
-            self.upnp.deleteportmapping(self.port, "TCP")
+            self.remove_port_mapping(self.port)
             self.debug_print(f"SmartNode -> stop_upnp: UPnP removed for port {self.port}")
+
+            for node_id, node in self.nodes.items():
+                self.remove_port_mapping(node.port)
 
     def stop(self) -> None:
         """Shut down nodes and all associated connections/threads"""

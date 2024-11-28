@@ -4,13 +4,10 @@ from tensorlink.p2p.connection import Connection
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from multiprocessing import shared_memory
-import torch.optim as optim
-import torch.nn as nn
 import threading
 import logging
 import pickle
 import queue
-import torch
 import time
 
 
@@ -76,7 +73,7 @@ class TorchNode(SmartNode):
                         level=logging.INFO, colour="bright_cyan"
                     )
                     module_id = data[6:70].decode()
-                    self.remove_request(node.node_id, "MODULE" + module_id)
+                    self._remove_request(node.node_id, "MODULE" + module_id)
 
                 elif b"FORWARD" == data[:7]:
                     # Basic check, must be upgraded to check if we are expecting the request
@@ -163,18 +160,42 @@ class TorchNode(SmartNode):
 
                 elif b"MODULE" == data[:6]:
                     module_id = data[6:70].decode()
-                    self.debug_print(f"TorchNode -> Received Module: {module_id}")
+                    module_name = None
+                    optimizer_name = None
+                    request_to_remove = []
 
-                    self.modules[module_id] = {
-                        "mem_info": module_id,
-                        "host": node.node_id,
-                        "forward_queue": {},
-                        "backward_queue": {},
-                    }
-                    self.state_updates[module_id] = []
+                    if node.node_id in self.requests:
+                        for req in self.requests[node.node_id]:
+                            if module_id in req:
+                                module_name = req[len(module_id):]
+                                request_to_remove.append(req)
 
-                    self.debug_print(f"TorchNode -> Loaded distributed module!",
-                                     colour="bright_cyan", level=logging.INFO)
+                            if "OPTIMIZER" in req:
+                                optimizer_name = req[9:]
+                                request_to_remove.append(req)
+
+                        for req in request_to_remove:
+                            self._remove_request(node.node_id, req)
+
+                        if module_name is not None:
+                            self.debug_print(f"TorchNode -> Received Module: {module_id}")
+
+                            self.modules[module_id] = {
+                                "mem_info": module_id,
+                                "host": node.node_id,
+                                "forward_queue": {},
+                                "backward_queue": {},
+                                "name": module_name,
+                                "optimizer": optimizer_name
+                            }
+                            self.state_updates[module_id] = []
+
+                            self.debug_print(f"TorchNode -> Loaded distributed module!",
+                                             colour="bright_cyan", level=logging.INFO)
+                        else:
+                            ghost += 1
+                    else:
+                        ghost += 1
 
                 elif b"UPDATE-TRAIN" == data[:12]:
                     mode = False if data[12:13] == b"0" else True
@@ -224,13 +245,12 @@ class TorchNode(SmartNode):
                 # Send module that is stored in shared mpc to another roles
                 name, worker_id, module_id = request["args"]
                 node = self.nodes[worker_id]
-                # model_bytes = get_from_shared_memory(size, name, encoded=True)
-                # self.send_module(module_id, model_bytes, roles)
+                node.adjust_chunk_size("large")
                 self.send_module(name, module_id, node)
                 self.response_queue.put({"status": "SUCCESS", "return": None})
 
             elif req_type == "check_loaded":
-                # Check if sent module has been received and loaded on the other roles
+                # Check if sent module has been received and loaded on the other nodes
                 worker_id, module_id = request["args"]
                 return_val = False
 
@@ -283,7 +303,7 @@ class TorchNode(SmartNode):
                 for module_id, module in self.modules.items():
                     if "mem_info" in module:
                         name = module["mem_info"]
-                        return_val = (name, module_id, module["host"])
+                        return_val = (name, module_id, module["host"], module["name"], module["optimizer"])
                         del module["mem_info"]
                     elif "termination" in module:
                         return_val = module_id
@@ -444,7 +464,7 @@ class TorchNode(SmartNode):
                 self.response_queue.put({"status": "SUCCESS", "return": (self.rsa_key_hash, self.host, self.port)})
 
             elif req_type == "stop":
-                self.response_queue.put({"status": "SUCCESS", "return": None})
+                self.response_queue.put({"status": "SUCCESS", "return": True})
                 self.terminate_flag.set()
 
             elif req_type == "check_shutdown":
@@ -520,7 +540,7 @@ class TorchNode(SmartNode):
     def send_module(self, file_name: bytes, module_id: str, node: Connection):
         self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",
                          level=logging.INFO, colour="bright_blue")
-        self.store_request(node.node_id, "MODULE" + module_id)
+        self._store_request(node.node_id, "MODULE" + module_id)
         self.state_updates[module_id] = []
         self.send_to_node_from_file(node, file_name, b"MODULE" + module_id.encode())
 

@@ -1,7 +1,7 @@
 {
     "api": {
-        "core": "0x26e293d30e8C7E9D41331b91aDb27827b9d203bd",
-        "multi-sig": "0x3C9EB394e4e506eEae867AafB8501E4284edeb98",
+        "core": "0x011629EcB7E2e58cbE06aA2FC58e5674920C48D1",
+        "multi-sig": "0x4E18fAe12c0E36C9B14afD5719Afed7C72aa1E10",
         "chain-url": "http://127.0.0.1:7545",
         "endpoint-url": "http://127.0.0.1:5029"
     },
@@ -14,13 +14,6 @@
                     38751
                 ]
             ]
-        },
-        "testnet": []
-    },
-    "58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e": {
-        "port": 38751
-    },
-    "b54c26174b5fc449d2b628852b6b0e801d900deff0de20c292549f38e96b696e": {
-        "port": 38829
+        }
     }
 }

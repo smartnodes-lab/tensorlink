@@ -8,9 +8,9 @@ from tensorlink.crypto.rsa import *
 # from tensorlink.mpc.coordinator import ValidatorCoordinator
 
 
-node1 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=True)
-user = User(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=True)
-worker = Worker(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=True)
+node1 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
+user = User(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
+worker = Worker(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
 # pk = get_rsa_pub_key(b"V2")
 # node2 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True)
 # node2.rsa_pub_key = get_public_key_bytes(pk)

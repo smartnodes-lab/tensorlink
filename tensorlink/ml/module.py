@@ -1,21 +1,22 @@
-import os
-
 from tensorlink.ml.optim import create_distributed_optimizer, DistributedParameter
 from tensorlink.ml.utils import *
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 from transformers.utils import ModelOutput
+from transformers import PreTrainedModel
 from collections import defaultdict
 from typing import Generator, OrderedDict
 import torch.nn as nn
 import threading
 import hashlib
 import random
-import pickle
 import torch
 import queue
 import time
+import json
+import os
 import gc
+
 
 MAX_WAIT_TIME = 300
 
@@ -213,7 +214,11 @@ class DistributedModel(nn.Module):
                     worker_id = self.distributed_graph[module_id_bytes]["workers"][-1]
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
-                    size, shm_name = store_in_shared_memory((detach_tensor(loss), None))
+                    loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
+                    size, shm_name = store_in_shared_memory(
+                        loss_bytes,
+                        encoded=True
+                    )
                     self.send_request("send_backward", (worker_id, size, shm_name, tag))
 
                     # Wait for response, change to appending waiting thread to list in master
@@ -225,7 +230,8 @@ class DistributedModel(nn.Module):
                         if args is not None:
                             waiting = False
                             size, name = args
-                            loss = get_from_shared_memory(size, name)
+                            loss_bytes = get_from_shared_memory(size, name, encoded=True)
+                            loss = bytes_to_tensor(loss_bytes)
 
                         if time.time() - start_time >= MAX_WAIT_TIME:
                             # Logic here to request another worker take his place
@@ -238,7 +244,7 @@ class DistributedModel(nn.Module):
                 if isinstance(assoc_input, torch.Tensor):
                     assoc_input.backward(loss)
             else:
-                raise "Expect vals to be of length 2 or 3."
+                raise "Expect vals to be of length 1 or 2."
 
     def get_info_from_module_id(self, mod_id: list, micro: int = None):
         for info in self.distributed_graph.values():
@@ -288,10 +294,6 @@ class DistributedModel(nn.Module):
             # Otherwise, yield the model itself and then recursively yield its children.
             yield self.model
             yield from self.model.children()
-
-    from typing import Generator
-    import threading
-    import torch
 
     def parameters(self, recurse: bool = True, distributed: bool = True, load: bool = True) -> Generator:
         """
@@ -409,7 +411,6 @@ class DistributedModel(nn.Module):
     def distribute_model(self, config=None):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
-
         if config is None:
             config = self.parse_model(self.model, self.max_module_size)
 
@@ -436,7 +437,7 @@ class DistributedModel(nn.Module):
 
     def parse_model(
         self,
-        model,
+        model: nn.Module,
         config: dict = None,
         ids: list = None,
         handle_layer: bool = True,
@@ -444,11 +445,10 @@ class DistributedModel(nn.Module):
         """
         Parse model based on some minimum submodule size and return a config file containing the
         distributed model configuration.
-        # TODO update mpc of semi-offloaded modules
+        # TODO Commented out model distribution schemes for data processing on user end.
         """
         if config is None:
             config = {}
-        if ids is None:
             ids = []
 
         # Create offloaded module data structure for config file
@@ -460,8 +460,8 @@ class DistributedModel(nn.Module):
                 "type": "offloaded",
                 "id_hash": module_id,
                 "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                    :-1
-                ],  # class name
+                          :-1
+                          ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
                 "workers": [],
@@ -478,51 +478,70 @@ class DistributedModel(nn.Module):
                 "type": "loaded",
                 "id_hash": module_id,
                 "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                    :-1
-                ],  # class name
+                          :-1
+                          ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
                 "workers": [],
             }
             return module_id, data
 
-        named_children = list(model.named_children())
-        model_size = MemoryEstimator().estimate_model_memory(model, (3, 100, 100)).total_bytes
-        max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
-        max_worker_mem = max_worker[1]["memory"]
+        # named_children = list(model.named_children())
+        model_size = estimate_memory(model, self.training, batch_size=1024)
+        assert model_size < 24e9, "Models must currently require under ~24Gb of GPU memory due to network availability."
+        # max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
+        # max_worker_mem = max_worker[1]["memory"]
 
-        # If we do not want to handle initial layers and model can fit on worker
-        if handle_layer is False and model_size <= max_worker_mem:
+        # If we do not want to handle initial layers and model can fit on worker.
+        # Temporarily, this is the only option possible as model size must be less than 24
+        if model_size <= 24e9:
             k, v = create_offloaded(model, [-1], model_size)
+            v["name"] = None
+
+            if not isinstance(model, PreTrainedModel):
+                try:
+                    torch.jit.script(model)
+
+                except Exception as e:
+                    raise RuntimeError(
+                        "The model cannot be processed for distributed training due to compatibility or security "
+                        "constraints. Support for additional model types and improved security handling will be "
+                        "included in future updates."
+                    )
+
+            else:
+                v["name"] = model.name_or_path
+
             config[k] = v
 
-        # Otherwise we break the module down into its components and handle
-        else:
-            for i in range(len(named_children)):
-                # Unpack module info
-                name, submodule = named_children[i]
-                module_memory = estimate_memory(submodule)
-
-                # Update current module id
-                new_ids = ids + [i]
-                module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
-
-                # Try handling the layer with user memory if possible
-                if self.user_memory >= module_memory and handle_layer:
-                    self.user_memory -= module_memory
-                    k, v = create_loaded(submodule, new_ids, module_memory)
-                    config[k] = v
-                    handle_layer = False
-                elif module_memory <= max_worker_mem:
-                    k, v = create_offloaded(submodule, new_ids, module_memory)
-                    config[k] = v
-                else:
-                    # Recursively break down larger modules that can't fit in memory
-                    sub_config = self.parse_model(submodule, config=config.copy(), ids=new_ids,
-                                                  handle_layer=handle_layer)
-                    k, v = create_loaded(submodule, new_ids, module_memory)
-                    v["subconfig"] = sub_config
-                    config[k] = v
+        # Otherwise we break the module down into its components and handle TODO
+        # else:
+        #     for i in range(len(named_children)):
+        #         # Unpack module info
+        #         name, submodule = named_children[i]
+        #         module_memory = estimate_memory(submodule)
+        #
+        #         # Update current module id
+        #         new_ids = ids + [i]
+        #         module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
+        #
+        #         # Try handling the layer with user memory if possible
+        #         # if self.user_memory >= module_memory and handle_layer:
+        #         #     self.user_memory -= module_memory
+        #         #     k, v = create_loaded(submodule, new_ids, module_memory)
+        #         #     config[k] = v
+        #         #     handle_layer = False
+        #
+        #         if module_memory <= 24e9:
+        #             k, v = create_offloaded(submodule, new_ids, module_memory)
+        #             config[k] = v
+        #         else:
+        #             # Recursively break down larger modules that can't fit in memory
+        #             sub_config = self.parse_model(submodule, config=config.copy(), ids=new_ids,
+        #                                           handle_layer=handle_layer)
+        #             k, v = create_loaded(submodule, new_ids, module_memory)
+        #             v["subconfig"] = sub_config
+        #             config[k] = v
 
         return config
 
@@ -545,37 +564,49 @@ class DistributedModel(nn.Module):
         child_module.id = module_hash
         child_module.n_batch = 0
 
-        file_name = f"{module_hash}_{worker_id}.pth"
+        file_name = f"{module_hash}_{worker_id}.pt"
         # TODO Custom pickle function OR send state dict and recreate a model on other side
-        with open(file_name, "wb") as f:
-            pickle.dump(child_module, f)  # Save the module to disk
+        if isinstance(child_module, PreTrainedModel):
+            state_dict = child_module.state_dict()
+            state_dict["module_config"] = child_module.config.to_dict()
+            state_dict["module_class"] = child_module.__class__.__name__
+            torch.save(state_dict, file_name)  # Save the module to disk
+        else:
+            try:
+                scripted_module = torch.jit.script(child_module)
+                scripted_module.save(file_name)
+            except Exception as e:
+                raise RuntimeError(
+                    "The model cannot be processed for distributed training due to compatibility or security "
+                    "constraints. Support for additional model types and improved security handling will be included "
+                    "in future updates."
+                )
 
         module_info = str(child_module)
         offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
 
         # Detach and clear the parameters of the child_module to free memory
+        # for name, param in child_module.named_parameters():
+        #     # Create the DistributedParameter.
+        #     module_hash = hash(child_module)
+        #     distributed_param = DistributedParameter(child_module, module_hash, worker_id, name)
+        #
+        #     # Use a safe name for attribute registration.
+        #     safe_name = name.replace('.', '_')
+        #     setattr(child_module, safe_name, distributed_param)
+        #
+        #     # Replace the parameter in _parameters.
+        #     child_module._parameters[safe_name] = distributed_param
+        #     offloaded_module.add_distributed_parameter(safe_name, distributed_param)
+        #
+        #     # Remove the original parameter using its original name.
+        #     if name in child_module._parameters:
+        #         del child_module._parameters[name]
 
-        for name, param in child_module.named_parameters():
-            # Create the DistributedParameter.
-            module_hash = hash(child_module)
-            distributed_param = DistributedParameter(child_module, module_hash, worker_id, name)
-
-            # Use a safe name for attribute registration.
-            safe_name = name.replace('.', '_')
-            setattr(child_module, safe_name, distributed_param)
-
-            # Replace the parameter in _parameters.
-            child_module._parameters[safe_name] = distributed_param
-            offloaded_module.add_distributed_parameter(safe_name, distributed_param)
-
-            # Remove the original parameter using its original name.
-            if name in child_module._parameters:
-                del child_module._parameters[name]
-
-        # for param in child_module.parameters():
-        #     param.detach_()  # Detach from the computation graph
-        #     param.requires_grad = False  # Ensure no gradients are computed
-        #     param.data = torch.empty(0)  # Clear the data in the parameter
+        for param in child_module.parameters():
+            param.detach_()  # Detach from the computation graph
+            param.requires_grad = False  # Ensure no gradients are computed
+            param.data = torch.empty(0)  # Clear the data in the parameter
 
         # Optional: Clear any buffers (like batch norm running stats) in the child module
         for buffer_name, buffer in child_module.named_buffers(recurse=False):
@@ -649,6 +680,7 @@ class OffloadedModule(nn.Module):
 
         # try:
         # Send the module to the worker roles
+
         self.parent_model.send_request("send_model", (name, self.worker_id, self.module_id))
 
         # Wait for the module to be loaded on worker
@@ -689,8 +721,15 @@ class OffloadedModule(nn.Module):
             )
 
         detached_args = handle_output(args).clone().detach()
+        args_bytes = json.dumps(tensor_to_bytes(detached_args)).encode()
+        kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+        forward_bytes = args_bytes + b"|" + kwargs_bytes
 
-        size, shm_name = store_in_shared_memory((detached_args, kwargs))
+        size, shm_name = store_in_shared_memory(
+            forward_bytes,
+            encoded=True
+        )
+
         # Relay forward pass to next roles
         self.parent_model.send_request("send_forward", (self.worker_id, size, shm_name, tag))
 
@@ -704,13 +743,13 @@ class OffloadedModule(nn.Module):
             if args is not None:
                 waiting = False
                 size, name = args
-                output = get_from_shared_memory(size, name)
+                output_bytes = get_from_shared_memory(size, name)
 
             if time.time() - start_time >= MAX_WAIT_TIME:
                 # Logic here to request another worker take his place
                 waiting = False
 
-        output = enable_grad(output)
+        output = enable_grad(bytes_to_tensor(output_bytes))
 
         self.parent_model.send_request("release_memory", ("forward_queue", self.module_id, key))
 

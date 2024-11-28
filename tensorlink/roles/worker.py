@@ -89,15 +89,18 @@ class Worker(TorchNode):
                     try:
                         if node.role == "V":
                             # Accept job request from validator if we can handle it
-                            user_id, job_id, module_id, module_size = json.loads(data[7:])
+                            user_id, job_id, module_id, module_size, module_name, optimizer_name = json.loads(data[7:])
 
                             if (
                                 self.available_memory >= module_size
                             ):  # TODO Ensure were active?
                                 # Respond to validator that we can accept the job
+                                if module_name is None:
+                                    module_name = ""
 
                                 # Store a request to wait for the user connection
-                                self.store_request(user_id, module_id)
+                                self._store_request(user_id, module_id + module_name)
+                                self._store_request(user_id, "OPTIMIZER" + optimizer_name)
                                 data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
 
                                 # Update available memory

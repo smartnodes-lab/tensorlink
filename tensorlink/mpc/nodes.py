@@ -21,18 +21,24 @@ import sys
 
 def spinning_cursor():
     """Generator for a spinning cursor animation."""
-    for cursor in itertools.cycle('|/-\\'):
+    for cursor in "|/-\\":
         yield cursor
 
 
 def show_spinner(stop_event, message="Processing"):
-    """Displays a spinner in the console."""
+    """
+    Displays a spinner in the console.
+
+    Args:
+        stop_event (threading.Event): Event to signal when to stop the spinner.
+        message (str): The message to display alongside the spinner.
+    """
     spinner = spinning_cursor()
     while not stop_event.is_set():
         sys.stdout.write(f"\r{message} {next(spinner)}")
         sys.stdout.flush()
         time.sleep(0.1)
-    sys.stdout.write("\r")  # Clear the spinner
+    sys.stdout.write("\r" + " " * (len(message) + 2) + "\r")  # Clear the line
     sys.stdout.flush()
 
 
@@ -67,7 +73,7 @@ class BaseNode:
 
         signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl+C
         # signal.signal(signal.SIGTERM, self.signal_handler)
-        atexit.register(self.cleanup)
+        # atexit.register(self.cleanup)
 
         self._initialized = True
         self.setup()
@@ -86,8 +92,9 @@ class BaseNode:
         # Process cleanup
         if self.node_process is not None and self.node_process.exitcode is None:
             # Send a stop request to the role instance
-            self.send_request("stop", (None,), timeout=3)
-            self.node_process.join(timeout=10)
+            response = self.send_request("stop", (None,), timeout=3)
+            if response:
+                self.node_process.join(timeout=10)
 
             # If the process is still alive, terminate it
             if self.node_process.is_alive():
@@ -217,41 +224,44 @@ class UserNode(BaseNode):
         role_instance.start()
         role_instance.join()
 
-    def create_distributed_model(self, model, n_pipelines, optimizer_type=None, dp_factor=None):
-        stop_spinner = threading.Event()
-        spinner_thread = threading.Thread(target=show_spinner, args=(stop_spinner, "Creating distributed model"))
+    def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None, dp_factor=None):
+        # stop_spinner = threading.Event()
+        # spinner_thread = threading.Thread(target=show_spinner, args=(stop_spinner, "Creating distributed model"))
 
         try:
             # Start the spinner
-            spinner_thread.start()
+            # spinner_thread.start()
 
             dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, n_pipelines)
-            self.send_request("request_workers", None)
-            time.sleep(3)
-            workers = self.send_request("check_workers", None)
-            if len(workers) == 0:
-                self.send_request("request_workers", None)
-                time.sleep(5)
-                workers = self.send_request("check_workers", None)
+            # self.send_request("request_workers", None)
+            # time.sleep(3)
+            # workers = self.send_request("check_workers", None)
+            # if len(workers) == 0:
+            #     self.send_request("request_workers", None)
+            #     time.sleep(5)
+            #     workers = self.send_request("check_workers", None)
 
             if optimizer_type is None:
                 optimizer_type = torch.optim.Adam
 
-            dist_model.worker_info = workers
-            if len(workers) == 0:
-                self.send_request("debug_print", (
-                    "Job creation failed: network at capacity (not enough workers)!", "bright_red", logging.CRITICAL))
-                return None, None
+            # dist_model.worker_info = workers
+            # if len(workers) == 0:
+            #     self.send_request("debug_print", (
+            #         "Job creation failed: network at capacity (not enough workers)!", "bright_red", logging.CRITICAL))
+            #     return None, None
 
+            dist_model.training = training
             distribution = dist_model.parse_model(model, handle_layer=False)
+
+            if training:
+                for module_id, module in distribution.items():
+                    if module["type"] == "offloaded":
+                        module["optimizer"] = f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                        module["training"] = training
+
             distributed_config = self.send_request("request_job", (n_pipelines, 1, distribution))
 
-            if distributed_config:
-                for module_id, module_info in distributed_config.items():
-                    if module_info["type"] == "offloaded":
-                        module, module_name = access_module(model, module_info["mod_id"])
-                        setattr(module, "optimizer", optimizer_type)
-            else:
+            if not distributed_config:
                 print("Could not obtain job from network... Please try again.")
                 return False
 
@@ -265,9 +275,10 @@ class UserNode(BaseNode):
             return dist_model, _create_distributed_optimizer
 
         finally:
+            pass
             # Stop the spinner
-            stop_spinner.set()
-            spinner_thread.join()
+            # stop_spinner.set()
+            # spinner_thread.join()
 
     def cleanup(self):
         """Downloads parameters from workers before shutting down"""

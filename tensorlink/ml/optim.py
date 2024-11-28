@@ -94,7 +94,8 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             """
             # Extract parameters for local optimizer (parameters not offloaded)
             params = distributed_model.parameters(distributed=False)
-            super().__init__(params, **_optimizer_kwargs)
+            if len(list(params)) > 0:
+                super().__init__(params, **_optimizer_kwargs)
             # TODO pass the references to offloaded module optimizers when updating state
 
             self.model = distributed_model

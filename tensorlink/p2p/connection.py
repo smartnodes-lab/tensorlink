@@ -11,7 +11,7 @@ import os
 import gc
 
 
-CHUNK_SIZE = 4096
+CHUNK_SIZE = 2048
 
 
 class Connection(threading.Thread):
@@ -44,14 +44,11 @@ class Connection(threading.Thread):
         self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
         self.sock.settimeout(10)
-        self.chunk_size = 16_777_216
+        self.chunk_size = CHUNK_SIZE
 
         # End of transmission + compression characters for the network messages.
         self.EOT_CHAR = b"HELLOCHENQUI"
         self.COMPR_CHAR = 0x02.to_bytes(16, "big")
-
-        if self.main_node.role == "V":
-            self.chunk_size = 4096
 
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
@@ -92,7 +89,7 @@ class Connection(threading.Thread):
                     prefix = chunk[:70]  # MODULE + module_id
                     buffer += chunk[70:]
                 elif b"PARAMETERS" == chunk[:10]:
-                    prefix = chunk[:74] # PARAMETERS + module_id
+                    prefix = chunk[:74]  # PARAMETERS + module_id
                     buffer += chunk[74:]
                 else:
                     buffer += chunk
@@ -127,28 +124,6 @@ class Connection(threading.Thread):
 
         self.sock.settimeout(None)
         self.sock.close()
-
-    def compress(self, data):
-        compressed = data
-
-        try:
-            compressed = base64.b64encode(zlib.compress(data, 6))
-        except Exception as e:
-            self.main_node.debug_print(f"Connection -> compression-error: {e}", level=logging.CRITICAL,
-                                       colour="bright_red")
-
-        return compressed
-
-    def decompress(self, data):
-        decompressed = base64.b64decode(data)
-
-        try:
-            decompressed = zlib.decompress(decompressed)
-        except Exception as e:
-            self.main_node.debug_print(f"Connection -> decompression-error: {e}", colour="bright_red",
-                                       level=logging.CRITICAL)
-
-        return decompressed
 
     def send(self, data: bytes, compression: bool = False):
         try:
@@ -213,8 +188,8 @@ class Connection(threading.Thread):
 
                     self.sock.sendall(chunk)
                     chunk_number += 1
-                    #
-                    # gc.collect()
+
+                    gc.collect()
 
                 self.sock.sendall(self.EOT_CHAR)
 
@@ -252,3 +227,31 @@ class Connection(threading.Thread):
         except Exception as e:
             self.main_node.debug_print(f"Connection -> file writing error: {e}", level=logging.ERROR,
                                        colour="bright_red")
+
+    def compress(self, data):
+        compressed = data
+
+        try:
+            compressed = base64.b64encode(zlib.compress(data, 6))
+        except Exception as e:
+            self.main_node.debug_print(f"Connection -> compression-error: {e}", level=logging.CRITICAL,
+                                       colour="bright_red")
+
+        return compressed
+
+    def decompress(self, data):
+        decompressed = base64.b64decode(data)
+
+        try:
+            decompressed = zlib.decompress(decompressed)
+        except Exception as e:
+            self.main_node.debug_print(f"Connection -> decompression-error: {e}", colour="bright_red",
+                                       level=logging.CRITICAL)
+
+        return decompressed
+
+    def adjust_chunk_size(self, chunk_size: str = None):
+        if chunk_size == "large":
+            self.chunk_size = CHUNK_SIZE ** 2
+        else:
+            self.chunk_size = CHUNK_SIZE

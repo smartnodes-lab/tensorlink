@@ -1,4 +1,6 @@
 from tensorlink.ml.utils import estimate_memory
+from transformers import PreTrainedModel
+from huggingface_hub import HfApi
 import torch.nn as nn
 import hashlib
 import random
@@ -143,7 +145,62 @@ def handle_layers(
     return config, user_memory, worker_info
 
 
-def simplify_config(config: dict):
-    for k, v in config.items():
-        config[k] = v["type"]
-    return config
+class ModelParser:
+    def __init__(self, user_memory: int, max_module_size: int = 16e9):
+        self.user_memory = user_memory
+        self.max_module_size = max_module_size
+
+    def create_distributed_config(
+        self,
+        module: nn.Module,
+        config: dict = None,
+        ids: list = None,
+        data_obfuscation=False
+    ):
+        if config is None:
+            config = {}
+            ids = []
+
+        module_size = estimate_memory(module)
+        module_children = list(module.named_children())
+
+        # Offload model if under 24 Gb and data obfuscation is not required
+        if data_obfuscation is False and module_size <= self.max_module_size:
+            k, v = create_offloaded(module, [-1], module_size)
+            config[k] = v
+
+        # Break down module further
+        else:
+            for i in range(len(module_children)):
+                submodule_name, submodule = module_children[i]
+                submodule_memory = estimate_memory(submodule)
+                submodule_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
+
+                # Update current submodule ID
+                new_ids = ids + [i]
+
+                # Handle on worker if we do not need to load on user device
+                if submodule_memory <= self.max_module_size and data_obfuscation is False:
+                    k, v = create_offloaded(submodule, new_ids, submodule_memory)
+                    config[k] = v
+
+                # Handle module on user device if able
+                elif self.user_memory >= submodule_memory and data_obfuscation:
+                    self.user_memory -= submodule_memory
+                    k, v = create_loaded(submodule, new_ids, submodule_memory)
+                    config[k] = v
+                    data_obfuscation = False
+
+                # Else we break down the model even further
+                else:
+                    sub_config = self.create_distributed_config(
+                        submodule,
+                        config=config.copy(),
+                        ids=new_ids,
+                        data_obfuscation=data_obfuscation
+                    )
+                    k, v = create_loaded(submodule, new_ids, submodule_memory)
+                    v["subconfig"] = sub_config
+                    config[k] = v
+
+        return config

@@ -173,7 +173,7 @@ class User(TorchNode):
                                  level=logging.WARNING)
 
         except Exception as e:
-            self.debug_print(f"User -> handle job acception error: {e}", level=logging.CRITICAL,
+            self.debug_print(f"User -> handle job accept error: {e}", level=logging.CRITICAL,
                              colour="bright_red")
             raise e
 
@@ -238,7 +238,7 @@ class User(TorchNode):
 
             # Delete space for roles info if not found and move on to the next validator
             if node_info is None:
-                self.delete(validator_id)
+                self.__delete(validator_id)
                 self.debug_print(
                     f"User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
@@ -252,7 +252,7 @@ class User(TorchNode):
             )
 
             if not connected:
-                self.delete(validator_id)
+                self.__delete(validator_id)
                 self.debug_print(
                     f"User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
@@ -332,7 +332,7 @@ class User(TorchNode):
         if validator.node_id not in job_info["seed_validators"]:
             raise "Validator not a seed validator"
         message = b"JOB-REQ" + json.dumps(job_info).encode()
-        self.store_request(validator.node_id, job_info["id"])
+        self._store_request(validator.node_id, job_info["id"])
         self.send_to_node(validator, message)
         start_time = time.time()
 

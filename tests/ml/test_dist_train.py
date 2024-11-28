@@ -28,7 +28,7 @@ Description:
     - Logs training progress, including model connection details, loss calculations, and optimizer steps.
 """
 from tensorlink import UserNode, WorkerNode, ValidatorNode
-from transformers import BertTokenizer, BertForSequenceClassification
+from transformers import BertTokenizer, BertForSequenceClassification, AutoTokenizer, AutoModelForCausalLM
 from torch.nn.functional import mse_loss
 import torch.nn as nn
 import torch
@@ -53,50 +53,32 @@ PIPELINES = 1
 DP_FACTOR = 1
 
 
-class Dummy(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(10, 10)
-        self.fc2 = nn.Linear(10, 10)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.fc2(x)
-        return x
-
-
 if __name__ == "__main__":
     # Launch Nodes
-    validator = ValidatorNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    validator = ValidatorNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    user = UserNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    user = UserNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    # worker = WorkerNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    # time.sleep(1)
+    worker = WorkerNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
+    time.sleep(1)
 
     # Bootstrap roles
-    val_key, val_host, val_port = validator.send_request("info", None)
-
+    # val_key, val_host, val_port = validator.send_request("info", None)
+    #
     # worker.send_request("connect_node", (val_key, val_host, val_port))
     # time.sleep(1)
-    user.send_request("connect_node", (val_key, val_host, val_port))
-    time.sleep(1)
+    # user.send_request("connect_node", (val_key, val_host, val_port))
+    # time.sleep(1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # tokenizer = AutoTokenizer.from_pretrained("google/gemma-2b-it",
-    #                                           token="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")
-    # model = AutoModelForCausalLM.from_pretrained("google/gemma-2b-it",
-    #                                           token="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")
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    # model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
-    model = Dummy()
+    model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
 
     distributed_model, distributed_optimizer = user.create_distributed_model(
         model=model,
-        n_pipelines=PIPELINES,
-        optimizer_type=torch.optim.Adam,
-        dp_factor=1
+        training=True,
+        optimizer_type=torch.optim.Adam
     )
     del model
 
@@ -109,13 +91,13 @@ if __name__ == "__main__":
 
     for _ in range(2):
         distributed_optimizer.zero_grad()
-        x = torch.zeros((1, 10), dtype=torch.float)
+        x = torch.zeros((1, 1), dtype=torch.long)
         outputs = distributed_model(x)
-        # outputs = outputs.logits
+        outputs = outputs.logits
         loss = mse_loss(outputs, outputs)
         loss.backward()
         distributed_optimizer.step()
 
     user.cleanup()
+    worker.cleanup()
     validator.cleanup()
-    # worker.cleanup()

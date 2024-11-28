@@ -1,16 +1,20 @@
+import base64
+import importlib
+from typing import Tuple, Dict, Any, List, Optional
+from transformers import optimization as hf_optim
 from transformers.utils import ModelOutput
 from collections import defaultdict
-import torch.nn as nn
-import inspect
-import torch
-import ast
-import torch
-import torch.nn as nn
-from typing import Tuple, Dict, Any, List, Optional
 from dataclasses import dataclass
-import math
+import torch.nn as nn
 from enum import Enum
 import numpy as np
+import importlib
+import inspect
+import torch
+import json
+import math
+import ast
+import io
 
 
 class MemoryType(Enum):
@@ -262,13 +266,13 @@ class MemoryEstimator:
         return input_shape
 
 
-def format_memory_size(bytes: int) -> str:
-    """Format memory size in human-readable format."""
+def format_memory_size(number: int) -> str:
+    """Format memory size in readable format."""
     for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes < 1024:
-            return f"{bytes:.2f} {unit}"
-        bytes /= 1024
-    return f"{bytes:.2f} TB"
+        if number < 1024:
+            return f"{number:.2f} {unit}"
+        number /= 1024
+    return f"{number:.2f} TB"
 
 
 distributed_module_ids = []
@@ -288,42 +292,41 @@ def get_gpu_memory():
 
     else:
         # TODO CPU should be able to handle 1 GB? (temporary fix)
-        memory += 1e9
+        memory += 4e9
 
     return memory
 
 
-def estimate_memory(module: nn.Module, batch_size: int = 256, input_size=(3, 224, 224)):
+def estimate_memory(module: nn.Module, training: bool = True, batch_size: int = 256, max_input_size=(3, 224, 224)):
     """
     Estimate the memory usage of a module in bytes, considering parameters and approximations
     for activations without performing a forward pass.
 
     Args:
         module (nn.Module): The PyTorch module.
+        training (bool): True if training is required during module usage.
         batch_size (int): The batch size of input data.
-        input_size (tuple): The size of a single input (C, H, W).
+        max_input_size (tuple): The size of a single input (C, H, W).
 
     Returns:
         int: The estimated memory usage in bytes.
     """
-    memory_usage = 0
-
-    # Estimate memory for model parameters
-    for param in module.parameters():
-        memory_usage += param.numel() * param.element_size()
+    element_size = next(module.parameters()).element_size()
+    memory_usage = sum([p.numel() * p.element_size() for p in module.parameters()])
 
     # Estimate memory for gradients (same size as parameters during training)
-    # if module.training:
-    memory_usage *= 2
+    if training:
+        memory_usage *= 2  # Gradients
+        memory_usage *= 2  # Optimizer estimate
 
-    # Approximate memory for input data
-    input_memory = batch_size * torch.prod(torch.tensor(input_size)) * 4  # float32 inputs
-    memory_usage += input_memory.item()
+    input_size = batch_size
+    for i in range(len(max_input_size)):
+        input_size *= max_input_size[i]
 
-    # Estimate memory for activations based on layer type (rough estimation)
-    activation_factor = 1.5 if isinstance(module, (nn.Conv2d, nn.Linear)) else 1.2
-    activation_memory = input_memory * activation_factor * len(list(module.children()))
-    memory_usage += activation_memory
+    activation_state = input_size * element_size
+
+    memory_usage += input_size
+    memory_usage += activation_state
 
     return int(memory_usage)
 
@@ -519,7 +522,7 @@ def enable_grad(tensor):
 
 def handle_output(tensor):
     """
-    Handle various output types from models:
+    Handle various output types from models, convert to their raw tensor form:
     - Check for specific attributes like `logits` and `last_hidden_state`.
     - If output is a tuple, return the first element (assumed to be the main output tensor).
     - If output is a dictionary, check common keys or return the first tensor found.
@@ -659,6 +662,7 @@ def chunk(inputs, chunks):
     Chunks the inputs into the specified number of chunks.
     Handles both tensor and ModelOutput types.
     """
+
     if isinstance(inputs, torch.Tensor):
         return torch.chunk(inputs, chunks)
 
@@ -693,3 +697,83 @@ def chunk(inputs, chunks):
 
     else:
         return inputs
+
+
+def get_optimizer_from_name(optimizer_name):
+    optimizer_class = None
+
+    module, name = optimizer_name.rsplit(".", 1)
+
+    # Check in torch.optim
+    if "torch.optim" in module:
+        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
+
+    # Check in transformers.optimization
+    elif "transformers.optimization" in module:
+        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
+
+    if optimizer_class is None:
+        raise ValueError(f"Optimizer class '{optimizer_name}' not found.")
+
+    return optimizer_class
+
+
+def tensor_to_bytes(tensor):
+    module_name = tensor.__class__.__module__
+    class_name = tensor.__class__.__name__
+
+    if isinstance(tensor, torch.Tensor):
+        buffer = io.BytesIO()
+        torch.save(tensor, buffer)
+        tensor_bytes = base64.b64encode(
+            buffer.getvalue()
+        ).decode()
+        serialized_data = tensor_bytes
+    elif isinstance(tensor, dict):
+        serialized_data = {}
+        for k, v in tensor.items():
+            if isinstance(v, torch.Tensor):
+                buffer = io.BytesIO()
+                torch.save(v, buffer)
+                tensor_bytes = base64.b64encode(
+                    buffer.getvalue()
+                ).decode()
+                serialized_data[k] = tensor_bytes
+            else:
+                serialized_data[k] = v
+    else:
+        raise "Invalid tensor structure"
+
+    return {
+        "module": module_name,
+        "class": class_name,
+        "data": serialized_data
+    }
+
+
+def bytes_to_tensor(tensor_data):
+    if isinstance(tensor_data, bytes):
+        tensor_data = json.loads(tensor_data)
+
+    module = importlib.import_module(tensor_data["module"])
+    output_class = getattr(module, tensor_data["class"])
+
+    if isinstance(tensor_data["data"], dict):
+        reconstructed_data = {}
+        for k, v in tensor_data["data"].items():
+            if isinstance(v, str):
+                v = base64.b64decode(v)
+                buffer = io.BytesIO(v)
+                reconstructed_data[k] = torch.load(buffer, weights_only=True)
+            else:
+                reconstructed_data[k] = v
+
+        return output_class(**reconstructed_data)
+
+    elif isinstance(tensor_data["data"], str):
+        tensor_data["data"] = base64.b64decode(tensor_data["data"])
+        buffer = io.BytesIO(tensor_data["data"])
+        return torch.load(buffer, weights_only=True)
+
+    else:
+        raise "Invalid tensor structure"

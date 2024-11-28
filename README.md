@@ -3,18 +3,18 @@
 
 ## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch
 
-**Tensorlink** is a peer-to-peer platform designed to scale neural network training and inference in PyTorch. By breaking
-down and distributing models across a network of peers, Tensorlink allows for efficient training and execution of 
-large models on consumer hardware, providing a compelling alternative to cloud services. Tensorlink leverages advanced 
-techniques such as automated model parsing and pipeline parallelism to simplify and enhance the training process, 
-making large, state-of-the-art models accessible to a wider audience.
+**Tensorlink** is a library designed to simplify the scaling of PyTorch model training and inference, offering tools 
+to easily distribute models across a network of peers and share computing resources both locally and globally. This 
+approach enables the training of large models from consumer hardware, eliminating the need for cloud services for 
+certain ML applications. Tensorlink leverages techniques such as automated model parsing and pipeline parallelism to 
+simplify and enhance the training process, making state-of-the-art models accessible to a wider audience.
 
+### Key features
 By implementing wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates with existing codebases, 
 preserving model workflows while seamlessly harnessing distributed resources. Tensorlink enables individuals and 
 organizations to collaborate, share resources, and scale models dynamically—bringing the power of distributed training 
 to a broader community.
 
-### Key features
 * **Distributed Model Wrapper**: connects your model to a network of GPUs, managing everything from model distribution 
 to execution behind the scenes
   * Supports `nn.Module` methods and queries (e.g., forward, backward, parameters)
@@ -24,12 +24,25 @@ essential methods like `step` and `zero_grad`
   * The architecture enables the creation of private networks/jobs that can function independently of the Tensorlink 
   network while benefiting from its design.
 
+### Limitations in this Release
+
+- Bugs, performance issues, and limited network availability are expected.
+- **Model Support**: Tensorlink currently supports scriptable PyTorch models (`torch.jit.script`) and select open-source 
+Hugging Face models not requiring API-keys.
+   - **Why?** Security and serialization constraints in distributed workflows require deterministic models. We're 
+  actively working on custom serialization methods to support all PyTorch model types. Feedback and contributions to accelerate this effort are welcome! 
+- **Job Constraints**: Public jobs are currently limited to one worker due to network availability. As a result, data 
+parallel acceleration is currently disabled. This will be activated as the pool of workers grows, and can also be 
+enabled in the source code for local jobs/clusters.
+- Internet latency and connection speeds can significantly impact performance of public jobs, which may become 
+problematic for training and inference jobs. 
+
 For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
 [Lightpaper](Lightpaper%20v1.md).
 
 ## Getting Started with Tensorlink
 
-**Video tutorial coming soon…**
+A more comprehensive documentation can be found on the [Tensorlink website](https://smartnodes.ca/docs)
 
 ### Installation
 
@@ -67,7 +80,11 @@ loss_fn = CrossEntropyLoss()
 
 # Create a Tensorlink user node instance, and request a job with your model
 user = UserNode()
-distributed_model, distributed_optimizer = user.create_distributed_model(model, AdamW)
+distributed_model, distributed_optimizer = user.create_distributed_model(
+        model=model,
+      training=True,
+      optimizer_type=AdamW,
+)
 distributed_optimizer(lr=5e-5) # Instantiate optimizer without specifying parameters
 ```
 
@@ -85,37 +102,14 @@ for epoch in range(epochs):
 
         optimizer.zero_grad()
         outputs = distributed_model(input_ids, attention_mask=attention_mask, labels=labels)
-        loss = outputs.loss
+        loss = loss_fn(outputs, expected_outputs)
         loss.backward()
         optimizer.step()
 
     print(f"Epoch {epoch + 1}/{epochs} completed")
 ```
 
-You can monitor the progress of your distributed training job using Tensorlink’s job status functionality:
-
-```python
-# Check job status
-status = user.check_job_status()
-print(f"Job Status: {status}")
-```
-
 Training progress can also be tracked through the Tensorlink/Smartnodes dashboard (TBD).
-
-### Coming Soon
-* Limited worker selection and model size constraints during network launch, due to lack of workers
-* In-depth model analysis/functionality beyond forwad, backward, and parameters calls to models
-* Potential compatibility issues with huggingface models, Trainer objects, and optimizer steppers
-* Further support for features of HuggingFace models and trainers
-
-
-## Known Issues
-
-As Tensorlink is currently in pre-alpha, our focus is on capturing and providing compute resources to users. We have chosen to release this tool to the public before implementing proof-of-learning mechanisms. **Computation may not be precisely reproducible. If you require consistent and guaranteed training results, we recommend using a different platform (BitTensor, Google Cloud, etc).** This decision was made at the protocol level, as achieving precise, reproducible distributed training across nodes requires replicating pipelines, which can be computationally expensive and inefficient. Our primary goal is to make training compute accessible to the public, but we will address this issue in the near future. 
-
-During pre-alpha, issues may arise with gradient checkpointing, job storage, and network connectivity. Please report any problems through GitHub or our website, as your feedback is crucial to improving Tensorlink and making it more robust!
-
-* Occasional timeouts while creating connections during swaps
 
 ## Contributing
 
