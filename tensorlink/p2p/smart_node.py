@@ -40,7 +40,7 @@ COLOURS = {
 
 # Grab smart contract information
 base_dir = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(base_dir, '../..', 'config')
+CONFIG_PATH = os.path.join(base_dir, '../config')
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, 'SmartnodesCore.json')
 MS_CONFIG_PATH = os.path.join(CONFIG_PATH, 'SmartnodesMultiSig.json')
 

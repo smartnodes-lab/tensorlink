@@ -2,7 +2,7 @@ from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
-from web3.exceptions import Web3Exception
+from web3.exceptions import Web3Exception, ContractLogicError
 from collections import Counter
 from eth_abi import encode, decode
 from dotenv import get_key
@@ -65,11 +65,7 @@ class Validator(TorchNode):
 
         self.worker_memories = {}
         self.all_workers = {}
-        self.proposals = []
-
-        # Params for smart contract state aggregation
-        self.last_execution_block = 0
-        self.last_proposal_timestamp = 0
+        self.proposals = {}
 
         # Job monitoring and storage
         self.active_jobs = {}
@@ -77,17 +73,19 @@ class Validator(TorchNode):
         self.jobs_to_complete = []
         self.validators_to_clear = []
 
+        # Params for smart contract state aggregation
+        self.proposal_flag = threading.Event()
+        self.current_proposal = 0
+
         self.proposal_listener = None
         self.execution_listener = None
         self.dht_saver = None
-
-        self.proposal_flag = threading.Event()
-        self.current_proposal = 0
 
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
+            self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
             # self.bootstrap()
 
     def handle_data(self, data, node: Connection):
@@ -560,133 +558,182 @@ class Validator(TorchNode):
     #     for event in events:
     #         print(event)
 
-    """Listen for new proposals created on SmartnodesMultiSig"""
     def proposal_validator(self):
-        # Proposal-specific event listening
-        try:
-            latest_block = self.chain.eth.block_number
-            start_block = max(0, latest_block - 100)
-            first_time = True
+        """Listen for new proposals created on SmartnodesMultiSig"""
 
-            event_filter = self.multi_sig_contract.events.ProposalCreated.create_filter(
-                from_block=start_block,
-                to_block="latest"
-            )
-            # Initialize last_execution_block from existing proposals
-            new_entries = event_filter.get_all_entries()
+        # Initialize last_execution_block from existing proposals
+        while not self.terminate_flag.is_set():
+            try:
+                # Check if a new round of proposals has started
+                current_proposal_id = self.multi_sig_contract.functions.nextProposalId().call()
+                if current_proposal_id != self.current_proposal:
+                    self.current_proposal = current_proposal_id
+                    self.proposals = {}
 
-            while not self.terminate_flag.is_set():
+                # Get number of proposals we have already found (index for querying next proposal candidate)
+                current_proposals = len(self.proposals) + 1
                 try:
-                    if first_time:
-                        first_time = False
-                        if new_entries:
-                            new_entries = new_entries[-1:]
-                    else:
-                        new_entries = event_filter.get_new_entries()
+                    proposal_hash = self.multi_sig_contract.functions.currentProposals(
+                        current_proposals - 1).call().hex()
+                    t = threading.Thread(target=self.validate_proposal,
+                                         args=(proposal_hash, current_proposals),
+                                         name=f"proposal_validator_{current_proposals}",
+                                         daemon=True)
+                    self.proposals[proposal_hash] = t
+                    t.start()
 
-                    # Clean up completed proposal threads
-                    self.proposals = [p for p in self.proposals if p.is_alive()]
+                    # TODO dynamic based off multisig contract max proposal numbers
+                    if current_proposals == 1:
+                        time.sleep(30)
 
-                    for event in new_entries:
-                        block = event["blockNumber"]
-                        if block > self.last_execution_block:  # Update the block number when processing new events
-                            proposal_hash = event["args"]["proposalHash"].hex().encode()
-                            proposal_num = event["args"]["proposalNum"]
-                            t = threading.Thread(target=self.validate_proposal,
-                                                 args=(proposal_hash, proposal_num),
-                                                 name=f"proposal_validator_{proposal_num}",
-                                                 daemon=True)
-                            self.proposals.append(t)
-                            t.start()
+                except ContractLogicError:
+                    # Proposal has not been published yet, keep waiting
+                    time.sleep(10)
+                    pass
 
-                except Exception as e:
-                    self.debug_print(f"Validator -> Error while fetching ProposalCreation events: {e}",
-                                     colour="bright_red", level=logging.ERROR)
+            except Exception as e:
+                self.debug_print(f"Validator -> Error while fetching created proposals: {e}",
+                                 colour="bright_red", level=logging.ERROR)
 
-                time.sleep(30)
+            time.sleep(10)
+
+    def validate_proposal(self, proposal_hash, proposal_num):
+        # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
+        #  We should also use our proposal data to quickly verify matching data
+        self.debug_print(f"Validator -> Validation started for proposal: {proposal_hash}",
+                         colour="bright_blue", level=logging.INFO)
+
+        # Query network for the detailed proposal info
+        proposal_data = self.query_dht(proposal_hash)
+
+        # If no proposal is found
+        if proposal_data is None:
+            # Perhaps some logic to directly query the node who published the proposal to ensure it is not found TODO
+            self.debug_print(f"Validator -> Proposal {proposal_hash} not found in DHT!")
+            return
+
+        # (
+        #     validators_to_remove,
+        #     job_hashes,
+        #     job_capacities,
+        #     job_workers,
+        #     total_capacity
+        # ) = proposal_data
+        #
+        # proposal_data_hash = self.hash_proposal_data(
+        #     validators_to_remove,
+        #     job_hashes,
+        #     job_capacities,
+        #     job_workers,
+        #     total_capacity
+        # ).hex().encode()
+
+        # if proposal_data_hash != proposal_hash:
+        #     # Proposal hash must match smart contract listed proposal
+        #     self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
+        #     return
+
+        # for function_type, call_data in proposal_data:
+        #     if self.proposal_flag.is_set():
+        #         self.debug_print(f"Validator -> Validation interrupted for proposal {proposal_data_hash}!")
+        #         return
+        #
+        #     # Deactivate validator call: attempt connection to determine if validator should be deactivated
+        #     if function_type == 0:
+        #         node_address = self.chain.to_checksum_address(
+        #             decode(["address"], call_data)[0]
+        #         )
+        #         node_hash = self.contract.functions.getValidatorBytes(node_address).call().hex()
+        #         node_info = self.query_dht(node_hash)
+        #
+        #         if node_info:
+        #             node_host, node_port = node_info["host"], node_info["port"]
+        #             connected = self.connect_node(node_info["id"], node_host, node_port)
+        #
+        #             # Verify the roles is online and in the network
+        #             if connected:
+        #                 flag = True
+        #                 reason = f"Validator still online."
+        #                 connection = self.nodes[node_info]
+        #                 self.close_connection_socket(connection, "Heart beat complete.")
+        #
+        #         else:
+        #             flag = True
+        #             reason = f"Node not found: {node_hash}"
+        #
+        #     # Create job, ensure job is requested on p2p network
+        #     elif function_type == 1:
+        #         # TODO ensure the job type is for the tensorlink sub-network
+        #         user_hash, job_hash, capacities = decode(
+        #             ["bytes32", "bytes32", "uint256[]"], call_data
+        #         )
+        #
+        #         user_hash = user_hash.hex()
+        #         job_hash = job_hash.hex()
+        #
+        #         validated = self.validate_job(job_hash, user_id=user_hash, capacities=capacities)
+        #
+        #         if not validated:
+        #             flag = True
+        #             reason = f"Invalid job state! {job_hash}"
+        #
+        #     # Complete job, determine status on p2p network
+        #     elif function_type == 2:
+        #         job_hash, worker_addresses = decode(
+        #             ["bytes32", "address[]"], call_data
+        #         )
+        #
+        #         job_hash = job_hash.hex()
+        #
+        #         validated = self.validate_job(job_hash, active=False)
+        #
+        #         if not validated:
+        #             flag = True
+        #             reason = f"Invalid job state! {job_hash}"
+        #
+        #     else:
+        #         flag = True
+        #         reason = "Invalid function type."
+        #
+        #     if flag is True:
+        #         self.debug_print(f"Validator -> Job validation failed: {reason}", colour="bright_red",
+        #         level=logging.WARNING)
+        #         break
+
+        try:
+            tx = self.multi_sig_contract.functions.approveTransaction(proposal_num).build_transaction({
+                "from": self.public_key,
+                "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                "gas": 6721975,
+                "gasPrice": self.chain.eth.gas_price
+            })
+            signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
+            tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
+            self.debug_print(f"Validator -> Proposal {proposal_hash} approved! ({tx_hash})", colour="green",
+                             level=logging.INFO)
 
         except Exception as e:
-            self.debug_print(f"Validator -> Critical error in proposal validator: {e}", colour="bright_red",
-                             level=logging.CRITICAL)
-            raise
+            if "Validator has already voted!" in str(e):
+                pass
+            else:
+                raise e
 
     def proposal_creator(self):
-        try:
-            # Proposal-specific event listening
-            latest_block = self.chain.eth.block_number
-            start_block = max(0, latest_block - 50)
-            first_time = True
+        while not self.terminate_flag.is_set():
+            try:
+                # Fetch state from the contract
+                next_proposal_id, round_validators = self.multi_sig_contract.functions.getState().call()
 
-            event_filter = self.multi_sig_contract.events.ProposalExecuted.create_filter(
-                from_block=start_block,
-                to_block="latest"
-            )
+                if self.public_key in round_validators:
+                    # Wait a bit before creating the proposal
+                    self.create_proposal()
+                    time.sleep(30)
 
-            while not self.terminate_flag.is_set():
-                try:
-                    if first_time:
-                        new_entries = event_filter.get_all_entries()
-                        self.last_execution_block = new_entries[-1]["blockNumber"]
-                        block = self.chain.eth.get_block(self.last_execution_block)
-                        self.last_proposal_timestamp = block["timestamp"]
-                        first_time = False
-                    else:
-                        new_entries = event_filter.get_new_entries()
+            except Exception as e:
+                self.debug_print(f"Validator -> Error processing new entries: {e}",
+                                 colour="bright_red", level=logging.ERROR)
 
-                except Exception as e:
-                    self.debug_print(
-                        f"Validator -> Error while fetching ProposalCreation events: {e}",
-                        colour="bright_red", level=logging.ERROR
-                    )
-                    time.sleep(5)
-                    continue
-
-                if new_entries:
-                    try:
-                        # Fetch state from the contract
-                        next_proposal_id, round_validators = self.multi_sig_contract.functions.getState().call()
-                        latest_event = new_entries[-1]
-
-                        # Update last_execution_block if the new event is more recent
-                        if latest_event["blockNumber"] > self.last_execution_block:
-                            self.last_execution_block = latest_event["blockNumber"]
-
-                        # Check if a new proposal round has started
-                        if next_proposal_id > self.current_proposal:
-                            self.current_proposal = next_proposal_id
-
-                            if self.public_key in round_validators:
-                                current_time = int(time.time())
-                                time_since_last_proposal = current_time - self.last_proposal_timestamp
-
-                                if time_since_last_proposal < 70:
-                                    # Calculate how long we need to sleep
-                                    sleep_time = 70 - time_since_last_proposal
-                                    self.debug_print(
-                                        f"Validator -> Waiting {sleep_time} seconds before creating next proposal",
-                                        colour="bright_blue"
-                                    )
-                                    sleep_start = time.time()
-                                    while time.time() - sleep_start < sleep_time:
-                                        if self.terminate_flag.is_set():
-                                            return
-                                        time.sleep(min(30, int(sleep_time - (time.time() - sleep_start))))
-
-                                if not self.terminate_flag.is_set():
-                                    # Now we can create the proposal
-                                    self.create_proposal()
-                                    self.last_proposal_timestamp = int(time.time())
-
-                    except Exception as e:
-                        self.debug_print(f"Validator -> Error processing new entries: {e}",
-                                         colour="bright_red", level=logging.ERROR)
-
-                time.sleep(10)
-
-        except Exception as e:
-            self.debug_print(f"Validator -> Critical error in proposal creator: {e}", colour="bright_red",
-                             level=logging.CRITICAL)
-            raise
+            time.sleep(10)
 
     def validate_job(self, job_id: bytes, user_id: bytes = None, capacities: list = None, active: bool = None) -> bool:
         # Grab user and job information
@@ -756,122 +803,6 @@ class Validator(TorchNode):
                     return True
 
         return False
-
-    def validate_proposal(self, proposal_hash, proposal_num):
-        # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
-        #  We should also use our proposal data to quickly verify matching data
-        self.debug_print(f"Validator -> Validation started for proposal: {proposal_hash}",
-                         colour="bright_blue", level=logging.INFO)
-
-        flag = False
-        reason = ""
-
-        time.sleep(2)
-        proposal_data = self.query_dht(proposal_hash.decode())
-        if proposal_data is None:
-            proposal_id, validators = self.multi_sig_contract.functions.getState().call()
-            if self.public_key not in validators:
-                self.debug_print(f"Validator -> Proposal {proposal_hash} not found in DHT!")
-                return
-        else:
-            validators_to_remove, job_hashes, job_capacities, job_workers, total_capacity = proposal_data
-            proposal_data_hash = self.hash_proposal_data(
-                validators_to_remove,
-                job_hashes,
-                job_capacities,
-                job_workers,
-                total_capacity
-            ).hex().encode()
-
-            if proposal_data_hash != proposal_hash:
-                self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
-                flag = True
-            else:
-                pass
-            # for function_type, call_data in proposal_data:
-            #     if self.proposal_flag.is_set():
-            #         self.debug_print(f"Validator -> Validation interrupted for proposal {proposal_data_hash}!")
-            #         return
-            #
-            #     # Deactivate validator call: attempt connection to determine if validator should be deactivated
-            #     if function_type == 0:
-            #         node_address = self.chain.to_checksum_address(
-            #             decode(["address"], call_data)[0]
-            #         )
-            #         node_hash = self.contract.functions.getValidatorBytes(node_address).call().hex()
-            #         node_info = self.query_dht(node_hash)
-            #
-            #         if node_info:
-            #             node_host, node_port = node_info["host"], node_info["port"]
-            #             connected = self.connect_node(node_info["id"], node_host, node_port)
-            #
-            #             # Verify the roles is online and in the network
-            #             if connected:
-            #                 flag = True
-            #                 reason = f"Validator still online."
-            #                 connection = self.nodes[node_info]
-            #                 self.close_connection_socket(connection, "Heart beat complete.")
-            #
-            #         else:
-            #             flag = True
-            #             reason = f"Node not found: {node_hash}"
-            #
-            #     # Create job, ensure job is requested on p2p network
-            #     elif function_type == 1:
-            #         # TODO ensure the job type is for the tensorlink sub-network
-            #         user_hash, job_hash, capacities = decode(
-            #             ["bytes32", "bytes32", "uint256[]"], call_data
-            #         )
-            #
-            #         user_hash = user_hash.hex()
-            #         job_hash = job_hash.hex()
-            #
-            #         validated = self.validate_job(job_hash, user_id=user_hash, capacities=capacities)
-            #
-            #         if not validated:
-            #             flag = True
-            #             reason = f"Invalid job state! {job_hash}"
-            #
-            #     # Complete job, determine status on p2p network
-            #     elif function_type == 2:
-            #         job_hash, worker_addresses = decode(
-            #             ["bytes32", "address[]"], call_data
-            #         )
-            #
-            #         job_hash = job_hash.hex()
-            #
-            #         validated = self.validate_job(job_hash, active=False)
-            #
-            #         if not validated:
-            #             flag = True
-            #             reason = f"Invalid job state! {job_hash}"
-            #
-            #     else:
-            #         flag = True
-            #         reason = "Invalid function type."
-            #
-            #     if flag is True:
-            #         self.debug_print(f"Validator -> Job validation failed: {reason}", colour="bright_red",
-            #         level=logging.WARNING)
-            #         break
-
-        if not flag:
-            try:
-                tx = self.multi_sig_contract.functions.approveTransaction(proposal_num).build_transaction({
-                    "from": self.public_key,
-                    "nonce": self.chain.eth.get_transaction_count(self.public_key),
-                    "gas": 6721975,
-                    "gasPrice": self.chain.eth.gas_price
-                })
-                signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
-                tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
-                self.debug_print(f"Validator -> Proposal {proposal_hash} approved! ({tx_hash})", colour="green",
-                                 level=logging.INFO)
-            except Exception as e:
-                if "Validator has already voted!" in str(e):
-                    pass
-                else:
-                    raise e
 
     def create_proposal(self):
         self.debug_print(f"Validator -> Creating proposal...", colour="bright_blue", level=logging.INFO)
@@ -948,87 +879,95 @@ class Validator(TorchNode):
 
         self.store_value(proposal_hash.hex(), proposal)
 
-        try:
-            tx = self.multi_sig_contract.functions.createProposal(
-                proposal_hash
-            ).build_transaction({
-                "from": self.public_key,
-                "nonce": self.chain.eth.get_transaction_count(self.public_key),
-                "gas": 6721975,
-                "gasPrice": self.chain.eth.gas_price
-            })
+        # Submit the proposal hash to the SC
+        while not self.terminate_flag.is_set():
+            # Loop until we submit the proposal or get an error
+            try:
+                tx = self.multi_sig_contract.functions.createProposal(
+                    proposal_hash
+                ).build_transaction({
+                    "from": self.public_key,
+                    "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                    "gas": 6_721_975,
+                    "gasPrice": self.chain.eth.gas_price
+                })
 
-            signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
-            tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
-            self.debug_print(f"Validator -> Proposal submitted! ({tx_hash.hex()})", colour="green",
-                             level=logging.INFO)
-
-        except Exception as e:
-            if "Validator has already submitted a proposal this round!" in str(e):
-                pass
-
-            else:
-                self.debug_print(f"Validator -> Error creating proposal: {e}", colour="bright_red",
+                signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
+                tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
+                self.debug_print(f"Validator -> Proposal submitted! ({tx_hash.hex()})", colour="green",
                                  level=logging.INFO)
-                return
+                break
 
-        latest_block = self.chain.eth.block_number
-        start_block = max(0, latest_block - 20)
-        proposal_ready_filter = self.multi_sig_contract.events.ProposalReady.create_filter(
-            from_block=start_block,
-            to_block="latest"
-        )
-        new_entries = proposal_ready_filter.get_all_entries()
+            except Exception as e:
+                if "Validator has already submitted a proposal this round!" in str(e):
+                    self.debug_print(f"Validator -> Validator has already submitted a proposal "
+                                     f"this round!", colour="bright_red", level=logging.INFO)
+                    break
+
+                elif "Proposals must be submitted" in str(e):
+                    # Proposals must be submitted a certain period after
+                    time.sleep(30)
+                    pass
+
+                else:
+                    self.debug_print(f"Validator -> Error creating proposal: {e}", colour="bright_red",
+                                     level=logging.INFO)
+                    return
+
+        proposal_number = self.multi_sig_contract.functions.hasSubmittedProposal(self.public_key).call()
 
         # Listen for the ProposalReady event in a loop
         while not self.terminate_flag.is_set():
-            if new_entries:
-                event = new_entries[-1]
-                proposal_id = event["args"]["proposalId"]
-                if proposal_id >= self.current_proposal:
-                    self.debug_print(f"Validator -> ProposalReady event detected: {new_entries}",
-                                     colour="blue", level=logging.INFO)
+            proposal_id = self.multi_sig_contract.functions.nextProposalId.call()
 
-                    # Execute the proposal
-                    try:
-                        execute_tx = self.multi_sig_contract.functions.executeProposal(
-                            validators_to_remove,
-                            job_hashes,
-                            job_capacities,
-                            job_workers,
-                            sum(job_capacities)  # TODO execute sum on blockchain
-                        ).build_transaction({
-                            "from": self.public_key,
-                            "nonce": self.chain.eth.get_transaction_count(self.public_key),
-                            "gas": 6_721_975,
-                            "gasPrice": self.chain.eth.gas_price
-                        })
+            if self.current_proposal != proposal_id:
+                # New proposal round detected, scratch current proposal creation
+                return
 
-                        signed_execute_tx = self.chain.eth.account.sign_transaction(
-                            execute_tx, get_key(".env", "PRIVATE_KEY")
-                        )
-                        execute_tx_hash = self.chain.eth.send_raw_transaction(
-                            signed_execute_tx.raw_transaction
-                        )
-                        self.debug_print(f"Validator -> Proposal executed! ({execute_tx_hash.hex()})",
-                                         colour="green", level=logging.INFO)
+            is_ready = self.multi_sig_contract.functions.isProposalReady(proposal_number).call()
 
-                        # Return after successful execution
+            if is_ready:
+                self.debug_print("Validator -> Proposal ready for execution!",
+                                 colour="blue", level=logging.INFO)
+
+                # Execute the proposal
+                try:
+                    execute_tx = self.multi_sig_contract.functions.executeProposal(
+                        validators_to_remove,
+                        job_hashes,
+                        job_capacities,
+                        job_workers,
+                        sum(job_capacities)  # TODO execute sum on blockchain
+                    ).build_transaction({
+                        "from": self.public_key,
+                        "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                        "gas": 6_721_975,
+                        "gasPrice": self.chain.eth.gas_price
+                    })
+
+                    signed_execute_tx = self.chain.eth.account.sign_transaction(
+                        execute_tx, get_key(".env", "PRIVATE_KEY")
+                    )
+                    execute_tx_hash = self.chain.eth.send_raw_transaction(
+                        signed_execute_tx.raw_transaction
+                    )
+                    self.debug_print(f"Validator -> Proposal executed! ({execute_tx_hash.hex()})",
+                                     colour="green", level=logging.INFO)
+
+                    # Return after successful execution
+                    return
+
+                except Exception as e:
+                    if "Not enough proposal votes!" in str(e):
+                        pass
+
+                    else:
+                        self.debug_print(f"Validator -> Error executing proposal: {e}",
+                                         colour="bright_red", level=logging.ERROR)
                         return
 
-                    except Exception as e:
-                        if "Not enough proposal votes!" in str(e):
-                            pass
-                        elif "" in str(e):
-                            pass
-                        else:
-                            self.debug_print(f"Validator -> Error executing proposal: {e}",
-                                             colour="bright_red", level=logging.ERROR)
-                            return
-
             # Sleep or adjust as needed to reduce polling frequency
-            time.sleep(10)
-            new_entries = proposal_ready_filter.get_new_entries()
+            time.sleep(30)
 
     def send_state_updates(self, validators):
         for job in self.jobs:

@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 # Version of the package
-VERSION = "0.1.0"
+VERSION = "0.1.0.post1"
 
 # Description of the package
 DESCRIPTION = (
@@ -26,9 +26,11 @@ setup(
     author="Smartnodes Lab",
     author_email="smartnodes-lab@proton.me",
     description=DESCRIPTION,
+    long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     packages=find_packages(),  # Automatically find packages in the current directory
     include_package_data=True,
+    exclude_package_data={"": [".env"]},
     install_requires=parse_requirements('requirements.txt'),  # Read dependencies from requirements.txt
     python_requires=">=3.11.9",
     classifiers=[
@@ -39,9 +41,9 @@ setup(
         "Operating System :: MacOS",
         "Operating System :: Unix",
     ],
-    url="https://smart-nodes.xyz/tensorlink",
+    url="https://smartnodes.ca/tensorlink",
     project_urls={
-        "Documentation": "https://smart-nodes.xyz/docs/overview",
+        "Documentation": "https://smartnodes.ca/docs",
         "Source": "https://github.com/smartnodes-lab/tensorlink",
     },
     license="MIT",

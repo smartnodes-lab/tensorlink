@@ -57,18 +57,18 @@ if __name__ == "__main__":
     # Launch Nodes
     validator = ValidatorNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    user = UserNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
+    user = UserNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
-    worker = WorkerNode(upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG)
+    worker = WorkerNode(upnp=True, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(1)
 
     # Bootstrap roles
-    # val_key, val_host, val_port = validator.send_request("info", None)
-    #
-    # worker.send_request("connect_node", (val_key, val_host, val_port))
-    # time.sleep(1)
-    # user.send_request("connect_node", (val_key, val_host, val_port))
-    # time.sleep(1)
+    val_key, val_host, val_port = validator.send_request("info", None)
+
+    worker.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(1)
+    user.send_request("connect_node", (val_key, val_host, val_port))
+    time.sleep(1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
