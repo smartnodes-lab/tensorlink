@@ -3,7 +3,7 @@ import time
 
 
 if __name__ == "__main__":
-    validator = ValidatorNode(upnp=False, print_level=10)
+    validator = ValidatorNode(upnp=True, print_level=10)
 
     while True:
         try:

@@ -1004,31 +1004,7 @@ class SmartNode(threading.Thread):
                 self.debug_print("No UPnP devices found.")
                 return
 
-            self.upnp.selectigd()  # Select Internet Gateway Device
-            local_ip = self.upnp.lanaddr
-            removed_count = 0
-
-            self.debug_print("Scanning existing UPnP port mappings...")
-            i = 0
-            while True:
-                try:
-                    mapping = self.upnp.getgenericportmapping(i)
-                    if mapping is None:
-                        break  # No more mappings
-
-                    ext_port, protocol, (int_ip, int_port), desc = mapping[:4]
-
-                    # Check if mapping matches our application
-                    if int_ip == local_ip and desc == "SmartNode":
-                        self.debug_print(f"Removing UPnP mapping: {ext_port}/{protocol} -> {int_ip}:{int_port}")
-                        self.upnp.deleteportmapping(ext_port, protocol)
-                        removed_count += 1
-
-                    i += 1
-                except Exception:
-                    break  # End of list or error during retrieval
-
-            self.debug_print(f"Cleanup complete. Removed {removed_count} UPnP mappings.")
+            self.clean_port_mappings()
 
         except Exception as e:
             self.debug_print(f"Error during UPnP cleanup: {e}")
@@ -1063,11 +1039,45 @@ class SmartNode(threading.Thread):
                     self.debug_print(
                         f"SmartNode -> Successfully removed UPnP port mapping for external port {external_port}")
                 else:
-                    self.debug_print(f"SmartNode -> Unexpected result when removing port mapping: {result}",
+                    self.debug_print(f"SmartNode -> Could not remove port mapping: {result}",
                                      level=logging.WARNING, colour="yellow")
             except Exception as e:
                 self.debug_print(f"SmartNode -> Error removing UPnP port mapping for port {external_port}: {e}",
                                  level=logging.ERROR, colour="bright_red")
+
+    def clean_port_mappings(self):
+        """
+        Lists all port mappings on the UPnP-enabled router.
+        """
+        mappings = []
+        index = 38751
+
+        if not self.upnp:
+            self.debug_print("SmartNode -> UPnP is not initialized.", level=logging.WARNING)
+            return mappings
+
+        while True:
+            try:
+                # Retrieve port mapping at the current index
+                mapping = self.upnp.getspecificportmapping(index, "TCP")
+                if mapping:
+                    _, port, description, _, _ = mapping
+                    if description == "SmartNode":
+                        self.remove_port_mapping(port)
+                index += 1
+
+            except Exception as e:
+                # Stop when there are no more entries
+                if "SpecifiedArrayIndexInvalid" in str(e):
+                    break
+                self.debug_print(f"SmartNode -> Error retrieving port mapping at index {index}: {e}",
+                                 level=logging.ERROR)
+                break
+
+            if index > 39_000:
+                break
+
+        return mappings
 
     def get_external_ip(self):
         """Get public IP address"""
@@ -1162,11 +1172,8 @@ class SmartNode(threading.Thread):
     def stop_upnp(self) -> None:
         """Shuts down UPnP on port"""
         if self.upnp:
-            self.remove_port_mapping(self.port)
-            self.debug_print(f"SmartNode -> stop_upnp: UPnP removed for port {self.port}")
-
-            for node_id, node in self.nodes.items():
-                self.remove_port_mapping(node.port)
+            self.clean_port_mappings()
+            self.debug_print(f"SmartNode -> stop_upnp: UPnP cleaned.")
 
     def stop(self) -> None:
         """Shut down nodes and all associated connections/threads"""
@@ -1213,12 +1220,12 @@ class SmartNode(threading.Thread):
                     return port
 
                 except OSError:
-                    port += random.randint(1, 300)
+                    port += random.randint(1, 50)
 
                 except Exception as e:
                     raise e
             else:
-                port += random.randint(1, 300)
+                port += random.randint(1, 50)
 
     """Methods for Smart Contract Interactions"""
     def get_validator_count(self):

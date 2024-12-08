@@ -1,5 +1,5 @@
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.ml.torch_node import TorchNode
 from tensorlink.p2p.node_api import *
 from tensorlink.crypto.rsa import get_rsa_pub_key
 

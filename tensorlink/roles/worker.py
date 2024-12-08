@@ -1,6 +1,6 @@
 import time
 
-from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.ml.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.ml.utils import estimate_memory, handle_output, get_gpu_memory
 from tensorlink.crypto.rsa import get_rsa_pub_key

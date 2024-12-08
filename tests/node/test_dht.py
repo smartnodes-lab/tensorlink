@@ -11,6 +11,7 @@ from tensorlink.crypto.rsa import *
 node1 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
 user = User(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
 worker = Worker(Queue(), Queue(), upnp=False, off_chain_test=True, local_test=False)
+# Some random workaround to run two validators in the same dir by changing credential path
 # pk = get_rsa_pub_key(b"V2")
 # node2 = Validator(Queue(), Queue(), upnp=False, off_chain_test=True)
 # node2.rsa_pub_key = get_public_key_bytes(pk)

@@ -1,4 +1,4 @@
-from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.ml.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
@@ -566,6 +566,8 @@ class Validator(TorchNode):
             try:
                 # Check if a new round of proposals has started
                 current_proposal_id = self.multi_sig_contract.functions.nextProposalId().call()
+                time.sleep(1)
+
                 if current_proposal_id != self.current_proposal:
                     self.current_proposal = current_proposal_id
                     self.proposals = {}
@@ -575,6 +577,8 @@ class Validator(TorchNode):
                 try:
                     proposal_hash = self.multi_sig_contract.functions.currentProposals(
                         current_proposals - 1).call().hex()
+                    time.sleep(1)
+
                     t = threading.Thread(target=self.validate_proposal,
                                          args=(proposal_hash, current_proposals),
                                          name=f"proposal_validator_{current_proposals}",
@@ -584,11 +588,13 @@ class Validator(TorchNode):
 
                     # TODO dynamic based off multisig contract max proposal numbers
                     if current_proposals == 1:
-                        time.sleep(30)
+                        self.debug_print(f"Validator -> All proposals validated! Sleeping...",
+                                         colour="green", level=logging.DEBUG)
+                        time.sleep(300)
 
                 except ContractLogicError:
                     # Proposal has not been published yet, keep waiting
-                    time.sleep(10)
+                    time.sleep(60)
                     pass
 
             except Exception as e:
@@ -612,26 +618,26 @@ class Validator(TorchNode):
             self.debug_print(f"Validator -> Proposal {proposal_hash} not found in DHT!")
             return
 
-        # (
-        #     validators_to_remove,
-        #     job_hashes,
-        #     job_capacities,
-        #     job_workers,
-        #     total_capacity
-        # ) = proposal_data
-        #
-        # proposal_data_hash = self.hash_proposal_data(
-        #     validators_to_remove,
-        #     job_hashes,
-        #     job_capacities,
-        #     job_workers,
-        #     total_capacity
-        # ).hex().encode()
+        (
+            validators_to_remove,
+            job_hashes,
+            job_capacities,
+            job_workers,
+            total_capacity
+        ) = proposal_data
 
-        # if proposal_data_hash != proposal_hash:
-        #     # Proposal hash must match smart contract listed proposal
-        #     self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
-        #     return
+        proposal_data_hash = self.hash_proposal_data(
+            validators_to_remove,
+            job_hashes,
+            job_capacities,
+            job_workers,
+            total_capacity
+        ).hex()
+
+        if proposal_data_hash != proposal_hash:
+            # Proposal hash must match smart contract listed proposal
+            self.debug_print(f"Validator -> Invalid proposal hash!", colour="red")
+            return
 
         # for function_type, call_data in proposal_data:
         #     if self.proposal_flag.is_set():
@@ -701,6 +707,7 @@ class Validator(TorchNode):
         #         break
 
         try:
+            # Determine if proposal can be submitted
             tx = self.multi_sig_contract.functions.approveTransaction(proposal_num).build_transaction({
                 "from": self.public_key,
                 "nonce": self.chain.eth.get_transaction_count(self.public_key),
@@ -709,11 +716,13 @@ class Validator(TorchNode):
             })
             signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
             tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
-            self.debug_print(f"Validator -> Proposal {proposal_hash} approved! ({tx_hash})", colour="green",
+            self.debug_print(f"Validator -> Proposal {proposal_num}: {proposal_hash} approved! ({tx_hash.hex()})", colour="green",
                              level=logging.INFO)
 
         except Exception as e:
             if "Validator has already voted!" in str(e):
+                self.debug_print(f"Validator -> Have already voted on proposal {proposal_num}, continuing...",
+                                 colour="green", level=logging.DEBUG)
                 pass
             else:
                 raise e
@@ -723,17 +732,18 @@ class Validator(TorchNode):
             try:
                 # Fetch state from the contract
                 next_proposal_id, round_validators = self.multi_sig_contract.functions.getState().call()
+                time.sleep(1)
 
                 if self.public_key in round_validators:
                     # Wait a bit before creating the proposal
                     self.create_proposal()
-                    time.sleep(30)
+                    time.sleep(300)
 
             except Exception as e:
                 self.debug_print(f"Validator -> Error processing new entries: {e}",
                                  colour="bright_red", level=logging.ERROR)
 
-            time.sleep(10)
+            time.sleep(60)
 
     def validate_job(self, job_id: bytes, user_id: bytes = None, capacities: list = None, active: bool = None) -> bool:
         # Grab user and job information
@@ -828,6 +838,8 @@ class Validator(TorchNode):
                         self.close_connection(connection, "Heart beat complete.")
                         validators_to_remove.append(node_address)
 
+        self.validators_to_clear = []
+
         # Complete jobs on the contract
         for job_id in self.jobs_to_complete:
             job = self.query_dht(job_id)
@@ -861,6 +873,10 @@ class Validator(TorchNode):
                 job_hashes.append(job_hash)
                 job_capacities.append(capacities)
 
+        # TODO Temporary fix, we must eventually back check the executed proposal with our jobs, and only delete those
+        #  that were included in the proposal
+        self.jobs_to_complete = []
+
         proposal_hash = self.hash_proposal_data(
             validators_to_remove,
             job_hashes,
@@ -883,6 +899,12 @@ class Validator(TorchNode):
         while not self.terminate_flag.is_set():
             # Loop until we submit the proposal or get an error
             try:
+                # Test contract call to see if we will revert
+                self.multi_sig_contract.functions.createProposal(
+                    proposal_hash
+                ).call({"from": self.public_key})
+                time.sleep(1)
+
                 tx = self.multi_sig_contract.functions.createProposal(
                     proposal_hash
                 ).build_transaction({
@@ -894,7 +916,7 @@ class Validator(TorchNode):
 
                 signed_tx = self.chain.eth.account.sign_transaction(tx, get_key(".env", "PRIVATE_KEY"))
                 tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
-                self.debug_print(f"Validator -> Proposal submitted! ({tx_hash.hex()})", colour="green",
+                self.debug_print(f"Validator -> Proposal ({proposal_hash.hex()}) submitted! ({tx_hash.hex()})", colour="green",
                                  level=logging.INFO)
                 break
 
@@ -906,6 +928,10 @@ class Validator(TorchNode):
 
                 elif "Proposals must be submitted" in str(e):
                     # Proposals must be submitted a certain period after
+                    self.debug_print(
+                        f"Validator -> createProposal: Not enough time since last proposal! Sleeping...",
+                        colour="green", level=logging.DEBUG
+                    )
                     time.sleep(30)
                     pass
 
@@ -914,17 +940,27 @@ class Validator(TorchNode):
                                      level=logging.INFO)
                     return
 
-        proposal_number = self.multi_sig_contract.functions.hasSubmittedProposal(self.public_key).call()
+        # Wait for next ethereum block
+        current_block = self.chain.eth.block_number
+        while True:
+            new_block = self.chain.eth.block_number
+            if new_block > current_block:
+                break
+            time.sleep(3)
 
         # Listen for the ProposalReady event in a loop
         while not self.terminate_flag.is_set():
             proposal_id = self.multi_sig_contract.functions.nextProposalId.call()
+            time.sleep(1)
 
             if self.current_proposal != proposal_id:
                 # New proposal round detected, scratch current proposal creation
+                self.debug_print(f"New proposal round detected, scratching current proposal creation...")
                 return
-
+            proposal_number = self.multi_sig_contract.functions.hasSubmittedProposal(self.public_key).call()
+            time.sleep(1)
             is_ready = self.multi_sig_contract.functions.isProposalReady(proposal_number).call()
+            time.sleep(1)
 
             if is_ready:
                 self.debug_print("Validator -> Proposal ready for execution!",
@@ -932,6 +968,17 @@ class Validator(TorchNode):
 
                 # Execute the proposal
                 try:
+                    self.multi_sig_contract.functions.executeProposal(
+                        validators_to_remove,
+                        job_hashes,
+                        job_capacities,
+                        job_workers,
+                        sum(job_capacities)
+                    ).call({
+                        "from": self.public_key
+                    })
+                    time.sleep(1)
+
                     execute_tx = self.multi_sig_contract.functions.executeProposal(
                         validators_to_remove,
                         job_hashes,
@@ -959,12 +1006,15 @@ class Validator(TorchNode):
 
                 except Exception as e:
                     if "Not enough proposal votes!" in str(e):
-                        pass
+                        self.debug_print(f"Validator -> Not enough proposal votes, sleeping...",
+                                         colour="green", level=logging.DEBUG)
 
                     else:
                         self.debug_print(f"Validator -> Error executing proposal: {e}",
                                          colour="bright_red", level=logging.ERROR)
                         return
+            else:
+                self.debug_print("Validator -> Proposal is not ready for execution. sleeping...")
 
             # Sleep or adjust as needed to reduce polling frequency
             time.sleep(30)
@@ -1010,11 +1060,11 @@ class Validator(TorchNode):
         try:
             while not self.terminate_flag.is_set():
                 # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-                if self.jobs:
-                    job = self.routing_table[self.jobs[-1]]
-                    if job is None:
-                        print("Job data was deleted!")
-                        time.sleep(1)
+                # if self.jobs:
+                #     job = self.routing_table[self.jobs[-1]]
+                #     if job is None:
+                #         print("Job data was deleted!")
+                #         time.sleep(1)
                 time.sleep(1)
 
         except KeyboardInterrupt:
@@ -1098,6 +1148,7 @@ class Validator(TorchNode):
                 # Remove any ghost user_ids in self.users
                 if node_id not in self.nodes:
                     nodes_to_remove.append(node_id)
+
                 # Remove any terminated connections
                 elif self.nodes[node_id].terminate_flag.is_set():
                     nodes_to_remove.append(node_id)
@@ -1120,7 +1171,7 @@ class Validator(TorchNode):
             clean_nodes(self.validators)
             clean_nodes(self.users)
 
-            time.sleep(600)
+            time.sleep(300)
 
             # TODO method / request to delete job after certain time or by request of the user.
             #   Perhaps after a job is finished there is a delete request
