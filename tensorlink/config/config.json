@@ -1,9 +1,9 @@
 {
     "api": {
-        "core": "0x4FF04f89d0146EFb16E41632c42d3C66c407a32b",
-        "multi-sig": "0x1A8d34e4f40AFe736e73F67f758808138ad0fb42",
-        "chain-url": "http://127.0.0.1:7545",
-        "chain-url-2": "https://sepolia.base.org",
+        "core": "0x48a2619d92576915A0b543084FDf0aa13D77Db71",
+        "multi-sig": "0x9ed12495f854818bD2578A4DC89a43b282D65DBA",
+        "chain-url": "https://sepolia.base.org",
+        "chain-url-local": "http://127.0.0.1:7545",
         "endpoint-url": "http://127.0.0.1:5029"
     },
     "network": {
@@ -11,13 +11,10 @@
             "seeds": [
                 [
                     "58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e",
-                    "jumbomeats.ddns.net",
+                    "smartnodes-lab.ddns.net",
                     38751
                 ]
             ]
         }
-    },
-    "58ef79797cd451e19df4a73fbd9871797f9c6a2995783c7f6fd2406978a2ba2e": {
-        "port": 38751
     }
 }

@@ -457,8 +457,12 @@ class Validator(TorchNode):
             if module_info["type"] == "offloaded":
                 for worker in module_info["workers"]:
                     # TODO Request epoch info from workers
-                    node = self.nodes[worker]
-                    self.send_to_node(node, b"SHUTDOWN-JOB" + module_id.encode())
+                    try:
+                        node = self.nodes[worker]
+                        self.send_to_node(node, b"SHUTDOWN-JOB" + module_id.encode())
+
+                    except KeyError:
+                        pass
 
     def recruit_worker(
             self,
@@ -932,7 +936,7 @@ class Validator(TorchNode):
                         f"Validator -> createProposal: Not enough time since last proposal! Sleeping...",
                         colour="green", level=logging.DEBUG
                     )
-                    time.sleep(30)
+                    time.sleep(60)
                     pass
 
                 else:
@@ -1017,7 +1021,7 @@ class Validator(TorchNode):
                 self.debug_print("Validator -> Proposal is not ready for execution. sleeping...")
 
             # Sleep or adjust as needed to reduce polling frequency
-            time.sleep(30)
+            time.sleep(60)
 
     def send_state_updates(self, validators):
         for job in self.jobs:
@@ -1065,7 +1069,7 @@ class Validator(TorchNode):
                 #     if job is None:
                 #         print("Job data was deleted!")
                 #         time.sleep(1)
-                time.sleep(1)
+                time.sleep(30)
 
         except KeyboardInterrupt:
             self.terminate_flag.set()
