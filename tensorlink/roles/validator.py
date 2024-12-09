@@ -1052,6 +1052,8 @@ class Validator(TorchNode):
 
     def run(self):
         super().run()
+        node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
+        node_cleaner.start()
 
         if self.off_chain_test is False:
             self.proposal_listener = threading.Thread(target=self.proposal_validator, daemon=True)
