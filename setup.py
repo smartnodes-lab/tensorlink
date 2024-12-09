@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+import os
 
 # Version of the package
 VERSION = "0.1.0.post1"
@@ -9,6 +10,21 @@ DESCRIPTION = (
     "It provides tools for parsing and distributing models across a network of peers, and integrates directly into "
     "existing PyTorch workflows."
 )
+
+
+def get_long_description():
+    with open("README.md", "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # Adjust the content for PyPI: Remove the last 4 lines and replace with markdown link
+    content_lines = content.splitlines()
+    if len(content_lines) >= 4:
+        content_lines = content_lines[:-4]  # Remove the last 4 lines
+    content_lines.append(
+        '[![Buy Me a Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)]'
+        '(https://www.buymeacoffee.com/smartnodes)'
+    )
+    return "\n".join(content_lines)
 
 
 # Parse requirements from requirements.txt
@@ -26,7 +42,7 @@ setup(
     author="Smartnodes Lab",
     author_email="smartnodes-lab@proton.me",
     description=DESCRIPTION,
-    long_description=open("README.md").read(),
+    long_description=get_long_description(),
     long_description_content_type="text/markdown",
     packages=find_packages(),  # Automatically find packages in the current directory
     include_package_data=True,
