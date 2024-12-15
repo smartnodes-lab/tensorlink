@@ -1,16 +1,21 @@
-# Tensorlink ![Static Badge](https://img.shields.io/badge/v0.1.0-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg)
+# Tensorlink
+![Static Badge](https://img.shields.io/badge/v0.1.0-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
+<!-- ![GitHub all releases](https://img.shields.io/github/downloads/smartnodes-lab/tensorlink/total) -->
 
+**Tensorlink** is a library designed to simplify the scaling of PyTorch model training and inference, offering tools 
+to easily distribute models across a network of peers and share computational resources both locally and globally.
 
 ## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch
 
-**Tensorlink** is a library designed to simplify the scaling of PyTorch model training and inference, offering tools 
-to easily distribute models across a network of peers and share computational resources both locally and globally. This 
-approach enables the training of large models from consumer hardware, eliminating the need for cloud services for 
-certain ML applications. Tensorlink leverages techniques such as automated model parsing and parallelism to 
-simplify and enhance the training process, making state-of-the-art models accessible to a wider audience.
+Tensorlink is a versatile framework designed to facilitate neural network offloading and acceleration within PyTorch, a 
+leading machine learning framework in Python. Tensorlink offers a straightforward, plug-and-play solution that parses 
+and distributes neural networks in PyTorch with ease, including support for third-party models utilized in libraries 
+such as Hugging Face. This approach enables the training of large models from consumer hardware, eliminating the need 
+for cloud services for certain ML applications. Tensorlink leverages techniques such as automated model parsing and 
+parallelism to simplify and enhance the training process, making state-of-the-art models accessible to a wider audience.
 
 For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
-[documentation](https://smartnodes.ca/docs).
+[lightpaper](docs/Lightpaper.md) and [documentation](https://smartnodes.ca/docs).
 
 ### Key features
 By implementing wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates with existing codebases, 

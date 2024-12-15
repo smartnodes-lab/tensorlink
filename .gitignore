@@ -6,8 +6,10 @@ dist/
 logs/
 models/
 tmp/
+build/
+tensorlink.egg-info/
 .idea
-.env
+*.env
 .DS_Store
 *.rs.bk
 *.pem

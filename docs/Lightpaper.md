@@ -1,12 +1,33 @@
+# Tensorlink
+
+*This Lightpaper is still under construction*
+
 ## Introduction
 
-The prevalence of large language models has fueled an unprecedented demand for computational power. Modern models, like 
-GPT-4 with hundreds of billions of parameters, necessitate vast arrays of graphics or tensor processing units to train. 
-Traditional deployment methods, such as cloud services or supercomputer rentals, while effective, often come 
-with prohibitive costs. Furthermore, the setup of distributed models, whether on a local cluster or offloaded over the 
-internet, requires extensive customization of workflows to distribute and coordinate modules across nodes. Tensorlink 
-aims to address these challenges by offering a universal, plug-and-play framework for model offloading and acceleration 
-in PyTorch, automatically parsing and distributing any model to reduce complexity and improve accessibility. 
+The prevalence of large language models has fueled an unprecedented demand for computational power. State-of-the-art 
+models like GPT-4, with hundreds of billions of parameters, require large arrays of graphics or tensor processing units 
+for training and operating. Depending on whether we use single or half-precision, this would require 300-600 gigabytes 
+of memory to just store its weights, let alone train it. The current most powerful accelerator is NVIDIA’s A100, which 
+has 80GB of memory and costs up to $20,000. Even for basic inference, one would require at least five of these high-end 
+GPUs or a multi-node cluster, making it inaccessible to researchers with limited budgets and most people with consumer 
+hardware.
+
+Since models of this scale exceed the capacity of a single device, distributed training has become essential. However, 
+setting up distributed models on a cluster of computers requires extensive customization to model workflows for 
+distributing workloads and synchronization. All the while, traditional deployment methods such as cloud services and 
+supercomputer rentals come with substantial costs and centralization, making efficient and affordable scaling a 
+challenge. 
+
+However, we can leverage concepts of volunteer computing to distribute the required work among a network of regular PCs. 
+A single PC may be slow and unreliable, but the combined performance of a fleet of PCs can match that of the largest 
+supercomputers. The key to obtaining such a network of PCs is to incentivize the gaming demographic to offer up their 
+idle compute for rewards. It is estimated that there are about 1.855 billion PC gaming users worldwide and 
+according to several PC building websites, most popular desktops are equipped with RTX 2080/2080 Ti or GTX 1080Ti 
+GPUs. These GPUs are 50–80% as fast as Tesla V100 for deep learning, a popular GPU among researchers. As a 
+rough estimate, the combined throughput of 10,000 desktops is 8-15 times that of server pods with 512 V100 GPUs. Now 
+with the profitability of mining cryptocurrency being much lower than it was in the past, running Tensorlink will be a 
+promising alternative to those who wish to offer up their compute. At the highest level, running Tensorlink and crypto 
+mining can essentially be seen as the same thing as both are means to earn rewards for computational work.
 
 
 ## A Decentralized Solution for Neural Network Scaling
@@ -54,7 +75,7 @@ one stage, the next batch can start processing in a different stage. This overla
 significantly speed up training by maximizing throughput.
 
 <p align="center">
-  <img src="docs/pipeline.png" alt="Distributed model architecture." width="520"/>
+  <img src="docs/images/pipeline.png" alt="Distributed model architecture." width="520"/>
 </p>
 <p align="center"><strong>Figure 1:</strong> <em>Pipeline parallelism micro-batching to mitigate latency in distributed learning environments.</em></p>
 
@@ -76,7 +97,7 @@ at the potential sacrifice of additional training time or computational cost.
 
 
 <p align="center">
-  <img src="docs/ML Flow Chart.png" alt="Distributed model architecture." width="520"/>
+  <img src="docs/images/ML Flow Chart.png" alt="Distributed model architecture." width="520"/>
 </p>
 <p align="center"><strong>Figure 2:</strong> <em>An example illustrating model distribution and parallelization among
 workers, as well as intermediate computation by the user.</em></p>
