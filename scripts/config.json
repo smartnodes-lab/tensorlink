@@ -1,0 +1,5 @@
+{
+  "address": "0x560fd8449eBAdAfE8168a560F656148F655459Ca",
+  "mining": "false",
+  "mining-script": "path/to/mining.executable"
+}

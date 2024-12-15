@@ -1,4 +1,4 @@
-from tensorlink.ml.torch_node import TorchNode
+from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
@@ -79,7 +79,6 @@ class Validator(TorchNode):
 
         self.proposal_listener = None
         self.execution_listener = None
-        self.dht_saver = None
 
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
@@ -1064,13 +1063,7 @@ class Validator(TorchNode):
         # Loop for active job and network moderation
         try:
             while not self.terminate_flag.is_set():
-                # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-                # if self.jobs:
-                #     job = self.routing_table[self.jobs[-1]]
-                #     if job is None:
-                #         print("Job data was deleted!")
-                #         time.sleep(3)
-                time.sleep(30)
+                time.sleep(10)
 
         except KeyboardInterrupt:
             self.terminate_flag.set()
@@ -1139,12 +1132,6 @@ class Validator(TorchNode):
             except Exception as e:
                 self.debug_print(f"SmartNode -> Error loading DHT state: {e}", colour="bright_red", level=logging.INFO)
 
-    def dht_saver(self):
-        """Periodically save the DHT state."""
-        while not self.terminate_flag.is_set():
-            self.save_dht_state()
-            time.sleep(600)
-
     def clean_node(self):
         """Periodically clean up node storage"""
         def clean_nodes(nodes):
@@ -1163,6 +1150,10 @@ class Validator(TorchNode):
                 nodes.remove(node)
 
         while not self.terminate_flag.is_set():
+            time.sleep(300)
+
+            self.save_dht_state()
+
             for job_id in self.jobs:
                 job_data = self.query_dht(job_id)
 
@@ -1175,8 +1166,6 @@ class Validator(TorchNode):
             clean_nodes(self.workers)
             clean_nodes(self.validators)
             clean_nodes(self.users)
-
-            time.sleep(300)
 
             # TODO method / request to delete job after certain time or by request of the user.
             #   Perhaps after a job is finished there is a delete request

@@ -63,9 +63,9 @@ os.makedirs("logs", exist_ok=True)
 os.makedirs("tmp", exist_ok=True)
 
 log_handler = TimedRotatingFileHandler(
-    "logs/dht_logs.log", when="midnight", interval=1, backupCount=30
+    "logs/runtime.log", when="midnight", interval=1, backupCount=30
 )
-log_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+log_handler.setFormatter(logging.Formatter("[%(asctime)s] - %(message)s"))
 log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.DEBUG)
@@ -1191,7 +1191,6 @@ class SmartNode(threading.Thread):
         for node in self.nodes.values():
             node.join()
 
-        self.connection_listener.join()
         self.stop_upnp()
         clean()
 

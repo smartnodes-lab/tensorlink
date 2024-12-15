@@ -70,9 +70,10 @@ class BaseNode:
         self.upnp_enabled = upnp
 
         self.node_process = None
+        self.node_instance = None
 
-        signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl+C
-        # signal.signal(signal.SIGTERM, self.signal_handler)
+        # signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl+C
+        signal.signal(signal.SIGTERM, self.signal_handler)
         # atexit.register(self.cleanup)
 
         self._initialized = True
@@ -92,9 +93,9 @@ class BaseNode:
         # Process cleanup
         if self.node_process is not None and self.node_process.exitcode is None:
             # Send a stop request to the role instance
-            response = self.send_request("stop", (None,), timeout=3)
+            response = self.send_request("stop", (None,), timeout=15)
             if response:
-                self.node_process.join(timeout=10)
+                self.node_process.join(timeout=20)
 
             # If the process is still alive, terminate it
             if self.node_process.is_alive():
@@ -105,48 +106,6 @@ class BaseNode:
             self.node_process.join()
             self.node_process = None  # Reset to None after cleanup
 
-        # UPnP port mapping cleanup
-        if self.upnp_enabled:
-            try:
-                upnp = miniupnpc.UPnP()
-                upnp.discoverdelay = 200
-
-                # Discover UPnP devices
-                devices_found = upnp.discover()
-                if devices_found == 0:
-                    # print("No UPnP devices found.")
-                    return
-
-                upnp.selectigd()  # Select Internet Gateway Device
-                local_ip = upnp.lanaddr
-                removed_count = 0
-
-                # print("Scanning existing UPnP port mappings...")
-                i = 0
-                while True:
-                    try:
-                        mapping = upnp.getgenericportmapping(i)
-                        if mapping is None:
-                            break  # No more mappings
-
-                        ext_port, protocol, (int_ip, int_port), desc = mapping[:4]
-
-                        # Check if mapping matches our application
-                        if int_ip == local_ip and desc == "SmartNode":
-                            # print(f"Removing UPnP mapping: {ext_port}/{protocol} -> {int_ip}:{int_port}")
-                            upnp.deleteportmapping(ext_port, protocol)
-                            removed_count += 1
-
-                        i += 1
-
-                    except Exception:
-                        break  # End of list or error during retrieval
-
-                # print(f"Cleanup complete. Removed {removed_count} UPnP mappings.")
-
-            except Exception as e:
-                print(f"Error during UPnP cleanup: {e}")
-
     def send_request(self, request_type, args, timeout=None):
         """
         Sends a request to the roles and waits for the response.
@@ -156,10 +115,10 @@ class BaseNode:
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
-            response = self.node_responses.get()  # Blocking call, waits for response
+            response = self.node_responses.get(timeout=3)  # Blocking call, waits for response
 
         except Exception as e:
-            print(f"Error sending request: {e}")
+            print(f"Error sending '{request_type}' request: {e}")
             response = {"return": str(e)}
 
         finally:
@@ -180,19 +139,18 @@ class WorkerNode(BaseNode):
             'upnp': kwargs.get('upnp', True),
             'off_chain_test': kwargs.get('off_chain_test', False)
         })
-        role_instance = Worker(
+        self.node_instance = Worker(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        role_instance.start()
-        role_instance.activate()
-        role_instance.join()
+        self.node_instance.start()
+        self.node_instance.activate()
 
     def setup(self):
         super().setup()
         distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
-        t = threading.Thread(target=distributed_worker.run)
+        t = threading.Thread(target=distributed_worker.run, daemon=True)
         t.start()
 
 

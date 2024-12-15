@@ -167,19 +167,24 @@ class DistributedWorker:
                         if module.training:
                             module.n_batch += 1
 
-    def send_request(self, request_type, args):
+    def send_request(self, request_type, args, timeout=10):
         request = {"type": request_type, "args": args}
         try:
-            self.mpc_lock.acquire()
+            self.mpc_lock.acquire(timeout=3)
             self.node_requests.put(request)
-            response = self.node_responses.get()  # Blocking call, waits for response
+            response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
+        except TimeoutError as e:
+            self.terminate = True
+
         except Exception as e:
-            print(f"Error sending request: {e}")
-            response = {"response": str(e)}
+            # print(f"Error sending request: {e}")
+            response = {"return": str(e)}
+
         finally:
             self.mpc_lock.release()
 
-        return response["return"]
+        if response:
+            return response["return"]
 
     def store_snapshot(self, module_id, _input, _output, epoch, micro):
         # Ensure the snapshots directory exists
@@ -360,7 +365,7 @@ class DistributedWorker:
         # Send a request to check if the node is shutting down
         shutdown_signal = self.send_request("check_shutdown", None)
         if shutdown_signal:  # Assuming shutdown_signal is True or some indication of shutdown
-            print("Termination signal received. Shutting down DistributedWorker process...")
+            self.send_request("debug_print", "Termination signal received. Shutting down DistributedWorker process...")
             self.terminate = True
 
     def run(self):

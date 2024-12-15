@@ -64,7 +64,7 @@ class Connection(threading.Thread):
 
             file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
-                chunk = self.sock.recv(self.chunk_size)
+                chunk = self.sock.recv(self.chunk_size,)
             except socket.timeout:
                 # self.main_node.debug_print("connection timeout")
                 continue
@@ -122,6 +122,7 @@ class Connection(threading.Thread):
 
             gc.collect()
 
+        self.sock.shutdown(socket.SHUT_RDWR)
         self.sock.settimeout(None)
         self.sock.close()
 
