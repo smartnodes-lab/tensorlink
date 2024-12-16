@@ -968,24 +968,24 @@ class SmartNode(threading.Thread):
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         # Check for prior port usage (best to maintain same port for simple bootstrapping)
-        port = int(
-            get_key(".env", self.rsa_key_hash)
-        )
-
-        if not port:  # If no port is found, get the next available one
+        port = get_key(".env", self.rsa_key_hash)
+        if port is None or not port:
+            # If no port is found, get the next available one
             port = self.get_next_port()
 
-        self.port = port
+        port = int(port)
+        self.port = int(port)
 
-        while True:
-            result = self.add_port_mapping(port, port)  # Forward the port using UPnP
-            if result is False:
-                self.port += 1
-                port += 1
-            elif result is True:
-                break
-            else:
-                raise "Error binding port."
+        if self.upnp:
+            while True:
+                result = self.add_port_mapping(port, port)  # Forward the port using UPnP
+                if result is False:
+                    self.port += 1
+                    port += 1
+                elif result is True:
+                    break
+                else:
+                    raise "Error binding port."
 
         self.sock.bind((self.host, port))
         self.sock.settimeout(3)

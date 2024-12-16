@@ -88,8 +88,23 @@ class Validator(TorchNode):
 
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
-            self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
-            # self.bootstrap()
+            if self.id:
+                time.sleep(0.1)
+                is_active, pub_key_hash, wallet_address = self.contract.functions.getValidatorInfo(
+                    self.id
+                ).call()
+
+                if is_active and bytes.hex(pub_key_hash) == self.rsa_key_hash:
+                    self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
+                    # self.bootstrap()
+                else:
+                    self.debug_print("Validator is inactive on SmartnodesMultiSig or has a different RSA "
+                                     f"key [expected: {bytes.hex(pub_key_hash)}, received: {self.rsa_key_hash}).",
+                                     level=logging.CRITICAL)
+                    self.terminate_flag.set()
+            else:
+                self.debug_print("Validator not listed on SmartnodesMultiSig.", level=logging.CRITICAL)
+                self.terminate_flag.set()
 
     def handle_data(self, data, node: Connection):
         """

@@ -16,13 +16,12 @@ def get_root_dir():
         return os.path.dirname(os.path.abspath(__file__))
 
 
-def create_env_file(_env_path, _config):
+def check_env_file(_env_path, _config):
     """
     Create a default .env file at the specified path if it doesn't exist.
     """
     if not os.path.exists(_env_path):
-        with open(_env_path, "w") as env_file:
-            env_file.write(f"PUBLIC_KEY={_config.get('address')}\n")
+        raise ".env does not exist! Create a .env file with PUBLIC_KEY and PRIVATE_KEY as per the documentation."
 
 
 def load_config(config_path="config.json"):
@@ -41,9 +40,9 @@ def main():
 
     # Load config if needed
     config = load_config(os.path.join(root_dir, "config.json"))
-    create_env_file(env_path, config)
+    check_env_file(env_path, config)
 
-    validator = ValidatorNode(upnp=True, print_level=logging.INFO)
+    validator = ValidatorNode(upnp=True, print_level=logging.DEBUG)
 
     try:
         while True:

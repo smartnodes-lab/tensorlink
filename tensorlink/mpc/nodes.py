@@ -95,7 +95,7 @@ class BaseNode:
             # Send a stop request to the role instance
             response = self.send_request("stop", (None,), timeout=15)
             if response:
-                self.node_process.join(timeout=20)
+                self.node_process.join(timeout=15)
 
             # If the process is still alive, terminate it
             if self.node_process.is_alive():
@@ -106,7 +106,7 @@ class BaseNode:
             self.node_process.join()
             self.node_process = None  # Reset to None after cleanup
 
-    def send_request(self, request_type, args, timeout=None):
+    def send_request(self, request_type, args, timeout=3):
         """
         Sends a request to the roles and waits for the response.
         """
@@ -115,7 +115,7 @@ class BaseNode:
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
-            response = self.node_responses.get(timeout=3)  # Blocking call, waits for response
+            response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
 
         except Exception as e:
             print(f"Error sending '{request_type}' request: {e}")
@@ -139,13 +139,13 @@ class WorkerNode(BaseNode):
             'upnp': kwargs.get('upnp', True),
             'off_chain_test': kwargs.get('off_chain_test', False)
         })
-        self.node_instance = Worker(
+        node_instance = Worker(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        self.node_instance.start()
-        self.node_instance.activate()
+        node_instance.activate()
+        node_instance.run()
 
     def setup(self):
         super().setup()
@@ -161,26 +161,24 @@ class ValidatorNode(BaseNode):
             'upnp': kwargs.get('upnp', True),
             'off_chain_test': kwargs.get('off_chain_test', False)
         })
-        role_instance = Validator(
+        node_instance = Validator(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        role_instance.start()
-        role_instance.join()
+        node_instance.run()
 
 
 class UserNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
 
-        role_instance = User(
+        self.node_instance = User(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        role_instance.start()
-        role_instance.join()
+        self.node_instance.start()
 
     def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None, dp_factor=None):
         # stop_spinner = threading.Event()
@@ -217,7 +215,8 @@ class UserNode(BaseNode):
                         module["optimizer"] = f"{optimizer_type.__module__}.{optimizer_type.__name__}"
                         module["training"] = training
 
-            distributed_config = self.send_request("request_job", (n_pipelines, 1, distribution))
+            distributed_config = self.send_request("request_job", (n_pipelines, 1, distribution),
+                                                   timeout=10)
 
             if not distributed_config:
                 print("Could not obtain job from network... Please try again.")

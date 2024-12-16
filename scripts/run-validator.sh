@@ -12,6 +12,12 @@ handle_error() {
     exit 1
 }
 
+# Function to compare versions
+version_gt() {
+    # Use Python to handle complex version comparisons
+    python3 -c "from packaging import version; print(version.parse('$1') > version.parse('$2'))"
+}
+
 # Trap any unexpected errors
 trap 'handle_error "Unexpected error occurred on line $LINENO"' ERR
 
@@ -41,10 +47,11 @@ if [ -z "$installed_version" ]; then
         handle_error "Failed to install Tensorlink"
     fi
 else
-    latest_version=$(pip install tensorlink --dry-run | grep 'Requirement already satisfied: tensorlink' |
-    grep -o '(.*)' | grep -o '[0-9.]\+')
+    # Fetch the latest version
+    latest_version=$(pip install tensorlink --dry-run 2>&1 | grep 'Requirement already satisfied: tensorlink' | grep -o '([^)]*)' | tr -d '()' | awk '{print $1}')
 
-    if [ "$(printf '%s\n' "$installed_version" "$latest_version" | sort -V | head -n1)" != "$installed_version" ]; then
+    # Compare versions using Python's version parsing
+    if [ "$(version_gt "$latest_version" "$installed_version")" == "True" ]; then
         echo "Tensorlink is outdated (current: $installed_version). Upgrading to $latest_version..."
         if ! pip install --upgrade tensorlink; then
             handle_error "Failed to upgrade Tensorlink"
@@ -54,10 +61,9 @@ else
     fi
 fi
 
-
 # Run Tensorlink worker
-echo "Starting worker..."
-python run_worker.py
+echo "Starting validator..."
+python run_validator.py
 
 # Optional: Deactivate virtual environment
 deactivate

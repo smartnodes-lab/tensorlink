@@ -122,9 +122,13 @@ class Connection(threading.Thread):
 
             gc.collect()
 
-        self.sock.shutdown(socket.SHUT_RDWR)
-        self.sock.settimeout(None)
-        self.sock.close()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            self.sock.settimeout(None)
+            self.sock.close()
 
     def send(self, data: bytes, compression: bool = False):
         try:
