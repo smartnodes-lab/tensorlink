@@ -52,10 +52,17 @@ class Worker(TorchNode):
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.debug_print("Public key not found in .env file, using donation wallet...")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            self.bootstrap()
+            attempts = 0
 
-            if self.off_chain_test is False and len(self.validators) == 0:
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                time.sleep(15)
+                self.debug_print(f"No validators found, trying again in 30s...")
+                attempts += 1
+
+            if len(self.validators) == 0:
                 self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection):

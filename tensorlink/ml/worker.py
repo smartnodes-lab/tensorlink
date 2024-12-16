@@ -173,6 +173,7 @@ class DistributedWorker:
             self.mpc_lock.acquire(timeout=3)
             self.node_requests.put(request)
             response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
+
         except TimeoutError as e:
             self.terminate = True
 

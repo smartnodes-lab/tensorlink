@@ -102,6 +102,7 @@ def main():
 
     except KeyboardInterrupt:
         logging.info("Exiting...")
+
     finally:
         if mining_process:
             stop_mining(mining_process)

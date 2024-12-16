@@ -82,6 +82,10 @@ class Validator(TorchNode):
 
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
+            if self.public_key is None:
+                self.debug_print("Public key not found in .env file, terminating...")
+                self.terminate_flag.set()
+
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
             self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
