@@ -1,11 +1,11 @@
-from collections import defaultdict
-
 from tensorlink.crypto.rsa import *
 from tensorlink.p2p.connection import Connection
 
 from logging.handlers import TimedRotatingFileHandler
+from collections import defaultdict
 from miniupnpc import UPnP
 from web3 import Web3
+from dotenv import get_key, set_key
 import ipaddress
 import threading
 import requests
@@ -63,9 +63,9 @@ os.makedirs("logs", exist_ok=True)
 os.makedirs("tmp", exist_ok=True)
 
 log_handler = TimedRotatingFileHandler(
-    "logs/dht_logs.log", when="midnight", interval=1, backupCount=30
+    "logs/runtime.log", when="midnight", interval=1, backupCount=30
 )
-log_handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
+log_handler.setFormatter(logging.Formatter("[%(asctime)s] - %(message)s"))
 log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.DEBUG)
@@ -905,6 +905,7 @@ class SmartNode(threading.Thread):
                     self.debug_print(f"Attempt {attempt + 1}: could not connect to {host}:{port} -> {e}",
                                      colour="red", level=logging.WARNING)
                     time.sleep(1)
+                    self.remove_port_mapping(our_port)
                     if attempt == 2:  # Last attempt
                         return False
 
@@ -966,30 +967,32 @@ class SmartNode(threading.Thread):
         """Initializes the main socket for handling incoming connections."""
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-        # Read the current config
-        with open(os.path.join(CONFIG_PATH, "config.json"), "r") as file:
-            _config = json.load(file)
-
         # Check for prior port usage (best to maintain same port for simple bootstrapping)
-        connection_stats = _config.get(self.rsa_key_hash, {})
-        port = connection_stats.get("port")
-
-        if not port:  # If no port is found, get the next available one
+        port = get_key(".env", self.rsa_key_hash)
+        if port is None or not port:
+            # If no port is found, get the next available one
             port = self.get_next_port()
 
-        self.port = port
-        self.add_port_mapping(port, port)  # Forward the port using UPnP
+        port = int(port)
+        self.port = int(port)
+
+        if self.upnp:
+            while True:
+                result = self.add_port_mapping(port, port)  # Forward the port using UPnP
+                if result is False:
+                    self.port += 1
+                    port += 1
+                elif result is True:
+                    break
+                else:
+                    raise "Error binding port."
+
         self.sock.bind((self.host, port))
         self.sock.settimeout(3)
         self.sock.listen(5)
 
         # Update the port in the config if necessary
-        connection_stats["port"] = port
-        _config[self.rsa_key_hash] = connection_stats  # Update the local section with the new port
-
-        # Save the updated configuration back to config.json
-        with open(os.path.join(CONFIG_PATH, "config.json"), "w") as file:
-            json.dump(_config, file, indent=4)
+        set_key(".env", self.rsa_key_hash, str(port))
 
     def init_upnp(self) -> None:
         """Enables UPnP on main socket to allow connections"""
@@ -1020,12 +1023,16 @@ class SmartNode(threading.Thread):
 
                 if result:
                     self.debug_print(f"SmartNode -> UPnP port forward successful on port {self.port}")
+                    return True
                 else:
                     self.debug_print(f"SmartNode -> Failed to initialize UPnP. (internal port: {internal_port},"
                                      f" external port: {external_port})", level=logging.CRITICAL, colour="bright_red")
+                    return False
+
             except Exception as e:
                 if "ConflictInMapping" in str(e):
-                    self.debug_print(f"SmartNode -> Port {external_port} is already mapped.", level=logging.WARNING)
+                    self.debug_print(f"SmartNode -> Port {external_port} is already mapped.", level=logging.DEBUG)
+                    return False
                 else:
                     raise e
 
@@ -1191,7 +1198,6 @@ class SmartNode(threading.Thread):
         for node in self.nodes.values():
             node.join()
 
-        self.connection_listener.join()
         self.stop_upnp()
         clean()
 

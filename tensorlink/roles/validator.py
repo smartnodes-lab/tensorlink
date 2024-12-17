@@ -1,4 +1,4 @@
-from tensorlink.ml.torch_node import TorchNode
+from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
@@ -79,14 +79,32 @@ class Validator(TorchNode):
 
         self.proposal_listener = None
         self.execution_listener = None
-        self.dht_saver = None
 
         if off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
+            if self.public_key is None:
+                self.debug_print("Public key not found in .env file, terminating...")
+                self.terminate_flag.set()
+
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(self.public_key).call()
-            self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
-            # self.bootstrap()
+            if self.id:
+                time.sleep(0.1)
+                is_active, pub_key_hash, wallet_address = self.contract.functions.getValidatorInfo(
+                    self.id
+                ).call()
+
+                if is_active and bytes.hex(pub_key_hash) == self.rsa_key_hash:
+                    self.current_proposal = self.multi_sig_contract.functions.nextProposalId.call()
+                    # self.bootstrap()
+                else:
+                    self.debug_print("Validator is inactive on SmartnodesMultiSig or has a different RSA "
+                                     f"key [expected: {bytes.hex(pub_key_hash)}, received: {self.rsa_key_hash}).",
+                                     level=logging.CRITICAL)
+                    self.terminate_flag.set()
+            else:
+                self.debug_print("Validator not listed on SmartnodesMultiSig.", level=logging.CRITICAL)
+                self.terminate_flag.set()
 
     def handle_data(self, data, node: Connection):
         """
@@ -1062,21 +1080,8 @@ class Validator(TorchNode):
             self.execution_listener.start()
 
         # Loop for active job and network moderation
-        try:
-            while not self.terminate_flag.is_set():
-                # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-                # if self.jobs:
-                #     job = self.routing_table[self.jobs[-1]]
-                #     if job is None:
-                #         print("Job data was deleted!")
-                #         time.sleep(3)
-                time.sleep(30)
-
-        except KeyboardInterrupt:
-            self.terminate_flag.set()
-
-        finally:
-            self.stop()
+        while not self.terminate_flag.is_set():
+            time.sleep(10)
 
     def stop(self):
         self.save_dht_state()
@@ -1139,12 +1144,6 @@ class Validator(TorchNode):
             except Exception as e:
                 self.debug_print(f"SmartNode -> Error loading DHT state: {e}", colour="bright_red", level=logging.INFO)
 
-    def dht_saver(self):
-        """Periodically save the DHT state."""
-        while not self.terminate_flag.is_set():
-            self.save_dht_state()
-            time.sleep(600)
-
     def clean_node(self):
         """Periodically clean up node storage"""
         def clean_nodes(nodes):
@@ -1163,6 +1162,10 @@ class Validator(TorchNode):
                 nodes.remove(node)
 
         while not self.terminate_flag.is_set():
+            time.sleep(300)
+
+            self.save_dht_state()
+
             for job_id in self.jobs:
                 job_data = self.query_dht(job_id)
 
@@ -1175,8 +1178,6 @@ class Validator(TorchNode):
             clean_nodes(self.workers)
             clean_nodes(self.validators)
             clean_nodes(self.users)
-
-            time.sleep(300)
 
             # TODO method / request to delete job after certain time or by request of the user.
             #   Perhaps after a job is finished there is a delete request

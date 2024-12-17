@@ -1,14 +1,14 @@
 # Ignore build artifacts from the local testing sub-crate.
-target/
-venv/
-keys/
-dist/
-logs/
-models/
-tmp/
-build/
-tensorlink.egg-info/
-.idea
+*target/
+*venv/
+*keys/
+*dist/
+*logs/
+*models/
+*tmp/
+*build/
+*tensorlink.egg-info/
+*.idea
 *.env
 .DS_Store
 *.rs.bk

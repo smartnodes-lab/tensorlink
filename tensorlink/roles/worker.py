@@ -1,28 +1,23 @@
-import time
-
-from tensorlink.ml.torch_node import TorchNode
+from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.p2p.connection import Connection
 from tensorlink.ml.utils import estimate_memory, handle_output, get_gpu_memory
 from tensorlink.crypto.rsa import get_rsa_pub_key
 
 from dotenv import get_key
 import torch.nn as nn
-import threading
 import logging
 import hashlib
 import torch
+import time
 import json
 
 
 class Worker(TorchNode):
     """
     Todo:
-        - convert pickling to json for security (?)
-        - process other jobs/batches while waiting for worker response (?)
         - link workers to database or download training data for complete offloading
         - different subclasses of Worker for mpc requirements to designate mpc-specific
             tasks, ie distributing a model too large to handle on a single computer / user
-        - function that detaches the huggingface wrapped outputs tensor without modifying the rest
     """
 
     def __init__(
@@ -57,8 +52,8 @@ class Worker(TorchNode):
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.debug_print("Public key not found in .env file, using donation wallet...")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            self.bootstrap()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -157,12 +152,23 @@ class Worker(TorchNode):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         super().run()
+        attempts = 0
+        if self.off_chain_test is False:
+            self.debug_print(f"Bootstrapping...")
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                if len(self.validators) == 0:
+                    time.sleep(15)
+                    self.debug_print(f"No validators found, trying again...")
+                    attempts += 1
+
+            # if len(self.validators) == 0:
+            #     self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+            #     self.stop()
+            #     self.terminate_flag.set()
 
         while not self.terminate_flag.is_set():
-            # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-            time.sleep(3)
-
-        self.stop()
+            time.sleep(1)
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass

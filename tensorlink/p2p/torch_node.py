@@ -296,6 +296,17 @@ class TorchNode(SmartNode):
                 node_id, module_id = request["args"]
                 node = self.nodes[node_id]
                 self.send_to_node_from_file(node, f"parameters_{module_id}", b"PARAMETERS" + module_id.encode())
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+
+            elif req_type == "is_loaded":
+                return_val = False
+                for module_id, module in self.modules.items():
+                    if module.get("terminated"):
+                        pass
+                    else:
+                        return_val = True
+
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
             elif req_type == "check_module":
                 # Check if module has been received and is loaded in shared mpc
@@ -308,6 +319,7 @@ class TorchNode(SmartNode):
                     elif "termination" in module:
                         return_val = module_id
                         del module["termination"]
+                        module["terminated"] = True
 
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -565,4 +577,5 @@ class TorchNode(SmartNode):
 
     def stop_mpc_comms(self):
         self.mpc_terminate_flag.set()
+        self.debug_print("Shutting down distributed ML processes...", level=logging.DEBUG)
         self.mpc_comms.join()

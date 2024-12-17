@@ -6,7 +6,7 @@ import time
 
 
 if __name__ == "__main__":
-
+    # Run each node type and connect to each other (good for a test node sandbox)
     user = UserNode(upnp=False, off_chain_test=True, print_level=10)
     time.sleep(1)
     worker = WorkerNode(upnp=False, off_chain_test=True, print_level=10)
@@ -20,9 +20,14 @@ if __name__ == "__main__":
     time.sleep(3)
     user.send_request("connect_node", (val_key, val_host, val_port))
     time.sleep(3)
-    # user.send_request("connect_node", (b"", "142.188.24.158", 38751))
-    # time.sleep(3)
 
+    # An optional loop for debugging nodes
+    # try:
+    #     while True:
+    #         time.sleep(3)
+    # except KeyboardInterrupt:
+    #     pass
+
+    user.cleanup()
     validator.cleanup()
     worker.cleanup()
-    user.cleanup()
