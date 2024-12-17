@@ -167,10 +167,10 @@ class DistributedWorker:
                         if module.training:
                             module.n_batch += 1
 
-    def send_request(self, request_type, args, timeout=10):
+    def send_request(self, request_type, args, timeout=None):
         request = {"type": request_type, "args": args}
         try:
-            self.mpc_lock.acquire(timeout=3)
+            self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
             response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
 
@@ -360,7 +360,7 @@ class DistributedWorker:
                                 self.send_request("optimizer_response", (module_id, "zeroed"))
 
             counter += 1
-            time.sleep(0.05)
+            time.sleep(0.2)
 
     def check_for_termination(self):
         # Send a request to check if the node is shutting down

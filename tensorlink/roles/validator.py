@@ -1080,15 +1080,8 @@ class Validator(TorchNode):
             self.execution_listener.start()
 
         # Loop for active job and network moderation
-        try:
-            while not self.terminate_flag.is_set():
-                time.sleep(10)
-
-        except KeyboardInterrupt:
-            self.terminate_flag.set()
-
-        finally:
-            self.stop()
+        while not self.terminate_flag.is_set():
+            time.sleep(10)
 
     def stop(self):
         self.save_dht_state()

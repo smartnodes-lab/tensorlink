@@ -54,16 +54,6 @@ class Worker(TorchNode):
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.debug_print("Public key not found in .env file, using donation wallet...")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            attempts = 0
-
-            while attempts < 3 and len(self.validators) == 0:
-                self.bootstrap()
-                time.sleep(15)
-                self.debug_print(f"No validators found, trying again in 30s...")
-                attempts += 1
-
-            if len(self.validators) == 0:
-                self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -162,17 +152,23 @@ class Worker(TorchNode):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         super().run()
+        attempts = 0
+        if self.off_chain_test is False:
+            self.debug_print(f"Bootstrapping...")
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                if len(self.validators) == 0:
+                    time.sleep(15)
+                    self.debug_print(f"No validators found, trying again...")
+                    attempts += 1
 
-        try:
-            while not self.terminate_flag.is_set():
-                # Handle job oversight, and inspect other jobs (includes job verification and reporting)
-                time.sleep(10)
+            # if len(self.validators) == 0:
+            #     self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+            #     self.stop()
+            #     self.terminate_flag.set()
 
-        except KeyboardInterrupt:
-            self.terminate_flag.set()
-
-        finally:
-            self.stop()
+        while not self.terminate_flag.is_set():
+            time.sleep(1)
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass

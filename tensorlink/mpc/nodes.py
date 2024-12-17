@@ -72,22 +72,29 @@ class BaseNode:
         self.node_process = None
         self.node_instance = None
 
-        # signal.signal(signal.SIGINT, self.signal_handler)  # Handle Ctrl+C
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        # atexit.register(self.cleanup)
-
+        self._stop_event = multiprocessing.Event()
+        self._setup_signal_handlers()
         self._initialized = True
         self.setup()
+
+    def _setup_signal_handlers(self):
+        """
+        Set up signal handlers for graceful shutdown.
+        Uses a multiprocessing Event to signal across processes.
+        """
+        def handler(signum, frame):
+            print(f"Received signal {signum}. Initiating shutdown...")
+            self._stop_event.set()
+            self.cleanup()
+            sys.exit(0)
+
+        # Register handlers for common termination signals
+        for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGQUIT]:
+            signal.signal(sig, handler)
 
     def setup(self):
         self.node_process = multiprocessing.Process(target=self.run_role, daemon=True)
         self.node_process.start()
-
-    def signal_handler(self, sig, frame):
-        """Handle termination signals and call cleanup, most importantly removing open port mappings"""
-        print(f"Received signal {sig}. Cleaning up...")
-        self.cleanup()
-        sys.exit(0)
 
     def cleanup(self):
         # Process cleanup
@@ -139,13 +146,21 @@ class WorkerNode(BaseNode):
             'upnp': kwargs.get('upnp', True),
             'off_chain_test': kwargs.get('off_chain_test', False)
         })
+
         node_instance = Worker(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        node_instance.activate()
-        node_instance.run()
+        try:
+            node_instance.activate()
+            node_instance.run()
+
+            while node_instance.is_alive():
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            node_instance.stop()
 
     def setup(self):
         super().setup()
@@ -166,19 +181,34 @@ class ValidatorNode(BaseNode):
             self.node_responses,
             **kwargs
         )
-        node_instance.run()
+
+        try:
+            node_instance.run()
+
+            while node_instance.is_alive():
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            node_instance.stop()
 
 
 class UserNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
 
-        self.node_instance = User(
+        node_instance = User(
             self.node_requests,
             self.node_responses,
             **kwargs
         )
-        self.node_instance.start()
+        try:
+            node_instance.run()
+
+            while node_instance.is_alive():
+                time.sleep(1)
+
+        except KeyboardInterrupt:
+            node_instance.stop()
 
     def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None, dp_factor=None):
         # stop_spinner = threading.Event()

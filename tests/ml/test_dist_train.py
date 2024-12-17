@@ -60,14 +60,14 @@ if __name__ == "__main__":
     user = UserNode(upnp=False, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
     time.sleep(3)
     worker = WorkerNode(upnp=False, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
-    time.sleep(5)
+    time.sleep(3)
 
     # Bootstrap roles
     val_key, val_host, val_port = validator.send_request("info", None)
 
-    worker.send_request("connect_node", (val_key, val_host, val_port))
+    worker.send_request("connect_node", (val_key, val_host, val_port), timeout=5)
     time.sleep(1)
-    user.send_request("connect_node", (val_key, val_host, val_port))
+    user.send_request("connect_node", (val_key, val_host, val_port), timeout=5)
     time.sleep(1)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,17 +86,17 @@ if __name__ == "__main__":
     # p2 = list(distributed_model.parameters(load=False))
     # d = distributed_model.state_dict()
 
-    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
-    distributed_model.train()
+    # distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    # distributed_model.train()
 
-    for _ in range(3):
-        distributed_optimizer.zero_grad()
+    for _ in range(10):
+        # distributed_optimizer.zero_grad()
         x = torch.zeros((1, 1), dtype=torch.long)
         outputs = distributed_model(x)
-        outputs = outputs.logits
-        loss = mse_loss(outputs, outputs)
-        loss.backward()
-        distributed_optimizer.step()
+        # outputs = outputs.logits
+        # loss = mse_loss(outputs, outputs)
+        # loss.backward()
+        # distributed_optimizer.step()
 
     user.cleanup()
     worker.cleanup()

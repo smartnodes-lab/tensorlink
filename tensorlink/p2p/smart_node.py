@@ -1031,7 +1031,7 @@ class SmartNode(threading.Thread):
 
             except Exception as e:
                 if "ConflictInMapping" in str(e):
-                    self.debug_print(f"SmartNode -> Port {external_port} is already mapped.", level=logging.WARNING)
+                    self.debug_print(f"SmartNode -> Port {external_port} is already mapped.", level=logging.DEBUG)
                     return False
                 else:
                     raise e
