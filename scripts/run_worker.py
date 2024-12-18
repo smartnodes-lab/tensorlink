@@ -51,11 +51,12 @@ def is_gpu_available(worker_node: WorkerNode):
     return False
 
 
-def start_mining(mining_script):
+def start_mining(mining_script, use_sudo=False):
     """
     Start the mining process using the specified script.
     """
-    return subprocess.Popen(mining_script, shell=True)
+    command = f"sudo {mining_script}" if use_sudo else mining_script
+    return subprocess.Popen(command, shell=True)
 
 
 def stop_mining(mining_process):
@@ -78,6 +79,7 @@ def main():
     mining_process = None
     mining_enabled = config.get("mining", "false").lower() == "true"
     mining_script = config.get("mining-script")
+    use_sudo = True if os.geteuid() == 0 else False
 
     worker = WorkerNode(upnp=True, print_level=logging.INFO)
 
@@ -88,7 +90,7 @@ def main():
                     # If GPU is available and mining is not active, start it
                     if not mining_process or mining_process.poll() is not None:
                         logging.info("Starting mining...")
-                        mining_process = start_mining(mining_script)
+                        mining_process = start_mining(mining_script, use_sudo)
                 else:
                     # Stop mining if we require GPU for worker and mining is active
                     if mining_process and mining_process.poll() is None:

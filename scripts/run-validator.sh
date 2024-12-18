@@ -61,9 +61,16 @@ else
     fi
 fi
 
+# Check if script is run with sudo
+RUN_AS_SUDO=""
+if [ "$EUID" -eq 0 ]; then
+    echo "Script running with sudo privileges."
+    RUN_AS_SUDO="sudo"
+fi
+
 # Run Tensorlink worker
 echo "Starting validator..."
-python run_validator.py
+$RUN_AS_SUDO python run_validator.py
 
 # Optional: Deactivate virtual environment
 deactivate
