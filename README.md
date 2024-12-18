@@ -1,5 +1,5 @@
 # Tensorlink
-![Static Badge](https://img.shields.io/badge/v0.1.0-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
+![Static Badge](https://img.shields.io/badge/v0.1.1-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
 <!-- ![GitHub all releases](https://img.shields.io/github/downloads/smartnodes-lab/tensorlink/total) -->
 
 **Tensorlink** is a library designed to simplify the scaling of PyTorch model training and inference, offering tools 
@@ -130,25 +130,38 @@ This feature is a work in progress and is currently not available.
 
 ## Running a Node
 
-Tensorlink can be configured for use on local or private networks, but its full potential lies in the public network, 
-where individuals from around the world contribute computational resources. By running a Worker node, you can:
+Tensorlink is a versatile system designed for use on local, private, and public networks. However, its true power shines on the **public network**, where individuals worldwide contribute computational resources to advance innovation. By running a Worker node, you not only support cutting-edge projects but also earn rewards for your contributions.
 
-- **Support Innovation:** Contribute to building a global decentralized compute network.
-- **Earn Rewards:** Provide resources and receive Smartnodes tokens (SNO) for your contributions.
-- **Join the Community:** Be part of an open-source project aiming to redefine distributed computing.
+### Why Run a Tensorlink Node?
+- **Support Innovation**: Contribute to global machine learning and computational projects.
+- **Earn Rewards**: Get compensated for providing your idle GPU power.
+- **Join the Community**: Be part of a decentralized network pushing the boundaries of technology.
 
+### Getting Started
 
-### How to Get Started
-- Check the **Releases** section on GitHub for binaries or scripts to set up a node quickly and easily.
-- Follow the included documentation to configure your node and start contributing to the Tensorlink network.
+1. **Download the Node Binary**  
+   - Visit the [**Releases**](https://github.com/smartnodes-lab/tensorlink) section on GitHub to download the latest `tensorlink-miner` binary for your platform.
+      - Multi-GPU utilization and Windows support are not yet supported.
+   - Ensure you have Python 3 and a **CUDA-enabled GPU** installed on your system.
 
-## Contributing
+2. **Set Up the Configuration**  
+   - Open the `config.json` file.
+   - Add:
+     - Your **base wallet address** (used for receiving rewards).
+     - The **path to a GPU mining script or other process** you wish to run while the worker is idle (optional).
+         - You must also set "mining" to "true".
 
-We welcome contributions from the community to help us build and enhance Tensorlink! There are many ways to get involved:
+3. **Run the Worker**  
+   - Execute the *run-worker.sh* script to start your node. (e.g. `./run-worker.sh`)
 
-- **Create Issues**: If you encounter bugs, have feature requests, or suggestions for improvement, please create an issue on our GitHub repository.
-- **Submit Pull Requests**: Feel free to fork the repository, make changes, and submit a pull request with improvements or fixes.
-- **Join the Discussion**: Reach out to us through GitHub discussions or contact us directly if you want to collaborate on specific features.
+### Contributing
+
+We’re excited to welcome contributions from the community to help build and enhance Tensorlink! Here’s how you can get involved:
+
+- **Report Issues:** Encounter a bug or have a feature request? Create an issue on our GitHub repository.
+- **Submit Pull Requests:** Fork the repository, make improvements or fixes, and send us a pull request.
+- **Documentation Contributions:** Help improve the Tensorlink Docs.
+- **Join the Discussion:** Connect with us and other contributors on our Discord server.
 
 We need more people to help us refine Tensorlink and make it the best possible tool for decentralized neural network training. Your contributions and insights can make a significant impact!
 
