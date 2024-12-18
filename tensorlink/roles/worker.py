@@ -5,6 +5,7 @@ from tensorlink.crypto.rsa import get_rsa_pub_key
 
 from dotenv import get_key
 import torch.nn as nn
+import threading
 import logging
 import hashlib
 import torch
@@ -152,6 +153,9 @@ class Worker(TorchNode):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         super().run()
+        node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
+        node_cleaner.start()
+
         attempts = 0
         if self.off_chain_test is False:
             self.debug_print(f"Bootstrapping...")
@@ -162,10 +166,10 @@ class Worker(TorchNode):
                     self.debug_print(f"No validators found, trying again...")
                     attempts += 1
 
-            # if len(self.validators) == 0:
-            #     self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
-            #     self.stop()
-            #     self.terminate_flag.set()
+            if len(self.validators) == 0:
+                self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+                self.stop()
+                self.terminate_flag.set()
 
         while not self.terminate_flag.is_set():
             time.sleep(1)
@@ -206,15 +210,33 @@ class Worker(TorchNode):
     def activate(self):
         self.training = True
 
-    """Key Methods to Implement"""
+    def clean_node(self):
+        """Periodically clean up node storage"""
+        def clean_nodes(nodes):
+            nodes_to_remove = []
+            for node_id in nodes:
+                # Remove any ghost user_ids in self.users
+                if node_id not in self.nodes:
+                    nodes_to_remove.append(node_id)
 
-    # def host_job(self, model: nn.Module):
-    #     """
-    #     Todo:
-    #         - connect to master roles via SC and load in model
-    #         - attempt to assign and relay model to other idle connected workers
-    #         - determine relevant connections
-    #     """
-    #     self.optimizer = torch.optim.Adam
-    #     self.training = True
-    #     self.distribute_model(model)  # Add master vs worker functionality
+                # Remove any terminated connections
+                elif self.nodes[node_id].terminate_flag.is_set():
+                    nodes_to_remove.append(node_id)
+                    del self.nodes[node_id]
+
+            for node in nodes_to_remove:
+                nodes.remove(node)
+
+        while not self.terminate_flag.is_set():
+            time.sleep(300)
+
+            for job_id in self.jobs:
+                job_data = self.query_dht(job_id)
+
+                if job_data["active"] is False:
+                    self.jobs.remove(job_id)
+                    self.__delete(job_id)
+
+            clean_nodes(self.workers)
+            clean_nodes(self.validators)
+            clean_nodes(self.users)

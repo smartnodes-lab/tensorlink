@@ -1081,7 +1081,7 @@ class Validator(TorchNode):
 
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            time.sleep(10)
+            time.sleep(1)
 
     def stop(self):
         self.save_dht_state()
