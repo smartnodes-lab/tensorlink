@@ -51,15 +51,20 @@ logger.setLevel(logging.INFO)
 BATCH_SIZE = 64
 PIPELINES = 1
 DP_FACTOR = 1
+LOCAL = True
+
+UPNP = False
+if not LOCAL:
+    UPNP = True
 
 
 if __name__ == "__main__":
     # Launch Nodes
-    validator = ValidatorNode(upnp=False, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    validator = ValidatorNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
     time.sleep(3)
-    user = UserNode(upnp=False, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    user = UserNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG, trusted=True)
     time.sleep(3)
-    worker = WorkerNode(upnp=False, off_chain_test=True, local_test=False, print_level=logging.DEBUG)
+    worker = WorkerNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG, trusted=True)
     time.sleep(3)
 
     # Bootstrap roles
@@ -81,10 +86,6 @@ if __name__ == "__main__":
         optimizer_type=torch.optim.Adam
     )
     del model
-
-    # p1 = list(distributed_model.parameters())
-    # p2 = list(distributed_model.parameters(load=False))
-    # d = distributed_model.state_dict()
 
     # distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
     # distributed_model.train()

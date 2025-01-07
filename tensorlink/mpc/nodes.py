@@ -53,7 +53,8 @@ class BaseNode:
             max_connections: int = 0,
             off_chain_test=False,
             local_test=False,
-            print_level=logging.WARNING
+            print_level=logging.WARNING,
+            trusted=False
     ):
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
@@ -66,7 +67,7 @@ class BaseNode:
             "off_chain_test": off_chain_test,
             "local_test": local_test
         }
-
+        self.trusted = trusted
         self.upnp_enabled = upnp
 
         self.node_process = None
@@ -118,7 +119,7 @@ class BaseNode:
         Sends a request to the roles and waits for the response.
         """
         request = {"type": request_type, "args": args}
-        response = None
+
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
@@ -164,7 +165,8 @@ class WorkerNode(BaseNode):
 
     def setup(self):
         super().setup()
-        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock)
+        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock,
+                                               trusted=self.trusted)
         t = threading.Thread(target=distributed_worker.run, daemon=True)
         t.start()
 
@@ -176,6 +178,7 @@ class ValidatorNode(BaseNode):
             'upnp': kwargs.get('upnp', True),
             'off_chain_test': kwargs.get('off_chain_test', False)
         })
+
         node_instance = Validator(
             self.node_requests,
             self.node_responses,
@@ -210,15 +213,19 @@ class UserNode(BaseNode):
         except KeyboardInterrupt:
             node_instance.stop()
 
-    def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None, dp_factor=None):
+    def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None,
+                                 trusted: bool = None, dp_factor=None):
         # stop_spinner = threading.Event()
         # spinner_thread = threading.Thread(target=show_spinner, args=(stop_spinner, "Creating distributed model"))
 
         try:
             # Start the spinner
             # spinner_thread.start()
+            if trusted is None:
+                trusted = self.trusted
 
-            dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model, n_pipelines)
+            dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model,
+                                          n_pipelines, trusted=trusted)
             # self.send_request("request_workers", None)
             # time.sleep(3)
             # workers = self.send_request("check_workers", None)

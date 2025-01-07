@@ -10,6 +10,7 @@ import torch.nn as nn
 import threading
 import hashlib
 import random
+import pickle
 import torch
 import queue
 import time
@@ -34,6 +35,22 @@ def contains_offloaded(module: nn.Module):
         exists = exists or contains_offloaded(child)
 
     return exists
+
+
+def _confirm_action():
+    """
+    Prompts the user with a confirmation message before proceeding.
+    """
+    while True:
+        response = input("Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): ").strip().lower()
+        if response in {"yes", "y"}:
+            print("Proceeding with trusted mode.")
+            break
+        elif response in {"no", "n"}:
+            print("Aborting initialization in trusted mode.")
+            exit(1)
+        else:
+            print("Invalid input. Please type 'yes'/'y' or 'no'/'n'.")
 
 
 class CustomAutogradRouter(torch.autograd.Function):
@@ -61,7 +78,7 @@ class DistributedModel(nn.Module):
     """
     DistributedModel:
         Is able to host offloaded submodules along with local operations. Can be spawned
-        by a Worker or a User. Host is referred to as the 'master' roles.
+        by a Worker or a User. Host is referred to as the 'master' node.
     """
     def __init__(
         self,
@@ -70,7 +87,8 @@ class DistributedModel(nn.Module):
         mpc_lock,
         model: nn.Module,
         n_pipelines: int,
-        device=None
+        device=None,
+        trusted=False
     ):
         super(DistributedModel, self).__init__()
         self.name = str(model).split("(")[0]
@@ -95,6 +113,11 @@ class DistributedModel(nn.Module):
             device if device else "cuda" if torch.cuda.is_available() else "cpu"
         )
         self.optimizer = None
+
+        self.trusted = trusted
+
+        if trusted:
+            _confirm_action()
 
     def forward(self, *args, **kwargs):
         """
@@ -214,11 +237,15 @@ class DistributedModel(nn.Module):
                     worker_id = self.distributed_graph[module_id_bytes]["workers"][-1]
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
-                    loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
-                    size, shm_name = store_in_shared_memory(
-                        loss_bytes,
-                        encoded=True
-                    )
+                    if self.trusted:
+                        size, shm_name = store_in_shared_memory((detach_tensor(loss), None))
+                    else:
+                        loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
+                        size, shm_name = store_in_shared_memory(
+                            loss_bytes,
+                            encoded=True
+                        )
+
                     self.send_request("send_backward", (worker_id, size, shm_name, tag))
 
                     # Wait for response, change to appending waiting thread to list in master
@@ -230,8 +257,13 @@ class DistributedModel(nn.Module):
                         if args is not None:
                             waiting = False
                             size, name = args
-                            loss_bytes = get_from_shared_memory(size, name, encoded=True)
-                            loss = bytes_to_tensor(loss_bytes)
+
+                            if self.trusted:
+                                loss = get_from_shared_memory(size, name)
+
+                            else:
+                                loss_bytes = get_from_shared_memory(size, name, encoded=True)
+                                loss = bytes_to_tensor(loss_bytes)
 
                         if time.time() - start_time >= MAX_WAIT_TIME:
                             # Logic here to request another worker take his place
@@ -498,7 +530,7 @@ class DistributedModel(nn.Module):
             k, v = create_offloaded(model, [-1], model_size)
             v["name"] = None
 
-            if not isinstance(model, PreTrainedModel):
+            if not isinstance(model, PreTrainedModel) or not self.trusted:
                 try:
                     torch.jit.script(model)
 
@@ -566,11 +598,16 @@ class DistributedModel(nn.Module):
 
         file_name = f"{module_hash}_{worker_id}.pt"
         # TODO Custom pickle function OR send state dict and recreate a model on other side
-        if isinstance(child_module, PreTrainedModel):
+        if self.trusted:
+            with open(file_name, "wb") as f:
+                pickle.dump(child_module, f)
+
+        elif isinstance(child_module, PreTrainedModel):
             state_dict = child_module.state_dict()
             state_dict["module_config"] = child_module.config.to_dict()
             state_dict["module_class"] = child_module.__class__.__name__
             torch.save(state_dict, file_name)  # Save the module to disk
+
         else:
             try:
                 scripted_module = torch.jit.script(child_module)

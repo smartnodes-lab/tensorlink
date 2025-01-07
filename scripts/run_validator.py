@@ -42,7 +42,12 @@ def main():
     config = load_config(os.path.join(root_dir, "config.json"))
     check_env_file(env_path, config)
 
-    validator = ValidatorNode(upnp=True, print_level=logging.DEBUG)
+    local = config.get("local", "false")
+    upnp = True
+    if local == "true":
+        upnp = False
+
+    validator = ValidatorNode(upnp=upnp, local_test=local, off_chain_test=local, print_level=logging.DEBUG)
 
     try:
         while True:

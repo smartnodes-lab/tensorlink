@@ -1077,6 +1077,7 @@ class SmartNode(threading.Thread):
                 # Stop when there are no more entries
                 if "SpecifiedArrayIndexInvalid" in str(e):
                     break
+
                 self.debug_print(f"SmartNode -> Error retrieving port mapping at index {index}: {e}",
                                  level=logging.ERROR)
                 break

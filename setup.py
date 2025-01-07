@@ -2,13 +2,12 @@ from setuptools import setup, find_packages
 import os
 
 # Version of the package
-VERSION = "0.1.0.post1"
+VERSION = "0.1.1"
 
 # Description of the package
 DESCRIPTION = (
-    "Tensorlink is a generalized, plug-and-play framework for distributed model scaling in PyTorch. "
-    "It provides tools for parsing and distributing models across a network of peers, and integrates directly into "
-    "existing PyTorch workflows."
+    "Tensorlink is a library designed to simplify the scaling of PyTorch model training and inference, offering tools "
+    "to easily distribute models across a network of peers and share computational resources both locally and globally."
 )
 
 

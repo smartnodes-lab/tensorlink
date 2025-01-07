@@ -33,7 +33,6 @@ import os
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
-
 MODEL_TYPE_MAPPING = {
     'ForSequenceClassification': AutoModelForSequenceClassification,
     'ForTokenClassification': AutoModelForTokenClassification,
@@ -54,7 +53,7 @@ MODEL_TYPE_MAPPING = {
 
 
 class DistributedWorker:
-    def __init__(self, node_requests, node_responses, mpc_lock):
+    def __init__(self, node_requests, node_responses, mpc_lock, trusted=False):
         self.node_requests = node_requests
         self.node_responses = node_responses
         self.mpc_lock = mpc_lock
@@ -65,6 +64,7 @@ class DistributedWorker:
         self.optimizers = {}
         self.terminate = False
         self.lock = threading.Lock()
+        self.trusted = trusted
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -218,7 +218,11 @@ class DistributedWorker:
     def load_module(self, file_name, module_id, node_id, module_name, optimizer_name):
 
         # Load the module in a separate thread
-        if len(module_name) > 0:
+        if self.trusted:
+            with open(file_name, "rb") as f:
+                module = pickle.load(f)
+
+        elif len(module_name) > 0:
             api = HfApi()
             try:
                 api.model_info(repo_id=module_name)
