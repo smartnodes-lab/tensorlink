@@ -414,6 +414,10 @@ class TorchNode(SmartNode):
                     return_val = self.state_updates[module_id].pop()
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
+            elif req_type == "check_validators":
+                return_val = len(self.validators)
+                self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
             elif req_type == "check_parameters_request":
                 key = "P" + request["args"]
                 return_val = None

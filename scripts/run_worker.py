@@ -96,9 +96,9 @@ def main():
     mining_enabled = config.get("mining", "false").lower() == "true"
     mining_script = config.get("mining-script")
     use_sudo = True if os.geteuid() == 0 else False
-    local = config.get("local", "false")
+    local = True if config.get("local", "false") == "true" else False
     trusted = True if config.get("local", "false") == "true" else False
-    upnp = False if local == "true" else True
+    upnp = True if local == "false" else False
 
     if trusted:
         _confirm_action()

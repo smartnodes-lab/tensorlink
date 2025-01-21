@@ -137,6 +137,12 @@ class BaseNode:
     def run_role(self):
         raise NotImplementedError("Subclasses must implement this method")
 
+    def connect_node(self, host: str, port: int, node_id: str = None, timeout: int = 5):
+        if node_id is None:
+            node_id = ""
+
+        self.send_request("connect_node", (node_id, host, port), timeout=timeout)
+
 
 class WorkerNode(BaseNode):
     distributed_worker = None
@@ -169,6 +175,7 @@ class WorkerNode(BaseNode):
                                                trusted=self.trusted)
         t = threading.Thread(target=distributed_worker.run, daemon=True)
         t.start()
+        time.sleep(3)
 
 
 class ValidatorNode(BaseNode):
@@ -236,6 +243,16 @@ class UserNode(BaseNode):
 
             if optimizer_type is None:
                 optimizer_type = torch.optim.Adam
+
+            attempts = 0
+            n_validators = self.send_request("check_validators", None)
+
+            while attempts < 3 and n_validators <= 0:
+                time.sleep(3)
+
+            if n_validators <= 0:
+                print("Could not obtain job from network... Please try again.")
+                return False
 
             # dist_model.worker_info = workers
             # if len(workers) == 0:

@@ -1018,7 +1018,7 @@ class SmartNode(threading.Thread):
         if self.upnp:
             try:
                 result = self.upnp.addportmapping(
-                    external_port, "TCP", self.upnp.lanaddr, internal_port, "SmartNode", ""
+                    external_port, "TCP", self.upnp.lanaddr, internal_port, f"SmartNode-{self.port}-{self.role}", ""
                 )
 
                 if result:
@@ -1069,7 +1069,7 @@ class SmartNode(threading.Thread):
                 mapping = self.upnp.getspecificportmapping(index, "TCP")
                 if mapping:
                     _, port, description, _, _ = mapping
-                    if description == "SmartNode":
+                    if description == f"SmartNode-{self.port}-{self.role}":
                         self.remove_port_mapping(port)
                 index += 1
 

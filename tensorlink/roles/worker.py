@@ -56,6 +56,21 @@ class Worker(TorchNode):
             self.debug_print("Public key not found in .env file, using donation wallet...")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
+            attempts = 0
+
+            self.debug_print(f"Bootstrapping...")
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                if len(self.validators) == 0:
+                    time.sleep(15)
+                    self.debug_print(f"No validators found, trying again...")
+                    attempts += 1
+
+            if len(self.validators) == 0:
+                self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+                self.stop()
+                self.terminate_flag.set()
+
     def handle_data(self, data: bytes, node: Connection):
         """
         Handle incoming tensors from connected roles and new job requests
@@ -155,21 +170,6 @@ class Worker(TorchNode):
         super().run()
         node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
         node_cleaner.start()
-
-        attempts = 0
-        if self.off_chain_test is False:
-            self.debug_print(f"Bootstrapping...")
-            while attempts < 3 and len(self.validators) == 0:
-                self.bootstrap()
-                if len(self.validators) == 0:
-                    time.sleep(15)
-                    self.debug_print(f"No validators found, trying again...")
-                    attempts += 1
-
-            if len(self.validators) == 0:
-                self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
-                self.stop()
-                self.terminate_flag.set()
 
         while not self.terminate_flag.is_set():
             time.sleep(1)

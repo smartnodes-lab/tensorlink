@@ -530,7 +530,10 @@ class DistributedModel(nn.Module):
             k, v = create_offloaded(model, [-1], model_size)
             v["name"] = None
 
-            if not isinstance(model, PreTrainedModel) or not self.trusted:
+            if isinstance(model, PreTrainedModel):
+                v["name"] = model.name_or_path
+
+            elif not self.trusted:
                 try:
                     torch.jit.script(model)
 

@@ -65,7 +65,20 @@ class User(TorchNode):
         if not self.off_chain_test:
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            self.bootstrap()
+
+            attempts = 0
+            self.debug_print(f"Bootstrapping...")
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                if len(self.validators) == 0:
+                    time.sleep(15)
+                    self.debug_print(f"No validators found, trying again...")
+                    attempts += 1
+
+            if len(self.validators) == 0:
+                self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+                self.stop()
+                self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
