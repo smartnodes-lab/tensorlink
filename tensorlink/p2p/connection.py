@@ -120,6 +120,12 @@ class Connection(threading.Thread):
 
                     buffer = b""
 
+            elif chunk == b"":
+                self.terminate_flag.set()
+                self.main_node.debug_print(f"Connection -> Connection lost.", colour="bright_red", level=logging.ERROR)
+                self.main_node.disconnect_node(self.node_id)
+                break
+
             gc.collect()
 
         try:

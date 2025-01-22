@@ -71,7 +71,7 @@ class DistributedWorker:
     def train_loop(self):
         while not self.terminate:
             for module_id in list(self.modules.keys()):
-                module = self.modules.get(module_id)
+                module = self.modules.get(module_id).to(self.device)
 
                 # Handle backward pass
                 if not module.backward_queue.empty():
@@ -217,14 +217,16 @@ class DistributedWorker:
 
     def load_module(self, file_name, module_id, node_id, module_name, optimizer_name):
 
-        # Load the module in a separate thread
+        # Load the module in a separate thread with direct de-serialization
         if self.trusted:
             with open(file_name, "rb") as f:
-                module = pickle.load(f)
+                module = pickle.load(f).to(self.device)
 
+        # Else try hugging face for model info
         elif len(module_name) > 0:
             api = HfApi()
             try:
+                # Get model information from Hugging Face api
                 api.model_info(repo_id=module_name)
                 state_dict = torch.load(file_name, weights_only=True)
                 config = state_dict.pop("module_config")
@@ -257,9 +259,9 @@ class DistributedWorker:
                         model_class = getattr(__import__("transformers"), module_class)
                 finally:
                     if hasattr(model_class, "from_config"):
-                        module = model_class.from_config(config)
+                        module = model_class.from_config(config).to(self.device)
                     else:
-                        module = model_class(config)
+                        module = model_class(config).to(self.device)
 
                 try:
                     module.load_state_dict(state_dict)

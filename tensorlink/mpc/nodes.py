@@ -97,6 +97,8 @@ class BaseNode:
         self.node_process = multiprocessing.Process(target=self.run_role, daemon=True)
         self.node_process.start()
 
+        # while not self.send_request()
+
     def cleanup(self):
         # Process cleanup
         if self.node_process is not None and self.node_process.exitcode is None:
@@ -244,15 +246,15 @@ class UserNode(BaseNode):
             if optimizer_type is None:
                 optimizer_type = torch.optim.Adam
 
-            attempts = 0
-            n_validators = self.send_request("check_validators", None)
-
-            while attempts < 3 and n_validators <= 0:
-                time.sleep(3)
-
-            if n_validators <= 0:
-                print("Could not obtain job from network... Please try again.")
-                return False
+            # attempts = 0
+            # n_validators = self.send_request("check_validators", None)
+            #
+            # while attempts < 3 and n_validators <= 0:
+            #     time.sleep(3)
+            #
+            # if n_validators <= 0:
+            #     print("Could not obtain job from network... Please try again.")
+            #     return False
 
             # dist_model.worker_info = workers
             # if len(workers) == 0:
