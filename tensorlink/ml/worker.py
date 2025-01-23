@@ -264,7 +264,7 @@ class DistributedWorker:
                         module = model_class(config).to(self.device)
 
                 try:
-                    module.load_state_dict(state_dict)
+                    module.load_state_dict(state_dict).to(self.device)
                 except Exception as e:
                     raise e
 
