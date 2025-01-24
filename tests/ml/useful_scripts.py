@@ -1,11 +1,18 @@
-import torch
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
-from transformers import BertTokenizer, BertForSequenceClassification, AdamW, get_linear_schedule_with_warmup, set_seed
-from datasets import load_dataset
-from tqdm import tqdm
-import time
-import numpy as np
 import logging
+import time
+
+import numpy as np
+import torch
+from datasets import load_dataset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+from tqdm import tqdm
+from transformers import (
+    AdamW,
+    BertForSequenceClassification,
+    BertTokenizer,
+    get_linear_schedule_with_warmup,
+    set_seed,
+)
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -24,12 +31,12 @@ def preprocess_data(dataset, tokenizer, max_length=128):
             examples["text"],
             truncation=True,
             padding="max_length",
-            max_length=max_length
+            max_length=max_length,
         )
 
     # Directly apply the tokenization function using a smaller dataset
     dataset = dataset.map(tokenize_function, batched=True)
-    dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'label'])
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "label"])
     return dataset
 
 
@@ -50,14 +57,24 @@ def train(model, optimizer, tokenizer, device, batch_size=8, epochs=1):
     test_subset_size = 100
 
     # Preprocess only the smaller subsets
-    train_dataset = load_and_preprocess_subset(dataset, tokenizer, "train", train_subset_size)
-    val_dataset = load_and_preprocess_subset(dataset, tokenizer, "test", test_subset_size)
+    train_dataset = load_and_preprocess_subset(
+        dataset, tokenizer, "train", train_subset_size
+    )
+    val_dataset = load_and_preprocess_subset(
+        dataset, tokenizer, "test", test_subset_size
+    )
 
-    train_dataloader = DataLoader(train_dataset, sampler=RandomSampler(train_dataset), batch_size=batch_size)
-    val_dataloader = DataLoader(val_dataset, sampler=SequentialSampler(val_dataset), batch_size=batch_size)
+    train_dataloader = DataLoader(
+        train_dataset, sampler=RandomSampler(train_dataset), batch_size=batch_size
+    )
+    val_dataloader = DataLoader(
+        val_dataset, sampler=SequentialSampler(val_dataset), batch_size=batch_size
+    )
 
     total_steps = len(train_dataloader) * epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=0, num_training_steps=total_steps
+    )
 
     # Rest of the training loop
     for epoch_i in range(epochs):
@@ -66,9 +83,9 @@ def train(model, optimizer, tokenizer, device, batch_size=8, epochs=1):
         total_train_loss = 0
 
         for batch in tqdm(train_dataloader, desc="Training"):
-            b_input_ids = batch['input_ids'].to(device)
-            b_input_mask = batch['attention_mask'].to(device)
-            b_labels = batch['label'].to(device)
+            b_input_ids = batch["input_ids"].to(device)
+            b_input_mask = batch["attention_mask"].to(device)
+            b_labels = batch["label"].to(device)
 
             optimizer.zero_grad()
             outputs = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
@@ -88,17 +105,19 @@ def train(model, optimizer, tokenizer, device, batch_size=8, epochs=1):
         total_eval_loss = 0
 
         for batch in tqdm(val_dataloader, desc="Evaluating"):
-            b_input_ids = batch['input_ids'].to(device)
-            b_input_mask = batch['attention_mask'].to(device)
-            b_labels = batch['label'].to(device)
+            b_input_ids = batch["input_ids"].to(device)
+            b_input_mask = batch["attention_mask"].to(device)
+            b_labels = batch["label"].to(device)
 
             with torch.no_grad():
-                outputs = model(b_input_ids, attention_mask=b_input_mask, labels=b_labels)
+                outputs = model(
+                    b_input_ids, attention_mask=b_input_mask, labels=b_labels
+                )
                 loss = outputs.loss
                 total_eval_loss += loss.item()
 
                 logits = outputs.logits.detach().cpu().numpy()
-                label_ids = b_labels.to('cpu').numpy()
+                label_ids = b_labels.to("cpu").numpy()
                 total_eval_accuracy += flat_accuracy(logits, label_ids)
 
         avg_val_accuracy = total_eval_accuracy / len(val_dataloader)

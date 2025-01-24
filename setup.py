@@ -1,5 +1,6 @@
-from setuptools import setup, find_packages
 import os
+
+from setuptools import find_packages, setup
 
 # Version of the package
 VERSION = "0.1.1"
@@ -20,8 +21,8 @@ def get_long_description():
     if len(content_lines) >= 4:
         content_lines = content_lines[:-4]  # Remove the last 4 lines
     content_lines.append(
-        '[![Buy Me a Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)]'
-        '(https://www.buymeacoffee.com/smartnodes)'
+        "[![Buy Me a Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)]"
+        "(https://www.buymeacoffee.com/smartnodes)"
     )
     return "\n".join(content_lines)
 
@@ -29,9 +30,11 @@ def get_long_description():
 # Parse requirements from requirements.txt
 def parse_requirements(filename):
     """Load requirements from a pip requirements file."""
-    with open(filename, 'r') as file:
+    with open(filename, "r") as file:
         lines = file.readlines()
-    requirements = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+    requirements = [
+        line.strip() for line in lines if line.strip() and not line.startswith("#")
+    ]
     return requirements
 
 
@@ -46,7 +49,9 @@ setup(
     packages=find_packages(),  # Automatically find packages in the current directory
     include_package_data=True,
     exclude_package_data={"": [".env"]},
-    install_requires=parse_requirements('requirements.txt'),  # Read dependencies from requirements.txt
+    install_requires=parse_requirements(
+        "requirements.txt"
+    ),  # Read dependencies from requirements.txt
     python_requires=">=3.11.9",
     classifiers=[
         "Development Status :: 2 - Pre-Alpha",

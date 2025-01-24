@@ -1,16 +1,18 @@
-from tensorlink.mpc.nodes import WorkerNode
-import torch.cuda as cuda
-import subprocess
-import logging
-import dotenv
 import json
-import time
-import sys
+import logging
 import os
+import subprocess
+import sys
+import time
+
+import dotenv
+import torch.cuda as cuda
+
+from tensorlink.mpc.nodes import WorkerNode
 
 
 def get_root_dir():
-    if getattr(sys, 'frozen', False):  # Check if running as an executable
+    if getattr(sys, "frozen", False):  # Check if running as an executable
         return os.path.dirname(sys.executable)
     else:  # Running as a Python script
         return os.path.dirname(os.path.abspath(__file__))
@@ -73,7 +75,13 @@ def _confirm_action():
     Prompts the user with a confirmation message before proceeding.
     """
     while True:
-        response = input("Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): ").strip().lower()
+        response = (
+            input(
+                "Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): "
+            )
+            .strip()
+            .lower()
+        )
         if response in {"yes", "y"}:
             print("Proceeding with trusted mode.")
             break
@@ -103,7 +111,13 @@ def main():
     if trusted:
         _confirm_action()
 
-    worker = WorkerNode(upnp=upnp, local_test=local, off_chain_test=local, print_level=logging.INFO, trusted=trusted)
+    worker = WorkerNode(
+        upnp=upnp,
+        local_test=local,
+        off_chain_test=local,
+        print_level=logging.INFO,
+        trusted=trusted,
+    )
 
     try:
         while True:

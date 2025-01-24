@@ -1,22 +1,23 @@
+import atexit
+import itertools
+import logging
+import multiprocessing
+import signal
+import sys
+import threading
+import time
+
+import miniupnpc
+import torch
+
+from tensorlink.ml.graphing import handle_layers
+from tensorlink.ml.module import DistributedModel
+from tensorlink.ml.optim import create_distributed_optimizer
+from tensorlink.ml.utils import access_module
+from tensorlink.ml.worker import DistributedWorker
 from tensorlink.roles.user import User
 from tensorlink.roles.validator import Validator
 from tensorlink.roles.worker import Worker
-from tensorlink.ml.module import DistributedModel
-from tensorlink.ml.worker import DistributedWorker
-from tensorlink.ml.optim import create_distributed_optimizer
-from tensorlink.ml.graphing import handle_layers
-from tensorlink.ml.utils import access_module
-
-import multiprocessing
-import threading
-import miniupnpc
-import itertools
-import logging
-import signal
-import atexit
-import torch
-import time
-import sys
 
 
 def spinning_cursor():
@@ -43,18 +44,18 @@ def show_spinner(stop_event, message="Processing"):
 
 
 # Set the start method to 'spawn'
-multiprocessing.set_start_method('spawn', force=True)
+multiprocessing.set_start_method("spawn", force=True)
 
 
 class BaseNode:
     def __init__(
-            self,
-            upnp=True,
-            max_connections: int = 0,
-            off_chain_test=False,
-            local_test=False,
-            print_level=logging.WARNING,
-            trusted=False
+        self,
+        upnp=True,
+        max_connections: int = 0,
+        off_chain_test=False,
+        local_test=False,
+        print_level=logging.WARNING,
+        trusted=False,
     ):
         self.node_requests = multiprocessing.Queue()
         self.node_responses = multiprocessing.Queue()
@@ -65,7 +66,7 @@ class BaseNode:
             "max_connections": max_connections,
             "upnp": upnp,
             "off_chain_test": off_chain_test,
-            "local_test": local_test
+            "local_test": local_test,
         }
         self.trusted = trusted
         self.upnp_enabled = upnp
@@ -83,6 +84,7 @@ class BaseNode:
         Set up signal handlers for graceful shutdown.
         Uses a multiprocessing Event to signal across processes.
         """
+
         def handler(signum, frame):
             print(f"Received signal {signum}. Initiating shutdown...")
             self._stop_event.set()
@@ -125,7 +127,9 @@ class BaseNode:
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
-            response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
+            response = self.node_responses.get(
+                timeout=timeout
+            )  # Blocking call, waits for response
 
         except Exception as e:
             print(f"Error sending '{request_type}' request: {e}")
@@ -151,16 +155,14 @@ class WorkerNode(BaseNode):
 
     def run_role(self):
         kwargs = self.init_kwargs.copy()
-        kwargs.update({
-            'upnp': kwargs.get('upnp', True),
-            'off_chain_test': kwargs.get('off_chain_test', False)
-        })
-
-        node_instance = Worker(
-            self.node_requests,
-            self.node_responses,
-            **kwargs
+        kwargs.update(
+            {
+                "upnp": kwargs.get("upnp", True),
+                "off_chain_test": kwargs.get("off_chain_test", False),
+            }
         )
+
+        node_instance = Worker(self.node_requests, self.node_responses, **kwargs)
         try:
             node_instance.activate()
             node_instance.run()
@@ -173,8 +175,9 @@ class WorkerNode(BaseNode):
 
     def setup(self):
         super().setup()
-        distributed_worker = DistributedWorker(self.node_requests, self.node_responses, self.mpc_lock,
-                                               trusted=self.trusted)
+        distributed_worker = DistributedWorker(
+            self.node_requests, self.node_responses, self.mpc_lock, trusted=self.trusted
+        )
         t = threading.Thread(target=distributed_worker.run, daemon=True)
         t.start()
         time.sleep(3)
@@ -183,16 +186,14 @@ class WorkerNode(BaseNode):
 class ValidatorNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
-        kwargs.update({
-            'upnp': kwargs.get('upnp', True),
-            'off_chain_test': kwargs.get('off_chain_test', False)
-        })
-
-        node_instance = Validator(
-            self.node_requests,
-            self.node_responses,
-            **kwargs
+        kwargs.update(
+            {
+                "upnp": kwargs.get("upnp", True),
+                "off_chain_test": kwargs.get("off_chain_test", False),
+            }
         )
+
+        node_instance = Validator(self.node_requests, self.node_responses, **kwargs)
 
         try:
             node_instance.run()
@@ -208,11 +209,7 @@ class UserNode(BaseNode):
     def run_role(self):
         kwargs = self.init_kwargs.copy()
 
-        node_instance = User(
-            self.node_requests,
-            self.node_responses,
-            **kwargs
-        )
+        node_instance = User(self.node_requests, self.node_responses, **kwargs)
         try:
             node_instance.run()
 
@@ -222,8 +219,15 @@ class UserNode(BaseNode):
         except KeyboardInterrupt:
             node_instance.stop()
 
-    def create_distributed_model(self, model, training, n_pipelines=1, optimizer_type=None,
-                                 trusted: bool = None, dp_factor=None):
+    def create_distributed_model(
+        self,
+        model,
+        training,
+        n_pipelines=1,
+        optimizer_type=None,
+        trusted: bool = None,
+        dp_factor=None,
+    ):
         # stop_spinner = threading.Event()
         # spinner_thread = threading.Thread(target=show_spinner, args=(stop_spinner, "Creating distributed model"))
 
@@ -233,8 +237,14 @@ class UserNode(BaseNode):
             if trusted is None:
                 trusted = self.trusted
 
-            dist_model = DistributedModel(self.node_requests, self.node_responses, self.mpc_lock, model,
-                                          n_pipelines, trusted=trusted)
+            dist_model = DistributedModel(
+                self.node_requests,
+                self.node_responses,
+                self.mpc_lock,
+                model,
+                n_pipelines,
+                trusted=trusted,
+            )
             # self.send_request("request_workers", None)
             # time.sleep(3)
             # workers = self.send_request("check_workers", None)
@@ -268,11 +278,14 @@ class UserNode(BaseNode):
             if training:
                 for module_id, module in distribution.items():
                     if module["type"] == "offloaded":
-                        module["optimizer"] = f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                        module["optimizer"] = (
+                            f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                        )
                         module["training"] = training
 
-            distributed_config = self.send_request("request_job", (n_pipelines, 1, distribution),
-                                                   timeout=10)
+            distributed_config = self.send_request(
+                "request_job", (n_pipelines, 1, distribution), timeout=10
+            )
 
             if not distributed_config:
                 print("Could not obtain job from network... Please try again.")
@@ -281,7 +294,9 @@ class UserNode(BaseNode):
             dist_model.distribute_model(distributed_config)
 
             def _create_distributed_optimizer(**optimizer_kwargs):
-                return create_distributed_optimizer(dist_model, optimizer_type, **optimizer_kwargs)
+                return create_distributed_optimizer(
+                    dist_model, optimizer_type, **optimizer_kwargs
+                )
 
             setattr(self, "distributed_model", dist_model)
 

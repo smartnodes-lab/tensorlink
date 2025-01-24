@@ -1,14 +1,14 @@
-from tensorlink.ml.utils import get_gpu_memory, handle_output
-from tensorlink.p2p.smart_node import SmartNode
-from tensorlink.p2p.connection import Connection
-from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
-
-from multiprocessing import shared_memory
-import threading
 import logging
 import pickle
 import queue
+import threading
 import time
+from multiprocessing import shared_memory
+
+from tensorlink.ml.utils import get_gpu_memory, handle_output
+from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.smart_node import SmartNode
 
 
 def format_size(size_bytes):
@@ -27,21 +27,21 @@ def format_size(size_bytes):
 
 class TorchNode(SmartNode):
     def __init__(
-            self,
-            request_queue,
-            response_queue,
-            role,
-            max_connections: int = 0,
-            upnp=True,
-            off_chain_test=False,
-            local_test=False
+        self,
+        request_queue,
+        response_queue,
+        role,
+        max_connections: int = 0,
+        upnp=True,
+        off_chain_test=False,
+        local_test=False,
     ):
         super(TorchNode, self).__init__(
             role=role,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
-            local_test=local_test
+            local_test=local_test,
         )
 
         # Available GPU mpc estimation
@@ -70,7 +70,8 @@ class TorchNode(SmartNode):
                 if b"LOADED" == data[:6]:
                     self.debug_print(
                         f"TorchNode -> Successfully offloaded submodule to: {node.node_id}",
-                        level=logging.INFO, colour="bright_cyan"
+                        level=logging.INFO,
+                        colour="bright_cyan",
                     )
                     module_id = data[6:70].decode()
                     self._remove_request(node.node_id, "MODULE" + module_id)
@@ -84,12 +85,14 @@ class TorchNode(SmartNode):
                         eos = data.find(b"::")
                         size = int(data[7:eos])
                         formatted_size = format_size(size)
-                        self.debug_print(f"TorchNode -> RECEIVED FORWARD: {formatted_size}")
+                        self.debug_print(
+                            f"TorchNode -> RECEIVED FORWARD: {formatted_size}"
+                        )
 
                         # TODO we must check that the forward received corresponds to a sent pass/specific module
                         # must also do with backwards
-                        tensor = data[eos + 2: eos + 2 + size]
-                        key = tuple(pickle.loads(data[eos + 2 + size:]))
+                        tensor = data[eos + 2 : eos + 2 + size]
+                        key = tuple(pickle.loads(data[eos + 2 + size :]))
 
                         # Create shared mpc block and store tensor
                         self.store_tensor_in_shared_memory(key, tensor)
@@ -101,12 +104,14 @@ class TorchNode(SmartNode):
                         eos = data.find(b"::")
                         size = int(data[8:eos])
                         formatted_size = format_size(size)
-                        self.debug_print(f"TorchNode -> RECEIVED BACKWARD: {formatted_size}")
+                        self.debug_print(
+                            f"TorchNode -> RECEIVED BACKWARD: {formatted_size}"
+                        )
 
                         # TODO we must check that the forward received corresponds to a sent pass/specific module
                         # must also do with backwards
-                        tensor = data[eos + 2: eos + 2 + size]
-                        key = tuple(pickle.loads(data[eos + 2 + size:]))
+                        tensor = data[eos + 2 : eos + 2 + size]
+                        key = tuple(pickle.loads(data[eos + 2 + size :]))
 
                         # Create shared mpc block and store tensor
                         self.store_tensor_in_shared_memory(key, tensor, backward=True)
@@ -120,17 +125,18 @@ class TorchNode(SmartNode):
                         if response_type == "loaded":
                             self.debug_print(
                                 f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}",
-                                level=logging.INFO, colour="bright_cyan"
+                                level=logging.INFO,
+                                colour="bright_cyan",
                             )
                         elif response_type == "stepped":
                             self.debug_print(
                                 f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}",
-                                colour="bright_cyan"
+                                colour="bright_cyan",
                             )
                         elif response_type == "zeroed":
                             self.debug_print(
                                 f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}",
-                                colour="bright_cyan"
+                                colour="bright_cyan",
                             )
 
                     self.state_updates[module_id].append(response_type + node.node_id)
@@ -139,8 +145,12 @@ class TorchNode(SmartNode):
                     if self.role == "V" or node.node_id not in self.nodes:
                         ghost += 1
                     else:
-                        module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
-                        self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
+                        module_id, optimizer_fn, optimizer_kwargs = pickle.loads(
+                            data[9:]
+                        )
+                        self.state_updates[module_id].append(
+                            (optimizer_fn, optimizer_kwargs)
+                        )
 
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
@@ -153,7 +163,10 @@ class TorchNode(SmartNode):
                 # Handle and store responses from a parameters request
                 elif b"PARAMETERS" == data[:10]:
                     module_id = data[10:74].decode()
-                    self.debug_print(f"TorchNode -> Received Parameters for: {module_id}", colour="blue")
+                    self.debug_print(
+                        f"TorchNode -> Received Parameters for: {module_id}",
+                        colour="blue",
+                    )
                     file_name = f"tmp/{module_id}_parameters"
                     key = "P" + module_id
                     self.memory_manager[key] = file_name
@@ -167,7 +180,7 @@ class TorchNode(SmartNode):
                     if node.node_id in self.requests:
                         for req in self.requests[node.node_id]:
                             if module_id in req:
-                                module_name = req[len(module_id):]
+                                module_name = req[len(module_id) :]
                                 request_to_remove.append(req)
 
                             if "OPTIMIZER" in req:
@@ -178,7 +191,9 @@ class TorchNode(SmartNode):
                             self._remove_request(node.node_id, req)
 
                         if module_name is not None:
-                            self.debug_print(f"TorchNode -> Received Module: {module_id}")
+                            self.debug_print(
+                                f"TorchNode -> Received Module: {module_id}"
+                            )
 
                             self.modules[module_id] = {
                                 "mem_info": module_id,
@@ -186,12 +201,15 @@ class TorchNode(SmartNode):
                                 "forward_queue": {},
                                 "backward_queue": {},
                                 "name": module_name,
-                                "optimizer": optimizer_name
+                                "optimizer": optimizer_name,
                             }
                             self.state_updates[module_id] = []
 
-                            self.debug_print(f"TorchNode -> Loaded distributed module!",
-                                             colour="bright_cyan", level=logging.INFO)
+                            self.debug_print(
+                                f"TorchNode -> Loaded distributed module!",
+                                colour="bright_cyan",
+                                level=logging.INFO,
+                            )
                         else:
                             ghost += 1
                     else:
@@ -221,8 +239,11 @@ class TorchNode(SmartNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"TorchNode -> Error handling data: {e}", colour="bright_red",
-                             level=logging.ERROR)
+            self.debug_print(
+                f"TorchNode -> Error handling data: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+            )
 
     def handle_requests(self, request=None):
         try:
@@ -272,7 +293,10 @@ class TorchNode(SmartNode):
                 node_id = self.modules[module_id]["host"]
                 node = self.nodes[node_id]
 
-                self.send_to_node(node, b"OPTIMIZER-RESPONSE" + pickle.dumps((module_id, response_type)))
+                self.send_to_node(
+                    node,
+                    b"OPTIMIZER-RESPONSE" + pickle.dumps((module_id, response_type)),
+                )
 
                 self.response_queue.put({"status": "SUCCESS", "return": None})
 
@@ -295,7 +319,9 @@ class TorchNode(SmartNode):
             elif req_type == "send_parameters":
                 node_id, module_id = request["args"]
                 node = self.nodes[node_id]
-                self.send_to_node_from_file(node, f"parameters_{module_id}", b"PARAMETERS" + module_id.encode())
+                self.send_to_node_from_file(
+                    node, f"parameters_{module_id}", b"PARAMETERS" + module_id.encode()
+                )
                 self.response_queue.put({"status": "SUCCESS", "return": None})
 
             elif req_type == "is_loaded":
@@ -314,7 +340,13 @@ class TorchNode(SmartNode):
                 for module_id, module in self.modules.items():
                     if "mem_info" in module:
                         name = module["mem_info"]
-                        return_val = (name, module_id, module["host"], module["name"], module["optimizer"])
+                        return_val = (
+                            name,
+                            module_id,
+                            module["host"],
+                            module["name"],
+                            module["optimizer"],
+                        )
                         del module["mem_info"]
                     elif "termination" in module:
                         return_val = module_id
@@ -347,7 +379,9 @@ class TorchNode(SmartNode):
                     if module_id in self.modules:
                         module = self.modules[module_id]
                         min_iter, min_micro = -1, -1
-                        for (n_iter, n_micro, module_id) in module["forward_queue"].keys():
+                        for n_iter, n_micro, module_id in module[
+                            "forward_queue"
+                        ].keys():
                             if n_iter <= min_iter or min_iter == -1:
                                 min_iter = n_iter
                             if n_micro <= min_micro or min_micro == -1:
@@ -364,8 +398,12 @@ class TorchNode(SmartNode):
 
                     if module_id in self.modules:
                         if request["args"] in self.modules[module_id]["forward_queue"]:
-                            return_val = self.modules[module_id]["forward_queue"][request["args"]]
-                            del self.modules[module_id]["forward_queue"][request["args"]]
+                            return_val = self.modules[module_id]["forward_queue"][
+                                request["args"]
+                            ]
+                            del self.modules[module_id]["forward_queue"][
+                                request["args"]
+                            ]
 
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -378,7 +416,7 @@ class TorchNode(SmartNode):
                     module_hash = args
                     module = self.modules[module_hash]
                     min_iter, min_micro = -1, -1
-                    for (n_iter, n_micro, module_id) in module["backward_queue"].keys():
+                    for n_iter, n_micro, module_id in module["backward_queue"].keys():
                         if n_iter <= min_iter or min_iter == -1:
                             min_iter = n_iter
                         if n_micro <= min_micro or min_micro == -1:
@@ -395,7 +433,9 @@ class TorchNode(SmartNode):
                     key = (n_iter, n_micro, module_id)
                     if module_hash in self.modules:
                         if key in self.modules[module_hash]["backward_queue"]:
-                            return_val = self.modules[module_hash]["backward_queue"][key]
+                            return_val = self.modules[module_hash]["backward_queue"][
+                                key
+                            ]
                             del self.modules[module_id]["backward_queue"][key]
 
                 self.response_queue.put({"status": "SUCCESS", "return": return_val})
@@ -477,7 +517,12 @@ class TorchNode(SmartNode):
                 self.response_queue.put({"status": "SUCCESS", "return": connected})
 
             elif req_type == "info":
-                self.response_queue.put({"status": "SUCCESS", "return": (self.rsa_key_hash, self.host, self.port)})
+                self.response_queue.put(
+                    {
+                        "status": "SUCCESS",
+                        "return": (self.rsa_key_hash, self.host, self.port),
+                    }
+                )
 
             elif req_type == "stop":
                 self.response_queue.put({"status": "SUCCESS", "return": True})
@@ -500,7 +545,7 @@ class TorchNode(SmartNode):
                     message, colour, level = request["args"]
                 self.debug_print(message, colour=colour, level=level)
                 self.response_queue.put({"status": "SUCCESS", "return": False})
-                
+
         except (OSError, EOFError) as e:
             if "handle is closed" in str(e):
                 return
@@ -554,8 +599,11 @@ class TorchNode(SmartNode):
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id.encode())
 
     def send_module(self, file_name: bytes, module_id: str, node: Connection):
-        self.debug_print(f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",
-                         level=logging.INFO, colour="bright_blue")
+        self.debug_print(
+            f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",
+            level=logging.INFO,
+            colour="bright_blue",
+        )
         self._store_request(node.node_id, "MODULE" + module_id)
         self.state_updates[module_id] = []
         self.send_to_node_from_file(node, file_name, b"MODULE" + module_id.encode())
@@ -581,5 +629,7 @@ class TorchNode(SmartNode):
 
     def stop_mpc_comms(self):
         self.mpc_terminate_flag.set()
-        self.debug_print("Shutting down distributed ML processes...", level=logging.DEBUG)
+        self.debug_print(
+            "Shutting down distributed ML processes...", level=logging.DEBUG
+        )
         self.mpc_comms.join()

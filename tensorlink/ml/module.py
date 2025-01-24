@@ -1,23 +1,23 @@
-from tensorlink.ml.optim import create_distributed_optimizer, DistributedParameter
-from tensorlink.ml.utils import *
-from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
-
-from transformers.utils import ModelOutput
-from transformers import PreTrainedModel
-from collections import defaultdict
-from typing import Generator, OrderedDict
-import torch.nn as nn
-import threading
+import gc
 import hashlib
-import random
-import pickle
-import torch
-import queue
-import time
 import json
 import os
-import gc
+import pickle
+import queue
+import random
+import threading
+import time
+from collections import defaultdict
+from typing import Generator, OrderedDict
 
+import torch
+import torch.nn as nn
+from transformers import PreTrainedModel
+from transformers.utils import ModelOutput
+
+from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
+from tensorlink.ml.utils import *
+from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 MAX_WAIT_TIME = 300
 
@@ -42,7 +42,13 @@ def _confirm_action():
     Prompts the user with a confirmation message before proceeding.
     """
     while True:
-        response = input("Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): ").strip().lower()
+        response = (
+            input(
+                "Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): "
+            )
+            .strip()
+            .lower()
+        )
         if response in {"yes", "y"}:
             print("Proceeding with trusted mode.")
             break
@@ -80,6 +86,7 @@ class DistributedModel(nn.Module):
         Is able to host offloaded submodules along with local operations. Can be spawned
         by a Worker or a User. Host is referred to as the 'master' node.
     """
+
     def __init__(
         self,
         node_requests,
@@ -88,7 +95,7 @@ class DistributedModel(nn.Module):
         model: nn.Module,
         n_pipelines: int,
         device=None,
-        trusted=False
+        trusted=False,
     ):
         super(DistributedModel, self).__init__()
         self.name = str(model).split("(")[0]
@@ -154,7 +161,9 @@ class DistributedModel(nn.Module):
             micro_args = micro_batch_args[micro]
             micro_kwargs = micro_batch_kwargs[micro]
             t = threading.Thread(
-                target=self._perform_micro_forward, args=(micro, micro_args), kwargs=micro_kwargs
+                target=self._perform_micro_forward,
+                args=(micro, micro_args),
+                kwargs=micro_kwargs,
             )
             t.start()
             threads.append(t)
@@ -238,12 +247,13 @@ class DistributedModel(nn.Module):
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
                     if self.trusted:
-                        size, shm_name = store_in_shared_memory((detach_tensor(loss), None))
+                        size, shm_name = store_in_shared_memory(
+                            (detach_tensor(loss), None)
+                        )
                     else:
                         loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
                         size, shm_name = store_in_shared_memory(
-                            loss_bytes,
-                            encoded=True
+                            loss_bytes, encoded=True
                         )
 
                     self.send_request("send_backward", (worker_id, size, shm_name, tag))
@@ -262,14 +272,19 @@ class DistributedModel(nn.Module):
                                 loss = get_from_shared_memory(size, name)
 
                             else:
-                                loss_bytes = get_from_shared_memory(size, name, encoded=True)
+                                loss_bytes = get_from_shared_memory(
+                                    size, name, encoded=True
+                                )
                                 loss = bytes_to_tensor(loss_bytes)
 
                         if time.time() - start_time >= MAX_WAIT_TIME:
                             # Logic here to request another worker take his place
                             waiting = False
 
-                    self.send_request("release_memory", ("backward_queue", module_id_bytes, tuple(tag)))
+                    self.send_request(
+                        "release_memory",
+                        ("backward_queue", module_id_bytes, tuple(tag)),
+                    )
 
             elif len(vals) == 1:
                 assoc_input = vals[0]
@@ -298,7 +313,9 @@ class DistributedModel(nn.Module):
 
         def recurse_modules(module):
             if isinstance(module, OffloadedModule):
-                self.send_request("update_train", (module.worker_id, mode, module.module_id))
+                self.send_request(
+                    "update_train", (module.worker_id, mode, module.module_id)
+                )
                 t = threading.Thread(
                     target=self._wait_for_state_update,
                     args=(module.module_id, mode),
@@ -327,7 +344,9 @@ class DistributedModel(nn.Module):
             yield self.model
             yield from self.model.children()
 
-    def parameters(self, recurse: bool = True, distributed: bool = True, load: bool = True) -> Generator:
+    def parameters(
+        self, recurse: bool = True, distributed: bool = True, load: bool = True
+    ) -> Generator:
         """
         Collects parameters from all modules (including offloaded) asynchronously and returns them as a generator.
         """
@@ -340,9 +359,13 @@ class DistributedModel(nn.Module):
                 for child in module.children():
                     if isinstance(child, OffloadedModule):
                         # Asynchronously request parameters from offloaded modules
-                        self.send_request("request_parameters", (child.worker_id, child.module_id))
+                        self.send_request(
+                            "request_parameters", (child.worker_id, child.module_id)
+                        )
                         # Start a thread to wait for each response
-                        t = threading.Thread(target=self._wait_for_parameters, args=(child.module_id,))
+                        t = threading.Thread(
+                            target=self._wait_for_parameters, args=(child.module_id,)
+                        )
                         t.start()
                         request_threads.append(t)
                     elif contains_offloaded(child):
@@ -371,7 +394,10 @@ class DistributedModel(nn.Module):
                         file_references[module_id] = file_name
                         os.makedirs("models", exist_ok=True)
                         os.makedirs(f"models/{self.name}", exist_ok=True)
-                        os.rename(file_name, os.path.join("models", self.name, file_name.split("/")[1]))
+                        os.rename(
+                            file_name,
+                            os.path.join("models", self.name, file_name.split("/")[1]),
+                        )
                 else:
                     # Directly collect parameters for in-memory modules
                     module, _ = access_module(self.model, module_info["mod_id"])
@@ -485,33 +511,29 @@ class DistributedModel(nn.Module):
 
         # Create offloaded module data structure for config file
         def create_offloaded(module: nn.Module, module_index: list, module_size: int):
-            module_id = (
-                hashlib.sha256(str(random.random()).encode()).hexdigest()
-            )
+            module_id = hashlib.sha256(str(random.random()).encode()).hexdigest()
             data = {
                 "type": "offloaded",
                 "id_hash": module_id,
                 "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                          :-1
-                          ],  # class name
+                    :-1
+                ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
                 "workers": [],
-                "training": True
+                "training": True,
             }
             return module_id, data
 
         # Create user-loaded module data structure for config file
         def create_loaded(module: nn.Module, module_index: list, module_size: int):
-            module_id = (
-                hashlib.sha256(str(random.random()).encode()).hexdigest()
-            )
+            module_id = hashlib.sha256(str(random.random()).encode()).hexdigest()
             data = {
                 "type": "loaded",
                 "id_hash": module_id,
                 "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                          :-1
-                          ],  # class name
+                    :-1
+                ],  # class name
                 "mod_id": module_index,
                 "size": module_size,
                 "workers": [],
@@ -520,7 +542,9 @@ class DistributedModel(nn.Module):
 
         # named_children = list(model.named_children())
         model_size = estimate_memory(model, self.training, batch_size=1024)
-        assert model_size < 24e9, "Models must currently require under ~24Gb of GPU memory due to network availability."
+        assert (
+            model_size < 24e9
+        ), "Models must currently require under ~24Gb of GPU memory due to network availability."
         # max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
         # max_worker_mem = max_worker[1]["memory"]
 
@@ -696,7 +720,9 @@ class OffloadedModule(nn.Module):
         pytorch model flow.
     """
 
-    def __init__(self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes):
+    def __init__(
+        self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes
+    ):
         super(OffloadedModule, self).__init__()
 
         self.entire_model = False
@@ -721,14 +747,18 @@ class OffloadedModule(nn.Module):
         # try:
         # Send the module to the worker roles
 
-        self.parent_model.send_request("send_model", (name, self.worker_id, self.module_id))
+        self.parent_model.send_request(
+            "send_model", (name, self.worker_id, self.module_id)
+        )
 
         # Wait for the module to be loaded on worker
         waiting = True
         start_time = time.time()
         while waiting:
             time.sleep(0.5)
-            args = self.parent_model.send_request("check_loaded", (self.worker_id, self.module_id))
+            args = self.parent_model.send_request(
+                "check_loaded", (self.worker_id, self.module_id)
+            )
 
             if args is True:
                 waiting = False
@@ -765,13 +795,12 @@ class OffloadedModule(nn.Module):
         kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
         forward_bytes = args_bytes + b"|" + kwargs_bytes
 
-        size, shm_name = store_in_shared_memory(
-            forward_bytes,
-            encoded=True
-        )
+        size, shm_name = store_in_shared_memory(forward_bytes, encoded=True)
 
         # Relay forward pass to next roles
-        self.parent_model.send_request("send_forward", (self.worker_id, size, shm_name, tag))
+        self.parent_model.send_request(
+            "send_forward", (self.worker_id, size, shm_name, tag)
+        )
 
         # Wait for response, change to appending waiting thread to list in master
         waiting = True
@@ -791,7 +820,9 @@ class OffloadedModule(nn.Module):
 
         output = enable_grad(bytes_to_tensor(output_bytes))
 
-        self.parent_model.send_request("release_memory", ("forward_queue", self.module_id, key))
+        self.parent_model.send_request(
+            "release_memory", ("forward_queue", self.module_id, key)
+        )
 
         inter_storage = [
             self.module_id,
@@ -811,7 +842,7 @@ class OffloadedModule(nn.Module):
         """Override parameters to return wrapped DistributedParameters."""
         return iter(self._parameters.values())
 
-    def state_dict(self, destination=None, prefix='', keep_vars=False):
+    def state_dict(self, destination=None, prefix="", keep_vars=False):
         """
         Returns an empty dictionary for the OffloadedModule.
         This effectively hides the OffloadedModule from the model's state_dict.

@@ -1,54 +1,55 @@
-from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
-from tensorlink.ml.utils import *
+import json
+import logging
+import os
+import pickle
+import queue
+import threading
+import time
+from collections import deque
+
+import torch
+from huggingface_hub import HfApi, hf_hub_download
 from transformers import (
     AutoConfig,
     AutoModel,
-    AutoModelForSequenceClassification,
-    AutoModelForTokenClassification,
-    AutoModelForQuestionAnswering,
-    AutoModelForMaskedLM,
-    AutoModelForNextSentencePrediction,
-    AutoModelForMultipleChoice,
-    AutoModelForPreTraining,
-    AutoModelForCausalLM,
-    AutoModelForImageClassification,
-    AutoModelForSemanticSegmentation,
-    AutoModelForObjectDetection,
     AutoModelForAudioClassification,
+    AutoModelForCausalLM,
     AutoModelForCTC,
+    AutoModelForImageClassification,
+    AutoModelForMaskedLM,
+    AutoModelForMultipleChoice,
+    AutoModelForNextSentencePrediction,
+    AutoModelForObjectDetection,
+    AutoModelForPreTraining,
+    AutoModelForQuestionAnswering,
+    AutoModelForSemanticSegmentation,
+    AutoModelForSequenceClassification,
     AutoModelForSpeechSeq2Seq,
+    AutoModelForTokenClassification,
     AutoModelForVision2Seq,
 )
-from huggingface_hub import HfApi, hf_hub_download
-from collections import deque
-import threading
-import logging
-import pickle
-import torch
-import queue
-import json
-import time
-import os
 
+from tensorlink.ml.utils import *
+from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_TYPE_MAPPING = {
-    'ForSequenceClassification': AutoModelForSequenceClassification,
-    'ForTokenClassification': AutoModelForTokenClassification,
-    'ForQuestionAnswering': AutoModelForQuestionAnswering,
-    'ForMaskedLM': AutoModelForMaskedLM,
-    'ForNextSentencePrediction': AutoModelForNextSentencePrediction,
-    'ForMultipleChoice': AutoModelForMultipleChoice,
-    'ForPreTraining': AutoModelForPreTraining,
-    'ForCausalLM': AutoModelForCausalLM,
-    'ForImageClassification': AutoModelForImageClassification,
-    'ForSemanticSegmentation': AutoModelForSemanticSegmentation,
-    'ForObjectDetection': AutoModelForObjectDetection,
-    'ForAudioClassification': AutoModelForAudioClassification,
-    'ForCTC': AutoModelForCTC,
-    'ForSpeechSeq2Seq': AutoModelForSpeechSeq2Seq,
-    'ForVision2Seq': AutoModelForVision2Seq,
+    "ForSequenceClassification": AutoModelForSequenceClassification,
+    "ForTokenClassification": AutoModelForTokenClassification,
+    "ForQuestionAnswering": AutoModelForQuestionAnswering,
+    "ForMaskedLM": AutoModelForMaskedLM,
+    "ForNextSentencePrediction": AutoModelForNextSentencePrediction,
+    "ForMultipleChoice": AutoModelForMultipleChoice,
+    "ForPreTraining": AutoModelForPreTraining,
+    "ForCausalLM": AutoModelForCausalLM,
+    "ForImageClassification": AutoModelForImageClassification,
+    "ForSemanticSegmentation": AutoModelForSemanticSegmentation,
+    "ForObjectDetection": AutoModelForObjectDetection,
+    "ForAudioClassification": AutoModelForAudioClassification,
+    "ForCTC": AutoModelForCTC,
+    "ForSpeechSeq2Seq": AutoModelForSpeechSeq2Seq,
+    "ForVision2Seq": AutoModelForVision2Seq,
 }
 
 
@@ -82,16 +83,17 @@ class DistributedWorker:
                         # Critical section: lock the shared resources only when necessary
                         with self.lock:
                             tag, loss_relay = module.backward_queue.get()
-                            tensor_bytes = get_from_shared_memory(loss_relay[0], loss_relay[1], encoded=True)
+                            tensor_bytes = get_from_shared_memory(
+                                loss_relay[0], loss_relay[1], encoded=True
+                            )
                             tensor = bytes_to_tensor(tensor_bytes)
                             # Load loss and move to the device
-                            loss = attach_tensor(
-                                tensor,
-                                self.device
-                            )
+                            loss = attach_tensor(tensor, self.device)
 
                             inter_tag = tuple(tag)
-                            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
+                            assoc_input, assoc_output = module.intermediates.pop(
+                                inter_tag
+                            )
 
                             assoc_input = assoc_input.to(self.device)
                             assoc_output = assoc_output.to(self.device)
@@ -107,7 +109,9 @@ class DistributedWorker:
 
                             # Detach gradients and prepare for next node
                             if assoc_input.grad is None:
-                                dvalues = detach_tensor(torch.zeros_like(assoc_input, dtype=torch.float32))
+                                dvalues = detach_tensor(
+                                    torch.zeros_like(assoc_input, dtype=torch.float32)
+                                )
                             else:
                                 dvalues = detach_tensor(assoc_input.grad)
 
@@ -115,9 +119,15 @@ class DistributedWorker:
                             del assoc_input, assoc_output
 
                             # Store pass in shared memory and send to next node
-                            dvalues_bytes = json.dumps(tensor_to_bytes(dvalues)).encode()
-                            size, name = store_in_shared_memory(dvalues_bytes, encoded=True)
-                            self.send_request("send_backward", (next_node, size, name, tag))
+                            dvalues_bytes = json.dumps(
+                                tensor_to_bytes(dvalues)
+                            ).encode()
+                            size, name = store_in_shared_memory(
+                                dvalues_bytes, encoded=True
+                            )
+                            self.send_request(
+                                "send_backward", (next_node, size, name, tag)
+                            )
 
                             # Clear memory, but avoid excessive cache clearing
                             if self.device.type != "cpu":
@@ -148,7 +158,10 @@ class DistributedWorker:
 
                         # Store intermediate results if training
                         if self.modules[module_id].training:
-                            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
+                            module.intermediates[key] = [
+                                inp,
+                                handle_output(out).to(self.device),
+                            ]
 
                         # Detach and store output
                         detached_out = detach_tensor(out)
@@ -156,7 +169,9 @@ class DistributedWorker:
                             tensor_to_bytes(detached_out)
                         ).encode()
                         size, name = store_in_shared_memory(output_bytes)
-                        self.send_request("send_forward", (module.host, size, name, key))
+                        self.send_request(
+                            "send_forward", (module.host, size, name, key)
+                        )
 
                         # Clean memory efficiently
                         if self.device.type != "cpu":
@@ -172,7 +187,9 @@ class DistributedWorker:
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
-            response = self.node_responses.get(timeout=timeout)  # Blocking call, waits for response
+            response = self.node_responses.get(
+                timeout=timeout
+            )  # Blocking call, waits for response
 
         except TimeoutError as e:
             self.terminate = True
@@ -192,7 +209,10 @@ class DistributedWorker:
         os.makedirs("tmp/snapshots", exist_ok=True)
 
         # Get parameters (state_dict) and convert tensors to a serializable format
-        params = {k: v.cpu().numpy().tolist() for k, v in self.modules[module_id].state_dict().items()}
+        params = {
+            k: v.cpu().numpy().tolist()
+            for k, v in self.modules[module_id].state_dict().items()
+        }
 
         # Prepare snapshot data
         snapshot = {
@@ -201,11 +221,13 @@ class DistributedWorker:
             "input": _input.cpu().numpy().tolist(),  # Assuming _input is a tensor
             "output": _output.cpu().numpy().tolist(),  # Assuming _output is a tensor
             "epoch": epoch,
-            "micro": micro
+            "micro": micro,
         }
 
         # Define the filename
-        file_path = os.path.join("tmp", "snapshots", f"{module_id}_{epoch}_{micro}.json")
+        file_path = os.path.join(
+            "tmp", "snapshots", f"{module_id}_{epoch}_{micro}.json"
+        )
 
         # Write the snapshot to a JSON file
         try:
@@ -235,12 +257,13 @@ class DistributedWorker:
                 architectures = config.get("architectures", [])
 
                 config = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path=module_name,
-                    **config
+                    pretrained_model_name_or_path=module_name, **config
                 )
 
                 if not architectures:
-                    raise ValueError("No architecture information found in saved config")
+                    raise ValueError(
+                        "No architecture information found in saved config"
+                    )
 
                 # Find the appropriate model class
                 model_class_name = architectures[0]
@@ -298,7 +321,9 @@ class DistributedWorker:
 
                 if isinstance(args, tuple):
                     file_name, module_id, node_id, module_name, optimizer_name = args
-                    self.load_module(file_name, module_id, node_id, module_name, optimizer_name)
+                    self.load_module(
+                        file_name, module_id, node_id, module_name, optimizer_name
+                    )
 
                 # Check for job completion/deletion requests
                 elif isinstance(args, str):
@@ -321,9 +346,13 @@ class DistributedWorker:
                         module.training = is_training
 
                     # Check for parameters requests
-                    params_req = self.send_request("check_parameters_request", module_id)
+                    params_req = self.send_request(
+                        "check_parameters_request", module_id
+                    )
                     if params_req:
-                        self.send_request("debug_print", ("DistributedWorker -> Sending parameters.",))
+                        self.send_request(
+                            "debug_print", ("DistributedWorker -> Sending parameters.",)
+                        )
                         with open(f"parameters_{module_id}", "wb") as file:
                             torch.save(module.state_dict(), file)
 
@@ -344,26 +373,49 @@ class DistributedWorker:
                         with self.lock:
                             if state_update[0] == "init":
                                 optimizer_kwargs = state_update[1]
-                                self.optimizers[module_id] = self.optimizers[module_id](module.parameters(), **optimizer_kwargs)
-                                self.send_request("debug_print",
-                                                  ("DistributedWorker -> Initialized optimizer.", "bright_blue",
-                                                   logging.INFO))
-                                self.send_request("optimizer_response", (module_id, "loaded"))
+                                self.optimizers[module_id] = self.optimizers[module_id](
+                                    module.parameters(), **optimizer_kwargs
+                                )
+                                self.send_request(
+                                    "debug_print",
+                                    (
+                                        "DistributedWorker -> Initialized optimizer.",
+                                        "bright_blue",
+                                        logging.INFO,
+                                    ),
+                                )
+                                self.send_request(
+                                    "optimizer_response", (module_id, "loaded")
+                                )
 
                             elif state_update[0] == "step":
                                 closure = state_update[1]
                                 self.optimizers[module_id].step(closure)
-                                self.send_request("debug_print",
-                                                  ("DistributedWorker -> Optimizer stepped.", "bright_blue",
-                                                   logging.INFO))
-                                self.send_request("optimizer_response", (module_id, "stepped"))
+                                self.send_request(
+                                    "debug_print",
+                                    (
+                                        "DistributedWorker -> Optimizer stepped.",
+                                        "bright_blue",
+                                        logging.INFO,
+                                    ),
+                                )
+                                self.send_request(
+                                    "optimizer_response", (module_id, "stepped")
+                                )
 
                             elif state_update[0] == "zero_grad":
                                 self.optimizers[module_id].zero_grad()
-                                self.send_request("debug_print",
-                                                  ("DistributedWorker -> Optimizer zeroed.", "bright_blue",
-                                                   logging.INFO))
-                                self.send_request("optimizer_response", (module_id, "zeroed"))
+                                self.send_request(
+                                    "debug_print",
+                                    (
+                                        "DistributedWorker -> Optimizer zeroed.",
+                                        "bright_blue",
+                                        logging.INFO,
+                                    ),
+                                )
+                                self.send_request(
+                                    "optimizer_response", (module_id, "zeroed")
+                                )
 
             counter += 1
             time.sleep(0.2)
@@ -371,8 +423,13 @@ class DistributedWorker:
     def check_for_termination(self):
         # Send a request to check if the node is shutting down
         shutdown_signal = self.send_request("check_shutdown", None)
-        if shutdown_signal:  # Assuming shutdown_signal is True or some indication of shutdown
-            self.send_request("debug_print", "Termination signal received. Shutting down DistributedWorker process...")
+        if (
+            shutdown_signal
+        ):  # Assuming shutdown_signal is True or some indication of shutdown
+            self.send_request(
+                "debug_print",
+                "Termination signal received. Shutting down DistributedWorker process...",
+            )
             self.terminate = True
 
     def run(self):
@@ -382,4 +439,3 @@ class DistributedWorker:
         self.train_loop()
 
         node_check_thread.join()
-

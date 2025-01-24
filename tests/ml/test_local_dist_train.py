@@ -25,11 +25,13 @@ Overview:
    - Demonstrates model distribution, gradient updates, and optimization across nodes.
 
 """
-from tensorlink import UserNode, WorkerNode, ValidatorNode
-import pytest
+
 import logging
 import time
 
+import pytest
+
+from tensorlink import UserNode, ValidatorNode, WorkerNode
 
 # Variables for nodes and distributed models
 LOCAL = True
@@ -42,11 +44,17 @@ DP_FACTOR = 1
 @pytest.fixture(scope="module")
 def nodes():
     """Initialize and return validator, user, and worker nodes."""
-    validator = ValidatorNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    validator = ValidatorNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
-    user = UserNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    user = UserNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
-    worker = WorkerNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    worker = WorkerNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
 
     yield validator, user, worker
@@ -88,16 +96,14 @@ def test_distributed_training(nodes):
     _, user, _ = nodes
 
     # Create model and tokenizer
-    from transformers import BertTokenizer, BertForSequenceClassification
-    from torch.nn.functional import mse_loss
     import torch
+    from torch.nn.functional import mse_loss
+    from transformers import BertForSequenceClassification, BertTokenizer
 
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
     distributed_model, distributed_optimizer = user.create_distributed_model(
-        model=model,
-        training=True,
-        optimizer_type=torch.optim.Adam
+        model=model, training=True, optimizer_type=torch.optim.Adam
     )
     del model  # Free up memory
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)

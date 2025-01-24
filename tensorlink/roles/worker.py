@@ -1,16 +1,17 @@
-from tensorlink.p2p.torch_node import TorchNode
-from tensorlink.p2p.connection import Connection
-from tensorlink.ml.utils import estimate_memory, handle_output, get_gpu_memory
-from tensorlink.crypto.rsa import get_rsa_pub_key
-
-from dotenv import get_key
-import torch.nn as nn
-import threading
-import logging
 import hashlib
-import torch
-import time
 import json
+import logging
+import threading
+import time
+
+import torch
+import torch.nn as nn
+from dotenv import get_key
+
+from tensorlink.crypto.rsa import get_rsa_pub_key
+from tensorlink.ml.utils import estimate_memory, get_gpu_memory, handle_output
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.torch_node import TorchNode
 
 
 class Worker(TorchNode):
@@ -29,7 +30,7 @@ class Worker(TorchNode):
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
-        local_test=False
+        local_test=False,
     ):
         super(Worker, self).__init__(
             request_queue,
@@ -38,7 +39,7 @@ class Worker(TorchNode):
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
-            local_test=local_test
+            local_test=local_test,
         )
 
         self.training = False
@@ -48,12 +49,17 @@ class Worker(TorchNode):
         self.public_key = get_key(".env", "PUBLIC_KEY")
         self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-        self.debug_print(f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
+        self.debug_print(
+            f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
+            level=logging.INFO,
+        )
         self.available_memory = get_gpu_memory()
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
-            self.debug_print("Public key not found in .env file, using donation wallet...")
+            self.debug_print(
+                "Public key not found in .env file, using donation wallet..."
+            )
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             attempts = 0
@@ -67,7 +73,9 @@ class Worker(TorchNode):
                     attempts += 1
 
             if len(self.validators) == 0:
-                self.debug_print(f"No validators found, shutting down...", level=logging.CRITICAL)
+                self.debug_print(
+                    f"No validators found, shutting down...", level=logging.CRITICAL
+                )
                 self.stop()
                 self.terminate_flag.set()
 
@@ -88,7 +96,9 @@ class Worker(TorchNode):
             if not handled:
                 # Try worker-related tags
                 if b"STATS-REQUEST" == data[:13]:
-                    self.debug_print(f"Worker -> Received stats request from: {node.node_id}")
+                    self.debug_print(
+                        f"Worker -> Received stats request from: {node.node_id}"
+                    )
                     self.handle_statistics_request(node)
 
                 elif b"SHUTDOWN-JOB" == data[:12]:
@@ -100,7 +110,14 @@ class Worker(TorchNode):
                     try:
                         if node.role == "V":
                             # Accept job request from validator if we can handle it
-                            user_id, job_id, module_id, module_size, module_name, optimizer_name = json.loads(data[7:])
+                            (
+                                user_id,
+                                job_id,
+                                module_id,
+                                module_size,
+                                module_name,
+                                optimizer_name,
+                            ) = json.loads(data[7:])
 
                             if (
                                 self.available_memory >= module_size
@@ -111,8 +128,12 @@ class Worker(TorchNode):
 
                                 # Store a request to wait for the user connection
                                 self._store_request(user_id, module_id + module_name)
-                                self._store_request(user_id, "OPTIMIZER" + optimizer_name)
-                                data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+                                self._store_request(
+                                    user_id, "OPTIMIZER" + optimizer_name
+                                )
+                                data = (
+                                    b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+                                )
 
                                 # Update available memory
                                 self.available_memory -= module_size
@@ -160,8 +181,11 @@ class Worker(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"Worker -> stream data exception: {e}", colour="bright_red",
-                             level=logging.ERROR)
+            self.debug_print(
+                f"Worker -> stream data exception: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+            )
             raise e
 
     def run(self):
@@ -212,6 +236,7 @@ class Worker(TorchNode):
 
     def clean_node(self):
         """Periodically clean up node storage"""
+
         def clean_nodes(nodes):
             nodes_to_remove = []
             for node_id in nodes:

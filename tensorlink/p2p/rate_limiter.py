@@ -4,7 +4,9 @@ from pathlib import Path
 
 
 class RateLimiter:
-    def __init__(self, max_attempts_per_minute, block_duration, blacklist_file="blacklist.json"):
+    def __init__(
+        self, max_attempts_per_minute, block_duration, blacklist_file="blacklist.json"
+    ):
         self.rate_limit = {}
         self.max_attempts_per_minute = max_attempts_per_minute
         self.block_duration = block_duration

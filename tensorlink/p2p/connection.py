@@ -1,15 +1,14 @@
-from datetime import datetime
-from typing import Union
-import threading
-import logging
-import hashlib
-import socket
 import base64
+import gc
+import hashlib
+import logging
+import os
+import socket
+import threading
 import time
 import zlib
-import os
-import gc
-
+from datetime import datetime
+from typing import Union
 
 CHUNK_SIZE = 2048
 
@@ -64,7 +63,9 @@ class Connection(threading.Thread):
 
             file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
-                chunk = self.sock.recv(self.chunk_size,)
+                chunk = self.sock.recv(
+                    self.chunk_size,
+                )
             except socket.timeout:
                 # self.main_node.debug_print("connection timeout")
                 continue
@@ -72,13 +73,21 @@ class Connection(threading.Thread):
             except (ConnectionResetError, ConnectionAbortedError) as e:
                 # Handle disconnections
                 self.terminate_flag.set()
-                self.main_node.debug_print(f"Connection -> Connection lost: {e}", colour="bright_red", level=logging.ERROR)
+                self.main_node.debug_print(
+                    f"Connection -> Connection lost: {e}",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                )
                 self.main_node.disconnect_node(self.node_id)
                 break
 
             except Exception as e:
                 self.terminate_flag.set()
-                self.main_node.debug_print(f"Connection -> unexpected error: {e}", colour="bright_red", level=logging.ERROR)
+                self.main_node.debug_print(
+                    f"Connection -> unexpected error: {e}",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                )
                 self.main_node.disconnect_node(self.node_id)
                 break
 
@@ -102,9 +111,13 @@ class Connection(threading.Thread):
                         with open(file_name, "ab") as f:
                             f.write(packet)
                     except Exception as e:
-                        self.main_node.debug_print(f"Connection -> file writing error: {e}", colour="bright_red", level=logging.ERROR)
+                        self.main_node.debug_print(
+                            f"Connection -> file writing error: {e}",
+                            colour="bright_red",
+                            level=logging.ERROR,
+                        )
 
-                    buffer = buffer[eot_pos + len(self.EOT_CHAR):]
+                    buffer = buffer[eot_pos + len(self.EOT_CHAR) :]
                     self.main_node.handle_message(self, b"DONE STREAM" + prefix)
                     prefix = b""
 
@@ -114,7 +127,9 @@ class Connection(threading.Thread):
                     writing_threads = []
 
                 elif len(buffer) > 20_000_000:
-                    t = threading.Thread(target=self.write_to_file, args=(file_name, buffer))
+                    t = threading.Thread(
+                        target=self.write_to_file, args=(file_name, buffer)
+                    )
                     writing_threads.append(t)
                     t.start()
 
@@ -122,7 +137,11 @@ class Connection(threading.Thread):
 
             elif chunk == b"":
                 self.terminate_flag.set()
-                self.main_node.debug_print(f"Connection -> Connection lost.", colour="bright_red", level=logging.ERROR)
+                self.main_node.debug_print(
+                    f"Connection -> Connection lost.",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                )
                 self.main_node.disconnect_node(self.node_id)
                 break
 
@@ -142,7 +161,7 @@ class Connection(threading.Thread):
                 data = self.compress(data)
                 if data is not None:
                     for i in range(0, len(data), self.chunk_size):
-                        chunk = data[i: i + self.chunk_size]
+                        chunk = data[i : i + self.chunk_size]
                         self.sock.sendall(chunk + self.COMPR_CHAR)
                     self.sock.sendall(self.EOT_CHAR)
 
@@ -154,25 +173,32 @@ class Connection(threading.Thread):
                 data_view = memoryview(data)
                 data_size = len(data)
 
-                for chunk_number, i in enumerate(range(0, data_size, self.chunk_size), start=1):
-                    self.sock.sendall(data_view[i: i + self.chunk_size])
+                for chunk_number, i in enumerate(
+                    range(0, data_size, self.chunk_size), start=1
+                ):
+                    self.sock.sendall(data_view[i : i + self.chunk_size])
 
                     # Print debug information for every chunk, or you can choose an interval.
                     if chunk_number % 100 == 0:
-                        self.main_node.debug_print(f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
-                                                   colour="magenta")
+                        self.main_node.debug_print(
+                            f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                            colour="magenta",
+                        )
 
                 self.sock.sendall(self.EOT_CHAR)
 
         except Exception as e:
-            self.main_node.debug_print(f"Connection -> connection send error: {e}", colour="bright_red",
-                                       level=logging.ERROR)
+            self.main_node.debug_print(
+                f"Connection -> connection send error: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+            )
             self.stop()
 
     def send_from_file(self, file_name: str, tag: bytes):
         try:
             # Data is a filename. Read from file in chunks.
-            with open(file_name, 'rb') as file:
+            with open(file_name, "rb") as file:
                 self.sock.sendall(tag)
 
                 start_time = time.time()
@@ -189,9 +215,14 @@ class Connection(threading.Thread):
 
                     # Optionally print or log the number of bytes left
                     if chunk_number % 10 == 0:
-                        self.main_node.debug_print(f"Connection -> Bytes left to send: {bytes_left}", colour="magenta")
-                        self.main_node.debug_print(f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
-                                                   colour="magenta")
+                        self.main_node.debug_print(
+                            f"Connection -> Bytes left to send: {bytes_left}",
+                            colour="magenta",
+                        )
+                        self.main_node.debug_print(
+                            f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                            colour="magenta",
+                        )
 
                     chunk = file.read(chunk_size)
                     if not chunk:
@@ -207,8 +238,11 @@ class Connection(threading.Thread):
             os.remove(file_name)
 
         except Exception as e:
-            self.main_node.debug_print(f"Connection -> Error sending file: {e}", colour="bright_red",
-                                       level=logging.ERROR)
+            self.main_node.debug_print(
+                f"Connection -> Error sending file: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+            )
             self.stop()
 
     def stop(self) -> None:
@@ -236,8 +270,11 @@ class Connection(threading.Thread):
             with open(file_name, "ab") as f:
                 f.write(buffer)
         except Exception as e:
-            self.main_node.debug_print(f"Connection -> file writing error: {e}", level=logging.ERROR,
-                                       colour="bright_red")
+            self.main_node.debug_print(
+                f"Connection -> file writing error: {e}",
+                level=logging.ERROR,
+                colour="bright_red",
+            )
 
     def compress(self, data):
         compressed = data
@@ -245,8 +282,11 @@ class Connection(threading.Thread):
         try:
             compressed = base64.b64encode(zlib.compress(data, 6))
         except Exception as e:
-            self.main_node.debug_print(f"Connection -> compression-error: {e}", level=logging.CRITICAL,
-                                       colour="bright_red")
+            self.main_node.debug_print(
+                f"Connection -> compression-error: {e}",
+                level=logging.CRITICAL,
+                colour="bright_red",
+            )
 
         return compressed
 
@@ -256,13 +296,16 @@ class Connection(threading.Thread):
         try:
             decompressed = zlib.decompress(decompressed)
         except Exception as e:
-            self.main_node.debug_print(f"Connection -> decompression-error: {e}", colour="bright_red",
-                                       level=logging.CRITICAL)
+            self.main_node.debug_print(
+                f"Connection -> decompression-error: {e}",
+                colour="bright_red",
+                level=logging.CRITICAL,
+            )
 
         return decompressed
 
     def adjust_chunk_size(self, chunk_size: str = None):
         if chunk_size == "large":
-            self.chunk_size = CHUNK_SIZE ** 2
+            self.chunk_size = CHUNK_SIZE**2
         else:
             self.chunk_size = CHUNK_SIZE

@@ -24,13 +24,20 @@ Overview:
    - Demonstrates model distribution, gradient updates, and optimization across nodes.
 
 """
-from tensorlink import UserNode, WorkerNode, ValidatorNode
-from transformers import BertTokenizer, BertForSequenceClassification, AutoTokenizer, AutoModelForCausalLM
-from torch.nn.functional import mse_loss
-import torch
-import time
-import logging
 
+import logging
+import time
+
+import torch
+from torch.nn.functional import mse_loss
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BertForSequenceClassification,
+    BertTokenizer,
+)
+
+from tensorlink import UserNode, ValidatorNode, WorkerNode
 
 # Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
 LOCAL = True
@@ -46,11 +53,17 @@ DP_FACTOR = 1
 
 if __name__ == "__main__":
     # Launches a node of each type in their own process
-    validator = ValidatorNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    validator = ValidatorNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
-    user = UserNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    user = UserNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
-    worker = WorkerNode(upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG)
+    worker = WorkerNode(
+        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+    )
     time.sleep(3)
 
     # Get validator node information for connecting
@@ -71,9 +84,7 @@ if __name__ == "__main__":
 
     # User requests a distributed model and optimizer from a validator
     distributed_model, distributed_optimizer = user.create_distributed_model(
-        model=model,
-        training=True,
-        optimizer_type=torch.optim.Adam
+        model=model, training=True, optimizer_type=torch.optim.Adam
     )
     del model  # Free up some space
 

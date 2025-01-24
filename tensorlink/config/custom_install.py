@@ -1,6 +1,8 @@
-from setuptools.command.install import install
-from tensorlink.crypto.rsa import generate_rsa_key_pair
 import os
+
+from setuptools.command.install import install
+
+from tensorlink.crypto.rsa import generate_rsa_key_pair
 
 
 class CustomInstallCommand(install):

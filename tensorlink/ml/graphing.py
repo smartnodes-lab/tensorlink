@@ -1,42 +1,36 @@
-from tensorlink.ml.utils import estimate_memory
-from transformers import PreTrainedModel
-from huggingface_hub import HfApi
-import torch.nn as nn
 import hashlib
 import random
+
+import torch.nn as nn
+from huggingface_hub import HfApi
+from transformers import PreTrainedModel
+
+from tensorlink.ml.utils import estimate_memory
 
 
 # Create offloaded module data structure for config file
 def create_offloaded(module: nn.Module, module_index: list, module_size: int):
-    module_id = (
-        hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
-    )
+    module_id = hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
     data = {
         "type": "offloaded",
         "id_hash": module_id,
-        "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                  :-1
-                  ],  # class name
+        "module": f"{type(module)}".split(".")[-1].split(">")[0][:-1],  # class name
         "mod_id": module_index,
         "size": module_size,
         "parameters": {},
         "workers": [],
-        "training": True
+        "training": True,
     }
     return module_id, data
 
 
 # Create user-loaded module data structure for config file
 def create_loaded(module: nn.Module, module_index: list, module_size: int):
-    module_id = (
-        hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
-    )
+    module_id = hashlib.sha256(str(random.random()).encode()).hexdigest().encode()
     data = {
         "type": "loaded",
         "id_hash": module_id,
-        "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                  :-1
-                  ],  # class name
+        "module": f"{type(module)}".split(".")[-1].split(">")[0][:-1],  # class name
         "mod_id": module_index,
         "size": module_size,
         "parameters": {},
@@ -47,7 +41,9 @@ def create_loaded(module: nn.Module, module_index: list, module_size: int):
 
 def find_best_worker(worker_info, module_memory):
     suitable_workers = {
-        key: info for key, info in worker_info.items() if info["memory"] >= module_memory
+        key: info
+        for key, info in worker_info.items()
+        if info["memory"] >= module_memory
     }
 
     if not suitable_workers:
@@ -58,14 +54,14 @@ def find_best_worker(worker_info, module_memory):
 
 
 def handle_layers(
-        module: nn.Module,
-        user_memory: int,
-        worker_info: dict,
-        config: dict = None,
-        handle_layer: bool = True,
-        layer_depth: int = 0,
-        current_depth: int = 0,
-        ids: list = None
+    module: nn.Module,
+    user_memory: int,
+    worker_info: dict,
+    config: dict = None,
+    handle_layer: bool = True,
+    layer_depth: int = 0,
+    current_depth: int = 0,
+    ids: list = None,
 ):
     """
     Offloaded layer distribution, can modify depth of initial handling by adjusting user_memory.
@@ -115,16 +111,24 @@ def handle_layers(
             new_ids = ids + [i]
 
             # Decide whether to handle the layer or continue to the next depth level
-            if handle_layer and user_memory >= submodule_memory and current_depth < layer_depth:
+            if (
+                handle_layer
+                and user_memory >= submodule_memory
+                and current_depth < layer_depth
+            ):
                 # Handle the submodule directly if within the depth threshold
                 user_memory -= submodule_memory
-                submodule_id, submodule_info = create_loaded(submodule, new_ids, submodule_memory)
+                submodule_id, submodule_info = create_loaded(
+                    submodule, new_ids, submodule_memory
+                )
                 config[submodule_id] = submodule_info
                 handle_layer = False
 
             elif max_worker_memory >= submodule_memory and not handle_layer:
                 # Offload to a worker if it has enough memory and initial load is not required
-                submodule_id, submodule_info = create_offloaded(submodule, new_ids, submodule_memory)
+                submodule_id, submodule_info = create_offloaded(
+                    submodule, new_ids, submodule_memory
+                )
                 config[submodule_id] = submodule_info
 
             else:
@@ -137,7 +141,7 @@ def handle_layers(
                     handle_layer=handle_layer,
                     layer_depth=layer_depth,
                     current_depth=current_depth + 1,
-                    ids=new_ids
+                    ids=new_ids,
                 )
                 config.update(sub_config)
                 handle_layer = False
@@ -155,7 +159,7 @@ class ModelParser:
         module: nn.Module,
         config: dict = None,
         ids: list = None,
-        data_obfuscation=False
+        data_obfuscation=False,
     ):
         if config is None:
             config = {}
@@ -180,7 +184,10 @@ class ModelParser:
                 new_ids = ids + [i]
 
                 # Handle on worker if we do not need to load on user device
-                if submodule_memory <= self.max_module_size and data_obfuscation is False:
+                if (
+                    submodule_memory <= self.max_module_size
+                    and data_obfuscation is False
+                ):
                     k, v = create_offloaded(submodule, new_ids, submodule_memory)
                     config[k] = v
 
@@ -197,7 +204,7 @@ class ModelParser:
                         submodule,
                         config=config.copy(),
                         ids=new_ids,
-                        data_obfuscation=data_obfuscation
+                        data_obfuscation=data_obfuscation,
                     )
                     k, v = create_loaded(submodule, new_ids, submodule_memory)
                     v["subconfig"] = sub_config

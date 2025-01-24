@@ -1,8 +1,9 @@
-from tensorlink.ml.utils import access_module
-
 import threading
-import torch
 import time
+
+import torch
+
+from tensorlink.ml.utils import access_module
 
 
 class DistributedParameter(torch.nn.Parameter):
@@ -11,9 +12,12 @@ class DistributedParameter(torch.nn.Parameter):
         A wrapper around a tensor that represents a parameter offloaded to another worker device.
         This acts as a proxy to access the remote parameter when needed.
     """
+
     def __new__(cls, parent_model, module_id, worker_id, param_name, *args, **kwargs):
         data = torch.empty(0)
-        instance = super(DistributedParameter, cls).__new__(cls, data, requires_grad=True)
+        instance = super(DistributedParameter, cls).__new__(
+            cls, data, requires_grad=True
+        )
         return instance
 
     def __init__(self, parent_model, module_id, worker_id, param_name):
@@ -65,17 +69,13 @@ class DistributedParameter(torch.nn.Parameter):
         """
         Request the worker to perform an optimization step with the current gradients.
         """
-        self.model.send_request(
-            "step_optimizer", (self.worker_id, self.param_id)
-        )
+        self.model.send_request("step_optimizer", (self.worker_id, self.param_id))
 
     def zero_grad(self):
         """
         Request the worker to zero out gradients for this parameter.
         """
-        self.model.send_request(
-            "zero_grad", (self.worker_id, self.param_id)
-        )
+        self.model.send_request("zero_grad", (self.worker_id, self.param_id))
 
 
 def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs):
@@ -114,11 +114,12 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
                 if module_info["type"] == "offloaded":
                     for worker_id in module_info["workers"]:
                         self.model.send_request(
-                            "send_optimizer_request", (worker_id, module_id, "init", _optimizer_kwargs)
+                            "send_optimizer_request",
+                            (worker_id, module_id, "init", _optimizer_kwargs),
                         )
                         t = threading.Thread(
                             target=self._wait_for_worker,
-                            args=("loaded", worker_id, module_id)
+                            args=("loaded", worker_id, module_id),
                         )
 
                         t.start()
@@ -143,11 +144,12 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
                 if module_info["type"] == "offloaded":
                     for worker_id in module_info["workers"]:
                         self.model.send_request(
-                            "send_optimizer_request", (worker_id, module_id, "step", closure)
+                            "send_optimizer_request",
+                            (worker_id, module_id, "step", closure),
                         )
                         t = threading.Thread(
                             target=self._wait_for_worker,
-                            args=("stepped", worker_id, module_id)
+                            args=("stepped", worker_id, module_id),
                         )
                         t.start()
                         threads.append(t)
@@ -170,11 +172,12 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
                 if module_info["type"] == "offloaded":
                     for worker_id in module_info["workers"]:
                         self.model.send_request(
-                            "send_optimizer_request", (worker_id, module_id, "zero_grad", None)
+                            "send_optimizer_request",
+                            (worker_id, module_id, "zero_grad", None),
                         )
                         thread = threading.Thread(
                             target=self._wait_for_worker,
-                            args=("zeroed", worker_id, module_id)
+                            args=("zeroed", worker_id, module_id),
                         )
                         thread.start()
                         threads.append(thread)
@@ -188,7 +191,9 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             start_time = time.time()
             while waiting:
                 time.sleep(1)
-                args = self.model.send_request("check_module_request", (request_type, worker_id, module_id))
+                args = self.model.send_request(
+                    "check_module_request", (request_type, worker_id, module_id)
+                )
 
                 if args is True:
                     waiting = False
