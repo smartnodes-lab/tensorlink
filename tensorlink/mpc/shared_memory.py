@@ -1,6 +1,6 @@
-from multiprocessing import shared_memory
-from copy import deepcopy
 import pickle
+from copy import deepcopy
+from multiprocessing import shared_memory
 
 
 def get_from_shared_memory(size, name, encoded=False):

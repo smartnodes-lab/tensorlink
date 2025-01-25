@@ -1,16 +1,17 @@
-from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torch_node import TorchNode
-from tensorlink.p2p.node_api import *
-from tensorlink.crypto.rsa import get_rsa_pub_key
+import hashlib
+import json
+import logging
+import queue
+import random
+import threading
+import time
 
 from dotenv import get_key
-import threading
-import hashlib
-import logging
-import random
-import queue
-import time
-import json
+
+from tensorlink.crypto.rsa import get_rsa_pub_key
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.node_api import *
+from tensorlink.p2p.torch_node import TorchNode
 
 
 class User(TorchNode):
@@ -22,7 +23,7 @@ class User(TorchNode):
         max_connections: int = 0,
         upnp=True,
         off_chain_test=False,
-        local_test=False
+        local_test=False,
     ):
         super(User, self).__init__(
             request_queue,
@@ -31,13 +32,16 @@ class User(TorchNode):
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
-            local_test=local_test
+            local_test=local_test,
         )
         self.print_level = print_level
         self.distributed_graph = {}
         self.worker_stats = {}
 
-        self.debug_print(f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})", level=logging.INFO)
+        self.debug_print(
+            f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})",
+            level=logging.INFO,
+        )
 
         # self.endpoint = create_endpoint(self)
         # self.endpoint_thread = threading.Thread(
@@ -65,7 +69,22 @@ class User(TorchNode):
         if not self.off_chain_test:
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            self.bootstrap()
+
+            attempts = 0
+            self.debug_print(f"Bootstrapping...")
+            while attempts < 3 and len(self.validators) == 0:
+                self.bootstrap()
+                if len(self.validators) == 0:
+                    time.sleep(15)
+                    self.debug_print(f"No validators found, trying again...")
+                    attempts += 1
+
+            if len(self.validators) == 0:
+                self.debug_print(
+                    f"No validators found, shutting down...", level=logging.CRITICAL
+                )
+                self.stop()
+                self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -80,15 +99,16 @@ class User(TorchNode):
                 if b"ACCEPT-JOB" == data[:10]:
                     # Start a new thread to handle the job acceptance logic
                     threading.Thread(
-                        target=self.handle_accept_job,
-                        args=(data, node),
-                        daemon=True
+                        target=self.handle_accept_job, args=(data, node), daemon=True
                     ).start()
                 elif b"DECLINE-JOB" == data[:11]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         reason = data[11:]
-                        self.debug_print(f"User -> Validator ({node.node_id}) declined job! Reason: {reason}",
-                                         colour="bright_red", level=logging.ERROR)
+                        self.debug_print(
+                            f"User -> Validator ({node.node_id}) declined job! Reason: {reason}",
+                            colour="bright_red",
+                            level=logging.ERROR,
+                        )
                         self.stop()
 
                     else:
@@ -108,7 +128,11 @@ class User(TorchNode):
             return True
 
         except Exception as e:
-            self.debug_print(f"User -> error handling data {e}", colour="bright_red", level=logging.ERROR)
+            self.debug_print(
+                f"User -> error handling data {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+            )
             raise e
 
     def handle_requests(self, req=None):
@@ -148,8 +172,11 @@ class User(TorchNode):
         """
         try:
             if node.node_id in self.jobs[-1]["seed_validators"]:
-                self.debug_print(f"User -> Validator ({node.node_id}) accepted job!", colour="bright_green",
-                                 level=logging.INFO)
+                self.debug_print(
+                    f"User -> Validator ({node.node_id}) accepted job!",
+                    colour="bright_green",
+                    level=logging.INFO,
+                )
                 job_id = data[10:74].decode()
                 job_data = json.loads(data[74:])
                 distribution = job_data["distribution"]
@@ -169,20 +196,20 @@ class User(TorchNode):
 
                 self.requests[node.node_id].remove(job_id)
             else:
-                self.debug_print(f"User -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
-                                 level=logging.WARNING)
+                self.debug_print(
+                    f"User -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
+                    level=logging.WARNING,
+                )
 
         except Exception as e:
-            self.debug_print(f"User -> handle job accept error: {e}", level=logging.CRITICAL,
-                             colour="bright_red")
+            self.debug_print(
+                f"User -> handle job accept error: {e}",
+                level=logging.CRITICAL,
+                colour="bright_red",
+            )
             raise e
 
-    def request_job(
-        self,
-        n_pipelines,
-        dp_factor,
-        distribution
-    ):
+    def request_job(self, n_pipelines, dp_factor, distribution):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
         # Commented out code as user contract interactions will come later
@@ -220,11 +247,13 @@ class User(TorchNode):
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
 
         validator_ids = [random.choice(self.validators)]
-        distribution = {k: v for k, v in distribution.items() if v["type"] == "offloaded"}
+        distribution = {
+            k: v for k, v in distribution.items() if v["type"] == "offloaded"
+        }
 
         # Update required network capacity TODO must account for batch size
         capacity = (
-                sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
+            sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
         )
 
         for mod_id, mod_info in distribution.items():
@@ -242,7 +271,7 @@ class User(TorchNode):
                 self.debug_print(
                     f"User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
-                    level=logging.WARNING
+                    level=logging.WARNING,
                 )
                 return False
 
@@ -256,7 +285,7 @@ class User(TorchNode):
                 self.debug_print(
                     f"User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
-                    level=logging.WARNING
+                    level=logging.WARNING,
                 )
                 return False
 
@@ -276,7 +305,7 @@ class User(TorchNode):
             "dp_factor": dp_factor,
             "distribution": distribution,
             "n_workers": n_pipelines * len(distribution),
-            "seed_validators": validator_ids
+            "seed_validators": validator_ids,
         }
 
         # Get unique job id given current parameters
@@ -303,7 +332,11 @@ class User(TorchNode):
             # Wait for loading confirmation from worker roles
             worker_info = self.modules[mod_id]
             if len(worker_info["workers"]) < 1:
-                self.debug_print(f"Network could not find workers for job.", level=logging.INFO, colour="red")
+                self.debug_print(
+                    f"Network could not find workers for job.",
+                    level=logging.INFO,
+                    colour="red",
+                )
                 return
 
             worker_id = worker_info["workers"][0]
@@ -340,8 +373,11 @@ class User(TorchNode):
         while job_info["id"] in self.requests[validator.node_id]:
             if time.time() - start_time > 100:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
-                self.debug_print("User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB", colour="bright_yellow",
-                                 level=logging.WARNING)
+                self.debug_print(
+                    "User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB",
+                    colour="bright_yellow",
+                    level=logging.WARNING,
+                )
                 return
         return
 

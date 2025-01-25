@@ -1,16 +1,18 @@
-from tensorlink.mpc.nodes import WorkerNode
-import torch.cuda as cuda
-import subprocess
-import logging
-import dotenv
 import json
-import time
-import sys
+import logging
 import os
+import subprocess
+import sys
+import time
+
+import dotenv
+import torch.cuda as cuda
+
+from tensorlink.mpc.nodes import WorkerNode
 
 
 def get_root_dir():
-    if getattr(sys, 'frozen', False):  # Check if running as an executable
+    if getattr(sys, "frozen", False):  # Check if running as an executable
         return os.path.dirname(sys.executable)
     else:  # Running as a Python script
         return os.path.dirname(os.path.abspath(__file__))
@@ -68,6 +70,28 @@ def stop_mining(mining_process):
         mining_process.wait()
 
 
+def _confirm_action():
+    """
+    Prompts the user with a confirmation message before proceeding.
+    """
+    while True:
+        response = (
+            input(
+                "Trusted mode is enabled. Are you sure you want to proceed? (yes/no, y/n): "
+            )
+            .strip()
+            .lower()
+        )
+        if response in {"yes", "y"}:
+            print("Proceeding with trusted mode.")
+            break
+        elif response in {"no", "n"}:
+            print("Aborting initialization in trusted mode.")
+            exit(1)
+        else:
+            print("Invalid input. Please type 'yes'/'y' or 'no'/'n'.")
+
+
 def main():
     root_dir = get_root_dir()
     env_path = os.path.join(root_dir, ".env")
@@ -80,8 +104,20 @@ def main():
     mining_enabled = config.get("mining", "false").lower() == "true"
     mining_script = config.get("mining-script")
     use_sudo = True if os.geteuid() == 0 else False
+    local = True if config.get("local", "false") == "true" else False
+    trusted = True if config.get("local", "false") == "true" else False
+    upnp = True if local == "false" else False
 
-    worker = WorkerNode(upnp=True, print_level=logging.INFO)
+    if trusted:
+        _confirm_action()
+
+    worker = WorkerNode(
+        upnp=upnp,
+        local_test=local,
+        off_chain_test=local,
+        print_level=logging.INFO,
+        trusted=trusted,
+    )
 
     try:
         while True:

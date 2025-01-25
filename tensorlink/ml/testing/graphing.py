@@ -1,17 +1,18 @@
-import matplotlib.pyplot as plt
-from torchviz import make_dot
-import torch.nn as nn
-import networkx as nx
-import torch
 import random
 import re
+
+import matplotlib.pyplot as plt
+import networkx as nx
+import torch
+import torch.nn as nn
+from torchviz import make_dot
 
 
 def parse_node(node):
     _id = node.split()[0]
     name = node.split("label=")[-1]
-    if name[0] == "\"":
-        name = name.split("\"", maxsplit=2)[1].strip()
+    if name[0] == '"':
+        name = name.split('"', maxsplit=2)[1].strip()
     if name[-1] == "]":
         name = name[:-1]
     return _id, name
@@ -21,7 +22,7 @@ def parse_edge(edge):
     arrow_idx = edge.find("->")
     if arrow_idx != -1:
         left_num = edge[:arrow_idx].strip()
-        right_num = edge[arrow_idx + 2:].strip().split()[0]
+        right_num = edge[arrow_idx + 2 :].strip().split()[0]
         return left_num, right_num
 
 
@@ -33,7 +34,9 @@ def handle_output(tensor):
     return tensor
 
 
-def create_graph(module: nn.Module, dummy_input: torch.Tensor, output_format: str = "png"):
+def create_graph(
+    module: nn.Module, dummy_input: torch.Tensor, output_format: str = "png"
+):
     # Generate the forward pass to get the output
     out = module(dummy_input)
 
@@ -42,21 +45,25 @@ def create_graph(module: nn.Module, dummy_input: torch.Tensor, output_format: st
 
     # Export the graph to file
     filename = str(round(random.random(), 2))  # Random name to avoid overwriting
-    dot.render(filename, format=output_format)  # You can change the format to 'pdf', 'svg', etc.
+    dot.render(
+        filename, format=output_format
+    )  # You can change the format to 'pdf', 'svg', etc.
 
     # Display the graph inline (optional, requires matplotlib)
     image_path = f"{filename}.{output_format}"
     plt.figure(figsize=(10, 10))
     img = plt.imread(image_path)
     plt.imshow(img)
-    plt.axis('off')
+    plt.axis("off")
     plt.show()
 
     # Return dot source as string, nodes, and edges for further inspection if needed
     dot_string = dot.source
     lines = dot_string.replace("\n", "").split("\t")
     nodes = [line.strip() for line in lines if "label=" in line]
-    nodes = {node.split(' [')[0]: node.split('label="')[1].split('"')[0] for node in nodes}
+    nodes = {
+        node.split(" [")[0]: node.split('label="')[1].split('"')[0] for node in nodes
+    }
     edges = [line.strip() for line in lines if "->" in line]
 
     return nodes, edges
@@ -67,7 +74,9 @@ def estimate_memory(module):
     Dummy estimate compared to estimate_memory_requirements but doesn't require a dummy
     forward pass and thus is preferred for now.
     """
-    return 4 * sum(param.numel() * param.element_size() for param in module.parameters())
+    return 4 * sum(
+        param.numel() * param.element_size() for param in module.parameters()
+    )
 
 
 class DAG:

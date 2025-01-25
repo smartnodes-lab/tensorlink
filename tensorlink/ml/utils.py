@@ -1,20 +1,20 @@
+import ast
 import base64
 import importlib
-from typing import Tuple, Dict, Any, List, Optional
-from transformers import optimization as hf_optim
-from transformers.utils import ModelOutput
-from collections import defaultdict
-from dataclasses import dataclass
-import torch.nn as nn
-from enum import Enum
-import numpy as np
-import importlib
 import inspect
-import torch
+import io
 import json
 import math
-import ast
-import io
+from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+from transformers import optimization as hf_optim
+from transformers.utils import ModelOutput
 
 
 class MemoryType(Enum):
@@ -38,12 +38,12 @@ class MemoryEstimator:
     def __init__(self):
         # Memory multipliers for different optimizer types
         self.optimizer_memory_multipliers = {
-            'adam': 3,  # Adam keeps 2 momentum terms + parameters
-            'adamw': 3,
-            'sgd': 1,  # SGD with momentum keeps 1 momentum term
-            'rmsprop': 2,
-            'adagrad': 2,
-            'adadelta': 3
+            "adam": 3,  # Adam keeps 2 momentum terms + parameters
+            "adamw": 3,
+            "sgd": 1,  # SGD with momentum keeps 1 momentum term
+            "rmsprop": 2,
+            "adagrad": 2,
+            "adadelta": 3,
         }
 
         # Activation memory factors for different layer types
@@ -59,7 +59,7 @@ class MemoryEstimator:
             nn.Dropout: 1.0,  # Minimal overhead for mask
             nn.ReLU: 1.0,
             nn.MaxPool2d: 1.0,
-            nn.AdaptiveAvgPool2d: 1.0
+            nn.AdaptiveAvgPool2d: 1.0,
         }
 
     def _get_dtype_size(self, dtype: torch.dtype) -> int:
@@ -94,7 +94,9 @@ class MemoryEstimator:
         w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
 
         # Consider im2col memory overhead
-        im2col_size = module.in_channels * kernel_size[0] * kernel_size[1] * h_out * w_out
+        im2col_size = (
+            module.in_channels * kernel_size[0] * kernel_size[1] * h_out * w_out
+        )
         output_size = out_channels * h_out * w_out
 
         return (im2col_size + output_size) / (h * w * module.in_channels)
@@ -103,12 +105,18 @@ class MemoryEstimator:
         """Calculate activation factor for Linear layers."""
         return 2.0  # Input and output activations
 
-    def _attention_activation_factor(self, module: nn.MultiheadAttention, input_shape: Tuple) -> float:
+    def _attention_activation_factor(
+        self, module: nn.MultiheadAttention, input_shape: Tuple
+    ) -> float:
         """Calculate activation factor for attention layers considering Q, K, V matrices."""
         seq_length = input_shape[0]
-        return 4.0 + (seq_length / 100)  # Base factor + sequence length dependent factor
+        return 4.0 + (
+            seq_length / 100
+        )  # Base factor + sequence length dependent factor
 
-    def _transformer_activation_factor(self, module: nn.TransformerEncoderLayer, input_shape: Tuple) -> float:
+    def _transformer_activation_factor(
+        self, module: nn.TransformerEncoderLayer, input_shape: Tuple
+    ) -> float:
         """Calculate activation factor for transformer layers."""
         return 6.0  # Multiple attention heads + FFN activations
 
@@ -120,18 +128,22 @@ class MemoryEstimator:
         """Calculate activation factor for GRU layers."""
         return 3.0  # Reset, update gates and new memory
 
-    def estimate_layer_memory(self,
-                              module: nn.Module,
-                              input_shape: Tuple,
-                              batch_size: int,
-                              dtype: torch.dtype,
-                              training: bool = True) -> Dict[MemoryType, int]:
+    def estimate_layer_memory(
+        self,
+        module: nn.Module,
+        input_shape: Tuple,
+        batch_size: int,
+        dtype: torch.dtype,
+        training: bool = True,
+    ) -> Dict[MemoryType, int]:
         """Estimate memory usage for a single layer."""
         memory_breakdown = {mem_type: 0 for mem_type in MemoryType}
         dtype_size = self._get_dtype_size(dtype)
 
         # Parameter memory
-        param_memory = sum(p.numel() * self._get_dtype_size(p.dtype) for p in module.parameters())
+        param_memory = sum(
+            p.numel() * self._get_dtype_size(p.dtype) for p in module.parameters()
+        )
         memory_breakdown[MemoryType.PARAMETERS] = param_memory
 
         # Gradient memory during training
@@ -146,25 +158,33 @@ class MemoryEstimator:
         activation_factor = 1.0
         for layer_type, factor_func in self.activation_factors.items():
             if isinstance(module, layer_type):
-                activation_factor = (factor_func(module, input_shape)
-                                     if callable(factor_func)
-                                     else factor_func)
+                activation_factor = (
+                    factor_func(module, input_shape)
+                    if callable(factor_func)
+                    else factor_func
+                )
                 break
 
-        memory_breakdown[MemoryType.ACTIVATIONS] = int(base_activation_memory * activation_factor)
+        memory_breakdown[MemoryType.ACTIVATIONS] = int(
+            base_activation_memory * activation_factor
+        )
 
         # Temporary memory buffers (for intermediate computations)
-        memory_breakdown[MemoryType.TEMPORARY] = int(base_activation_memory * 0.5)  # Conservative estimate
+        memory_breakdown[MemoryType.TEMPORARY] = int(
+            base_activation_memory * 0.5
+        )  # Conservative estimate
 
         return memory_breakdown
 
-    def estimate_model_memory(self,
-                              model: nn.Module,
-                              input_shape: Tuple,
-                              batch_size: int = 32,
-                              dtype: torch.dtype = torch.float32,
-                              optimizer_type: str = 'adam',
-                              training: bool = True) -> MemoryStats:
+    def estimate_model_memory(
+        self,
+        model: nn.Module,
+        input_shape: Tuple,
+        batch_size: int = 32,
+        dtype: torch.dtype = torch.float32,
+        optimizer_type: str = "adam",
+        training: bool = True,
+    ) -> MemoryStats:
         """
         Estimate total memory usage for the entire model.
 
@@ -225,8 +245,10 @@ class MemoryEstimator:
 
         # Add optimizer memory if in training mode
         if training and optimizer_type in self.optimizer_memory_multipliers:
-            optimizer_memory = (memory_breakdown[MemoryType.PARAMETERS] *
-                                self.optimizer_memory_multipliers[optimizer_type])
+            optimizer_memory = (
+                memory_breakdown[MemoryType.PARAMETERS]
+                * self.optimizer_memory_multipliers[optimizer_type]
+            )
             memory_breakdown[MemoryType.OPTIMIZER] = optimizer_memory
             total_memory += optimizer_memory
 
@@ -235,17 +257,28 @@ class MemoryEstimator:
             breakdown=memory_breakdown,
             per_layer=per_layer_memory,
             peak_memory=peak_memory,
-            activation_shapes=activation_shapes
+            activation_shapes=activation_shapes,
         )
 
     def _calculate_output_shape(self, module: nn.Module, input_shape: Tuple) -> Tuple:
         """Calculate output shape for different layer types."""
         if isinstance(module, nn.Conv2d):
             _, c, h, w = input_shape
-            padding = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)
-            stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
-            kernel_size = module.kernel_size if isinstance(module.kernel_size, tuple) else (
-            module.kernel_size, module.kernel_size)
+            padding = (
+                module.padding
+                if isinstance(module.padding, tuple)
+                else (module.padding, module.padding)
+            )
+            stride = (
+                module.stride
+                if isinstance(module.stride, tuple)
+                else (module.stride, module.stride)
+            )
+            kernel_size = (
+                module.kernel_size
+                if isinstance(module.kernel_size, tuple)
+                else (module.kernel_size, module.kernel_size)
+            )
 
             h_out = ((h + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
             w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
@@ -256,9 +289,16 @@ class MemoryEstimator:
 
         elif isinstance(module, nn.MaxPool2d) or isinstance(module, nn.AvgPool2d):
             _, c, h, w = input_shape
-            kernel_size = module.kernel_size if isinstance(module.kernel_size, tuple) else (
-            module.kernel_size, module.kernel_size)
-            stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
+            kernel_size = (
+                module.kernel_size
+                if isinstance(module.kernel_size, tuple)
+                else (module.kernel_size, module.kernel_size)
+            )
+            stride = (
+                module.stride
+                if isinstance(module.stride, tuple)
+                else (module.stride, module.stride)
+            )
             h_out = ((h - kernel_size[0]) // stride[0]) + 1
             w_out = ((w - kernel_size[1]) // stride[1]) + 1
             return (c, h_out, w_out)
@@ -268,7 +308,7 @@ class MemoryEstimator:
 
 def format_memory_size(number: int) -> str:
     """Format memory size in readable format."""
-    for unit in ['B', 'KB', 'MB', 'GB']:
+    for unit in ["B", "KB", "MB", "GB"]:
         if number < 1024:
             return f"{number:.2f} {unit}"
         number /= 1024
@@ -297,7 +337,12 @@ def get_gpu_memory():
     return memory
 
 
-def estimate_memory(module: nn.Module, training: bool = True, batch_size: int = 256, max_input_size=(3, 224, 224)):
+def estimate_memory(
+    module: nn.Module,
+    training: bool = True,
+    batch_size: int = 256,
+    max_input_size=(3, 224, 224),
+):
     """
     Estimate the memory usage of a module in bytes, considering parameters and approximations
     for activations without performing a forward pass.
@@ -355,7 +400,7 @@ def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
         layer_info = {
             "parameters": sum(p.numel() for p in module.parameters()),
             "flops": 0,
-            "memory": 0
+            "memory": 0,
         }
 
         # Estimate memory for parameters
@@ -375,14 +420,19 @@ def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
             num_heads = module.num_heads
             seq_length = input_shape[0]  # assuming (seq_len, batch_size, embed_dim)
             # Rough estimation for self-attention FLOPs
-            layer_info["flops"] = 4 * seq_length * embed_dim * embed_dim + seq_length * num_heads * embed_dim
+            layer_info["flops"] = (
+                4 * seq_length * embed_dim * embed_dim
+                + seq_length * num_heads * embed_dim
+            )
         elif isinstance(module, nn.Transformer):
             # Estimating FLOPs for Transformer model
             num_layers = module.encoder.num_layers
             embed_dim = module.d_model
             seq_length = input_shape[0]
             # Each encoder layer typically involves two self-attention layers and one feed-forward layer
-            layer_info["flops"] = (4 * seq_length * embed_dim * embed_dim + seq_length * embed_dim) * num_layers
+            layer_info["flops"] = (
+                4 * seq_length * embed_dim * embed_dim + seq_length * embed_dim
+            ) * num_layers
 
         # Add the layer analysis to the global analysis dictionary
         analysis[module] = layer_info
@@ -431,12 +481,16 @@ def access_module(module: nn.Module, indices: list):
     module_name = type(module).__name__  # Set the root module's class name
 
     for index in indices:
-        children = list(current_module.named_children())  # Get all child modules with their names
+        children = list(
+            current_module.named_children()
+        )  # Get all child modules with their names
         if index >= len(children):
             raise IndexError("Index out of range for current module's children.")
 
         # Access the child module at the specified index
-        module_name = type(children[index][1]).__name__  # Update to the class name of the child module
+        module_name = type(
+            children[index][1]
+        ).__name__  # Update to the class name of the child module
         current_module = children[index][1]  # Get the actual child module
 
     return current_module, module_name
@@ -456,12 +510,22 @@ def detach_tensor(tensor):
                 torch.cuda.empty_cache()
         return tensor
     elif isinstance(tensor, (list, tuple)):
-        detached_list = type(tensor)(detach_tensor(t) if isinstance(t, (ModelOutput, torch.Tensor)) else t for t in tensor)
+        detached_list = type(tensor)(
+            detach_tensor(t) if isinstance(t, (ModelOutput, torch.Tensor)) else t
+            for t in tensor
+        )
         del tensor
         torch.cuda.empty_cache()
         return detached_list
     elif isinstance(tensor, dict):
-        detached_dict = {key: detach_tensor(value) if isinstance(value, (ModelOutput, torch.Tensor)) else value for key, value in tensor.items()}
+        detached_dict = {
+            key: (
+                detach_tensor(value)
+                if isinstance(value, (ModelOutput, torch.Tensor))
+                else value
+            )
+            for key, value in tensor.items()
+        }
         del tensor
         torch.cuda.empty_cache()
         return detached_dict
@@ -479,10 +543,19 @@ def attach_tensor(tensor, device):
 
         return tensor
     elif isinstance(tensor, (list, tuple)):
-        return type(tensor)(attach_tensor(t, device) if isinstance(t, torch.Tensor) else t for t in tensor)
+        return type(tensor)(
+            attach_tensor(t, device) if isinstance(t, torch.Tensor) else t
+            for t in tensor
+        )
     elif isinstance(tensor, dict):
-        return {key: attach_tensor(value, device) if isinstance(value, torch.Tensor) else value for key, value in
-                tensor.items()}
+        return {
+            key: (
+                attach_tensor(value, device)
+                if isinstance(value, torch.Tensor)
+                else value
+            )
+            for key, value in tensor.items()
+        }
     else:
         raise TypeError("Unsupported input type")
 
@@ -514,6 +587,7 @@ def enable_grad(tensor):
 
     else:
         raise TypeError(f"Unsupported input type: {type(tensor)}")
+
 
 # Example usage:
 # Assuming `model_output` is a ModelOutput instance with various nested structures
@@ -570,7 +644,7 @@ def combine_micro_batches(micro_batches):
         for key, value in combined_output.items():
             if isinstance(value[0], torch.Tensor):
                 # Handle zero-dimensional tensors
-                if key == 'loss':
+                if key == "loss":
                     # Average the loss and store individual losses for backward pass
                     averaged_loss = torch.mean(torch.stack(value))
                     setattr(averaged_loss, "micro_loss", value)
@@ -595,9 +669,13 @@ def replace_output_with_custom_grad(combined_output, custom_grad_output):
     with the custom_grad_output, preserving the original structure.
     """
     if hasattr(combined_output, "logits"):
-        return combined_output.__class__(**{**combined_output, "logits": custom_grad_output})
+        return combined_output.__class__(
+            **{**combined_output, "logits": custom_grad_output}
+        )
     elif hasattr(combined_output, "last_hidden_state"):
-        return combined_output.__class__(**{**combined_output, "last_hidden_state": custom_grad_output})
+        return combined_output.__class__(
+            **{**combined_output, "last_hidden_state": custom_grad_output}
+        )
     elif isinstance(combined_output, torch.Tensor):
         return custom_grad_output
     else:
@@ -725,9 +803,7 @@ def tensor_to_bytes(tensor):
     if isinstance(tensor, torch.Tensor):
         buffer = io.BytesIO()
         torch.save(tensor, buffer)
-        tensor_bytes = base64.b64encode(
-            buffer.getvalue()
-        ).decode()
+        tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
         serialized_data = tensor_bytes
     elif isinstance(tensor, dict):
         serialized_data = {}
@@ -735,20 +811,14 @@ def tensor_to_bytes(tensor):
             if isinstance(v, torch.Tensor):
                 buffer = io.BytesIO()
                 torch.save(v, buffer)
-                tensor_bytes = base64.b64encode(
-                    buffer.getvalue()
-                ).decode()
+                tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
                 serialized_data[k] = tensor_bytes
             else:
                 serialized_data[k] = v
     else:
         raise "Invalid tensor structure"
 
-    return {
-        "module": module_name,
-        "class": class_name,
-        "data": serialized_data
-    }
+    return {"module": module_name, "class": class_name, "data": serialized_data}
 
 
 def bytes_to_tensor(tensor_data):
