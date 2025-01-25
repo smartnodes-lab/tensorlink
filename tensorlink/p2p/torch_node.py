@@ -5,8 +5,8 @@ import threading
 import time
 from multiprocessing import shared_memory
 
-from tensorlink.ml.utils import get_gpu_memory, handle_output
-from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
+from tensorlink.ml.utils import get_gpu_memory
+from tensorlink.mpc.shared_memory import get_from_shared_memory
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.smart_node import SmartNode
 

@@ -29,13 +29,8 @@ import logging
 import time
 
 import torch
+import torch.nn as nn
 from torch.nn.functional import mse_loss
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BertForSequenceClassification,
-    BertTokenizer,
-)
 
 from tensorlink import UserNode, ValidatorNode, WorkerNode
 
@@ -56,15 +51,17 @@ if __name__ == "__main__":
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(
+        2
+    )  # Temporary sleep for preventing two nodes from starting on the same port and conflicting
     user = UserNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(2)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(2)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -78,8 +75,7 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Create a model to distribute
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
+    model = nn.ModuleList([nn.Linear(20, 40), nn.Linear(40, 40), nn.Linear(40, 20)])
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # User requests a distributed model and optimizer from a validator

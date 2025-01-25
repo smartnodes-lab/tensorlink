@@ -47,15 +47,15 @@ def nodes():
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(3)
+    time.sleep(1)
 
     yield validator, user, worker
 
