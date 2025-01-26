@@ -51,17 +51,16 @@ if __name__ == "__main__":
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(
-        2
-    )  # Temporary sleep for preventing two nodes from starting on the same port and conflicting
+    # Temporary sleep for preventing two nodes from starting on the same port and conflicting
+    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(2)
+    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(2)
+    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -91,7 +90,7 @@ if __name__ == "__main__":
     distributed_model.train()
     for _ in range(5):
         distributed_optimizer.zero_grad()  # Distributed optimizer calls relay to worker nodes
-        x = torch.zeros((1, 1), dtype=torch.long)
+        x = torch.zeros((1, 1))
         outputs = distributed_model(x)
         outputs = outputs.logits
         loss = mse_loss(outputs, outputs)
