@@ -47,7 +47,7 @@ class Worker(TorchNode):
         self.print_level = print_level
         self.loss = None
         self.public_key = get_key(".env", "PUBLIC_KEY")
-        self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+        self._store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
         self.debug_print(
             f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
@@ -60,7 +60,7 @@ class Worker(TorchNode):
             self.debug_print(
                 "Public key not found in .env file, using donation wallet..."
             )
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self._store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             attempts = 0
 

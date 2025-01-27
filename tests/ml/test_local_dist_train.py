@@ -97,7 +97,6 @@ def test_distributed_setup(nodes):
 
     # Create model and tokenizer
     import torch
-    from torch.nn.functional import mse_loss
     import torch.nn as nn
 
     model = nn.ModuleList([nn.Linear(10, 10)])
@@ -108,7 +107,6 @@ def test_distributed_setup(nodes):
     del model
     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
 
-    # Training loop
     distributed_model.train()
     distributed_optimizer.zero_grad()
 

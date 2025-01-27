@@ -89,7 +89,7 @@ class Validator(TorchNode):
                 self.debug_print("Public key not found in .env file, terminating...")
                 self.terminate_flag.set()
 
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self._store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
             self.id = self.contract.functions.validatorIdByAddress(
                 self.public_key
             ).call()
@@ -386,7 +386,7 @@ class Validator(TorchNode):
             self.send_to_node(requesting_node, b"DECLINE-JOB")
             return
 
-        self.store_value(job_id, job_data)
+        self._store_value(job_id, job_data)
 
         # Temporary structure to hold worker connection info
         worker_connection_info = {}
@@ -459,7 +459,7 @@ class Validator(TorchNode):
         job_data["timestamp"] = time.time()
         job_data["last_seen"] = time.time()
 
-        self.store_value(job_id, job_data)
+        self._store_value(job_id, job_data)
 
         # Start monitor_job as a background task and store it in the list
         t = threading.Thread(target=self.monitor_job, args=(job_id,))
@@ -1066,7 +1066,7 @@ class Validator(TorchNode):
             sum(job_capacities),
         ]
 
-        self.store_value(proposal_hash.hex(), proposal)
+        self._store_value(proposal_hash.hex(), proposal)
 
         # Submit the proposal hash to the SC
         while not self.terminate_flag.is_set():

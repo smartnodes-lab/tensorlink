@@ -1,15 +1,10 @@
 from datetime import datetime
-from typing import Union
 import threading
 import logging
 import hashlib
 import socket
-import base64
-import time
-import zlib
 import os
 import gc
-
 
 CHUNK_SIZE = 2048
 
@@ -25,146 +20,107 @@ class Connection(threading.Thread):
         node_key: bytes,
         role: int,
     ):
+        """
+        Initialize a network connection thread with peer and connection details.
+
+        Args:
+            main_node: The primary node managing this connection
+            sock: Socket for communication
+            host: Remote host address
+            port: Remote host port
+            main_port: Local main port
+            node_key: Unique identifier for the remote node
+            role: Connection role/type
+        """
         super(Connection, self).__init__()
+        # Connection tracking
         self.ping = -1
         self.pinged = -1
-        self.reputation = 50
-        self.ghosts = 0
 
+        # Peer connection metadata
         self.host = host
         self.port = port
-        self.main_port = port
-        self.main_node = main_node
         self.sock = sock
-        self.terminate_flag = threading.Event()
-        self.last_seen = None
-        self.stats = {}
-
         self.node_key = node_key
         self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
+
+        # Node and connection settings
+        self.main_port = main_port
+        self.main_node = main_node
+        self.reputation = 50  # Unused reputation tracking
+
+        # Connection state management
+        self.terminate_flag = threading.Event()
+        self.last_seen = None
+        self.ghosts = 0  # Number of ghost transmissions (unexpected data)
+
+        # Network configuration
         self.sock.settimeout(10)
         self.chunk_size = CHUNK_SIZE
 
-        # End of transmission + compression characters for the network messages.
-        self.EOT_CHAR = b"HELLOCHENQUI"
-        self.COMPR_CHAR = 0x02.to_bytes(16, "big")
+        # Transmission markers
+        self.EOT_CHAR = b"HELLOCHENQUI"  # End of Transmission marker
+        self.COMPR_CHAR = 0x02.to_bytes(16, "big")  # Compression marker
 
+        # Potential for optimizing data transmission
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
 
     def run(self):
+        """
+        Main connection thread method to handle data streaming and connection lifecycle.
+        Manages receiving, buffering, and writing network data chunks.
+        """
         buffer = b""
         prefix = b""
         writing_threads = []
 
         while not self.terminate_flag.is_set():
-            file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
             try:
-                chunk = self.sock.recv(
-                    self.chunk_size,
-                )
-
+                chunk = self.sock.recv(self.chunk_size)
             except socket.timeout:
-                # self.main_node.debug_print("connection timeout")
                 continue
-
             except (ConnectionResetError, ConnectionAbortedError) as e:
-                # Handle disconnections
-                self.terminate_flag.set()
-                self.main_node.debug_print(
-                    f"Connection -> Connection lost: {e}",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                )
-                self.main_node.disconnect_node(self.node_id)
+                self._handle_connection_error(e)
                 break
-
             except Exception as e:
-                self.terminate_flag.set()
-                self.main_node.debug_print(
-                    f"Connection -> unexpected error: {e}",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                )
-                self.main_node.disconnect_node(self.node_id)
+                self._handle_unexpected_error(e)
                 break
 
             if chunk:
                 self.last_seen = datetime.now()
+                (
+                    buffer,
+                    prefix,
+                    is_transmission_complete,
+                ) = self._process_data_chunk(chunk, buffer, prefix)
 
-                if b"MODULE" == chunk[:6]:
-                    prefix = chunk[:70]  # MODULE + module_id
-                    buffer += chunk[70:]
-                elif b"PARAMETERS" == chunk[:10]:
-                    prefix = chunk[:74]  # PARAMETERS + module_id
-                    buffer += chunk[74:]
-                else:
-                    buffer += chunk
-
-                eot_pos = buffer.find(self.EOT_CHAR)
-
-                if eot_pos >= 0:
-                    packet = buffer[:eot_pos]
-                    try:
-                        with open(file_name, "ab") as f:
-                            f.write(packet)
-                    except Exception as e:
-                        self.main_node.debug_print(
-                            f"Connection -> file writing error: {e}",
-                            colour="bright_red",
-                            level=logging.ERROR,
-                        )
-
-                    buffer = buffer[eot_pos + len(self.EOT_CHAR) :]
-                    self.main_node.handle_message(self, b"DONE STREAM" + prefix)
-                    prefix = b""
-
-                    for t in writing_threads:
-                        t.join()
-
-                    writing_threads = []
-
-                elif len(buffer) > 20_000_000:
-                    t = threading.Thread(
-                        target=self.write_to_file, args=(file_name, buffer)
+                # Manage large buffers by writing to file
+                if len(buffer) > 20_000_000:
+                    writing_thread = threading.Thread(
+                        target=self._write_to_file,
+                        args=(
+                            f"tmp/streamed_data_{self.host}_{self.port}",
+                            buffer,
+                        ),
                     )
-                    writing_threads.append(t)
-                    t.start()
-
+                    writing_threads.append(writing_thread)
+                    writing_thread.start()
                     buffer = b""
 
             elif chunk == b"":
-                self.terminate_flag.set()
-                self.main_node.debug_print(
-                    f"Connection -> Connection lost.",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                )
-                self.main_node.disconnect_node(self.node_id)
+                self._handle_connection_close()
                 break
 
             gc.collect()
 
-        try:
-            self.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        finally:
-            self.sock.settimeout(None)
-            self.sock.close()
+        self._cleanup_socket()
 
-    def send(self, data: bytes, compression: bool = False):
+    def send(self, data: bytes):
+        """Send bytes to node"""
         try:
-            if compression:
-                data = self.compress(data)
-                if data is not None:
-                    for i in range(0, len(data), self.chunk_size):
-                        chunk = data[i : i + self.chunk_size]
-                        self.sock.sendall(chunk + self.COMPR_CHAR)
-                    self.sock.sendall(self.EOT_CHAR)
-
-            elif len(data) < self.chunk_size:
+            if len(data) < self.chunk_size:
                 self.sock.sendall(data + self.EOT_CHAR)
 
             else:
@@ -195,12 +151,12 @@ class Connection(threading.Thread):
             self.stop()
 
     def send_from_file(self, file_name: str, tag: bytes):
+        """Send bytes from an existing file and delete it"""
         try:
             # Data is a filename. Read from file in chunks.
             with open(file_name, "rb") as file:
                 self.sock.sendall(tag)
 
-                start_time = time.time()
                 # Get the total file size
                 total_size = os.fstat(file.fileno()).st_size
                 chunk_size = self.chunk_size
@@ -247,24 +203,80 @@ class Connection(threading.Thread):
     def stop(self) -> None:
         self.terminate_flag.set()
 
-    def parse_packet(self, packet) -> Union[str, dict, bytes]:
-        if packet.find(self.COMPR_CHAR) == len(packet) - 1:
-            packet = self.decompress(packet[0:-1])
+    def _process_data_chunk(self, chunk: bytes, buffer: bytes, prefix: bytes) -> tuple:
+        """
+        Process an incoming data chunk and manage buffer and file writing.
 
-        return packet
+        Args:
+            chunk: Received network chunk
+            buffer: Current data buffer
+            prefix: Packet prefix (module/parameters)
 
-        # try:
-        #     packet_decoded = packet.decode()
-        #
-        #     try:
-        #         return json.loads(packet_decoded)
-        #     except json.decoder.JSONDecodeError:
-        #         return packet_decoded
-        #
-        # except UnicodeDecodeError:
-        #     return packet
+        Returns:
+            Updated buffer, prefix, and a flag indicating if processing is complete
+        """
+        file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
 
-    def write_to_file(self, file_name, buffer):
+        # Handle special packet types with prefixes
+        if b"MODULE" == chunk[:6]:
+            prefix = chunk[:70]
+            buffer += chunk[70:]
+        elif b"PARAMETERS" == chunk[:10]:
+            prefix = chunk[:74]
+            buffer += chunk[74:]
+        else:
+            buffer += chunk
+
+        # Check for end of transmission
+        eot_pos = buffer.find(self.EOT_CHAR)
+        if eot_pos >= 0:
+            try:
+                with open(file_name, "ab") as f:
+                    f.write(buffer[:eot_pos])
+            except Exception as e:
+                self.main_node.debug_print(
+                    f"File writing error: {e}",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                )
+
+            # Signal transmission completion
+            self.main_node.handle_message(self, b"DONE STREAM" + prefix)
+            return buffer[eot_pos + len(self.EOT_CHAR) :], b"", True
+
+        return buffer, prefix, False
+
+    def _handle_connection_error(self, error):
+        """Handle standard connection errors."""
+        self.terminate_flag.set()
+        self.main_node.debug_print(
+            f"Connection -> Connection with {self.host}:{self.port} lost: {error}",
+            colour="bright_red",
+            level=logging.ERROR,
+        )
+        self.main_node.disconnect_node(self.node_id)
+
+    def _handle_unexpected_error(self, error):
+        """Handle unexpected connection errors."""
+        self.terminate_flag.set()
+        self.main_node.debug_print(
+            f"Connection -> Unexpected connection error: {error}",
+            colour="bright_red",
+            level=logging.ERROR,
+        )
+        self.main_node.disconnect_node(self.node_id)
+
+    def _handle_connection_close(self):
+        """Handle graceful connection closure."""
+        self.terminate_flag.set()
+        self.main_node.debug_print(
+            "Connection -> Connection closed.",
+            colour="bright_red",
+            level=logging.INFO,
+        )
+        self.main_node.disconnect_node(self.node_id)
+
+    def _write_to_file(self, file_name, buffer):
         try:
             with open(file_name, "ab") as f:
                 f.write(buffer)
@@ -275,35 +287,21 @@ class Connection(threading.Thread):
                 colour="bright_red",
             )
 
-    def compress(self, data):
-        compressed = data
-
+    def _cleanup_socket(self):
+        """Perform final socket cleanup operations."""
         try:
-            compressed = base64.b64encode(zlib.compress(data, 6))
-        except Exception as e:
-            self.main_node.debug_print(
-                f"Connection -> compression-error: {e}",
-                level=logging.CRITICAL,
-                colour="bright_red",
-            )
-
-        return compressed
-
-    def decompress(self, data):
-        decompressed = base64.b64decode(data)
-
-        try:
-            decompressed = zlib.decompress(decompressed)
-        except Exception as e:
-            self.main_node.debug_print(
-                f"Connection -> decompression-error: {e}",
-                colour="bright_red",
-                level=logging.CRITICAL,
-            )
-
-        return decompressed
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            self.sock.settimeout(None)
+            self.sock.close()
 
     def adjust_chunk_size(self, chunk_size: str = None):
+        """
+        Method to be implemented that adjusts the chunk size for higher reputation jobs / only during
+        certain parts of the distributed training or proof of works (ie sending large models) TODO
+        """
         if chunk_size == "large":
             self.chunk_size = CHUNK_SIZE**2
         else:

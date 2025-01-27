@@ -1,6 +1,6 @@
 name: PyTest for Node and Distributed ML
 
-on: [pull_request]
+on: [pull_request, push]
 
 jobs:
   test:
@@ -24,4 +24,4 @@ jobs:
 
       - name: Run Unit Tests
         run: |
-          pytest --maxfail=5 --disable-warnings --cov=. --cov-report=term
+          pytest --maxfail=1 --disable-warnings

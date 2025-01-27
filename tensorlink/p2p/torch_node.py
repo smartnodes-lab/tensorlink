@@ -154,7 +154,7 @@ class TorchNode(SmartNode):
 
                 # Handle requests for module parameters
                 elif b"PARAMS-REQ" == data[:10]:
-                    self.debug_print(f"TorchNode -> RECEIVED PARAMS REQUEST")
+                    self.debug_print("TorchNode -> RECEIVED PARAMS REQUEST")
 
                     # TODO Must ensure requesting roles is indeed the master or an overseeing validator
                     module_id = data[10:74].decode()
@@ -206,7 +206,7 @@ class TorchNode(SmartNode):
                             self.state_updates[module_id] = []
 
                             self.debug_print(
-                                f"TorchNode -> Loaded distributed module!",
+                                "TorchNode -> Loaded distributed module!",
                                 colour="bright_cyan",
                                 level=logging.INFO,
                             )

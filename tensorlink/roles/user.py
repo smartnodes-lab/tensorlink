@@ -68,7 +68,7 @@ class User(TorchNode):
 
         if not self.off_chain_test:
             self.public_key = get_key(".env", "PUBLIC_KEY")
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self._store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             attempts = 0
             self.debug_print(f"Bootstrapping...")
