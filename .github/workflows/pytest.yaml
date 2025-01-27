@@ -22,6 +22,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pytest
 
+      - name: Set PYTHONPATH
+        run: export PYTHONPATH=$PYTHONPATH:$(pwd)
+
       - name: Run Unit Tests
         run: |
           pytest --maxfail=1 --disable-warnings
