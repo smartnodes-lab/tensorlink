@@ -1022,9 +1022,9 @@ class SmartNode(threading.Thread):
         self, id_hash: bytes, host: str, port: int, reconnect: bool = False
     ) -> bool:
         """
-        Connect to a role and exchange information to confirm its role in the Smart Nodes network.
+        Connect to a node and exchange information to confirm its role in the Smartnodes network.
         """
-        can_connect = self.can_connect(host, port)
+        _can_connect = self._can_connect(host, port)
 
         # Check that we are not already connected
         if id_hash in self.nodes:
@@ -1033,9 +1033,10 @@ class SmartNode(threading.Thread):
             )
             return True
 
-        if can_connect:
+        if _can_connect:
             for attempt in range(2):
                 try:
+                    # Open up a free port
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     our_port = self._get_next_port()
                     self.add_port_mapping(our_port, our_port)
@@ -1043,6 +1044,7 @@ class SmartNode(threading.Thread):
                         f"SmartNode -> Selected next port: {our_port} for new connection"
                     )
 
+                    # Attempt connection
                     sock.bind((self.host, our_port))
                     sock.connect((host, port))
                     sock.settimeout(10)
@@ -1052,6 +1054,8 @@ class SmartNode(threading.Thread):
                         colour="blue",
                         level=logging.INFO,
                     )
+
+                    # Send our info to node
                     message = json.dumps(
                         (None, self.role, self.id, self.rsa_pub_key.decode())
                     )
@@ -1183,6 +1187,7 @@ class SmartNode(threading.Thread):
         self.add_port_mapping(self.port, self.port)
 
     def add_port_mapping(self, external_port, internal_port):
+        """Open up a port via UPnP for a connection"""
         if self.upnp:
             try:
                 result = self.upnp.addportmapping(
@@ -1219,12 +1224,13 @@ class SmartNode(threading.Thread):
                     raise e
 
     def remove_port_mapping(self, external_port):
+        """Close a port via UPnP"""
         if self.upnp:
             try:
                 # Attempt to delete the port mapping
                 result = self.upnp.deleteportmapping(external_port, "TCP")
 
-                if result is True:  # Some UPnP implementations return None on success
+                if result is True:
                     self.debug_print(
                         f"SmartNode -> Successfully removed UPnP port mapping for external port {external_port}"
                     )
@@ -1293,9 +1299,10 @@ class SmartNode(threading.Thread):
         node_id: bytes,
         role: int,
     ) -> Connection:
+        """Creates a connection thread object from connection.py for individual connections"""
         return Connection(self, connection, host, port, main_port, node_id, role)
 
-    def can_connect(self, host: str, port: int):
+    def _can_connect(self, host: str, port: int):
         """Makes sure we are not trying to connect to ourselves or a connected nodes"""
         # Check if trying to connect to self
         if host == self.host and port == self.port:

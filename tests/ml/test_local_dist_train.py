@@ -60,9 +60,12 @@ def nodes():
     yield validator, user, worker
 
     # Cleanup nodes after tests
-    user.cleanup()
-    worker.cleanup()
-    validator.cleanup()
+    try:
+        user.cleanup()
+        worker.cleanup()
+        validator.cleanup()
+    except Exception as e:
+        print(f"Error during node cleanup: {e}")
 
 
 def test_node_initialization(nodes):

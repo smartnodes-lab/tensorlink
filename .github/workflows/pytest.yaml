@@ -1,4 +1,4 @@
-name: PyTest for Node and Distributed ML
+name: PyTest for Distributed Learning
 
 on: [pull_request, push]
 
@@ -8,7 +8,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
