@@ -1,14 +1,14 @@
+from tensorlink.ml.utils import get_gpu_memory
+from tensorlink.mpc.shared_memory import get_from_shared_memory
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.smart_node import SmartNode
+
+from multiprocessing import shared_memory
 import logging
 import pickle
 import queue
 import threading
 import time
-from multiprocessing import shared_memory
-
-from tensorlink.ml.utils import get_gpu_memory
-from tensorlink.mpc.shared_memory import get_from_shared_memory
-from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.smart_node import SmartNode
 
 
 def format_size(size_bytes):
@@ -304,17 +304,20 @@ class TorchNode(SmartNode):
                 "check_module_request": self._handle_check_module_request,
                 "check_forward": self._handle_check_forward,
                 "check_backward": self._handle_check_backward,
-                "send_optimizer_request": self.handle_send_optimizer_request,
-                "check_state_update": self.handle_check_state_update,
-                "check_validators": self.handle_check_validators,
-                "check_parameters_request": self.handle_check_parameters_request,
-                "check_parameters": self.handle_check_parameters,
-                "request_parameters": self.handle_request_parameters,
-                "update_train": self.handle_update_train,
-                "check_train": self.handle_check_train,
-                "release_memory": self.handle_release_memory,
-                "connect_node": self.handle_connect_node,
-                "info": self.handle_info_request,
+                "send_optimizer_request": self._handle_send_optimizer_request,
+                "check_state_update": self._handle_check_state_update,
+                "check_validators": self._handle_check_validators,
+                "check_parameters_request": self._handle_check_parameters_request,
+                "check_parameters": self._handle_check_parameters,
+                "request_parameters": self._handle_request_parameters,
+                "update_train": self._handle_update_train,
+                "check_train": self._handle_check_train,
+                "release_memory": self._handle_release_memory,
+                "check_shutdown": self._handle_check_shutdown,
+                "stop": self._handle_stop,
+                "connect_node": self._handle_connect_node,
+                "info": self._handle_get_info,
+                "debug_print": self._handle_debug_print,
             }
 
             handler = handlers.get(req_type)

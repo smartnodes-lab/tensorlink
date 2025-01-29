@@ -52,7 +52,7 @@ MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesMultiSig.json")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
-    CHAIN_URL = config["api"]["chain-url"]
+    CHAIN_URL = config["api"]["chain-url-local"]
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
 
@@ -579,7 +579,7 @@ class SmartNode(threading.Thread):
 
         return return_val
 
-    def _store_value(self, key: str, value: object, replicate: object = 0) -> object:
+    def store_value(self, key: str, value: object, replicate: object = 0) -> object:
         """Store value in routing table and replicate if specified"""
         bucket_index = self.calculate_bucket_index(key)
         bucket = self.buckets[bucket_index]
@@ -803,7 +803,7 @@ class SmartNode(threading.Thread):
 
         try:
             if node_info['role'] == "V":
-                is_active, pub_key_hash, _ = self.contract.functions.getValidatorInfo(
+                is_active, pub_key_hash = self.contract.functions.getValidatorInfo(
                     node_info['id_no']
                 ).call()
 
@@ -984,7 +984,7 @@ class SmartNode(threading.Thread):
 
         # Store node details
         self.nodes[node_info['node_id_hash']] = thread_client
-        self._store_value(node_info['node_id_hash'], stored_info)
+        self.store_value(node_info['node_id_hash'], stored_info)
 
         # Categorize node by role
         if node_info["role"] == "V":
@@ -1447,11 +1447,9 @@ class SmartNode(threading.Thread):
     def get_validator_info(self, validator_ind: int):
         """Get validator info from Smart Nodes"""
         try:
-            (
-                is_active,
-                pub_key_hash,
-                wallet_address,
-            ) = self.contract.functions.getValidatorInfo(validator_ind).call()
+            (is_active, pub_key_hash) = self.contract.functions.getValidatorInfo(
+                validator_ind
+            ).call()
             return is_active, pub_key_hash
 
         except Exception as e:
