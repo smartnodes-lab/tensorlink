@@ -46,7 +46,6 @@ class ContractManager:
 
         # Initialize last_execution_block from existing proposals
         while not self.terminate_flag.is_set():
-            time.sleep(1000)
             try:
                 # Check if a new round of proposals has started
                 current_proposal_id = (
@@ -90,7 +89,7 @@ class ContractManager:
                             colour="green",
                             level=logging.DEBUG,
                         )
-                        time.sleep(300)
+                        time.sleep(70)
 
                 except ContractLogicError:
                     # Proposal has not been published yet, keep waiting
@@ -104,7 +103,7 @@ class ContractManager:
                     level=logging.ERROR,
                 )
 
-            time.sleep(10)
+            time.sleep(30)
 
     def validate_proposal(self, proposal_hash, proposal_num):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
@@ -303,12 +302,14 @@ class ContractManager:
                     next_proposal_id,
                     round_validators,
                 ) = self.multi_sig_contract.functions.getState().call()
-                time.sleep(3)
+                time.sleep(1)
+                is_expired = self.multi_sig_contract.functions.isRoundExpired().call()
+                time.sleep(1)
 
-                if self.public_key in round_validators:
+                if self.public_key in round_validators or is_expired:
                     # Wait a bit before creating the proposal
                     self.create_and_submit_proposal()
-                    time.sleep(300)
+                    time.sleep(30)
 
             except Exception as e:
                 self.node.debug_print(
@@ -331,36 +332,34 @@ class ContractManager:
             level=logging.INFO,
         )
 
-        # Process validators and jobs
-        validators_to_remove = self.verify_and_remove_validators()
-        job_hashes, job_capacities, job_workers = self.process_jobs()
-        total_capacity = sum(job_capacities)
+        while True:  # Loop to handle `signal 2`
+            # Process validators and jobs
+            validators_to_remove = self.verify_and_remove_validators()
+            job_hashes, job_capacities, job_workers = self.process_jobs()
+            total_capacity = sum(job_capacities)
 
-        # if not validators_to_remove and not job_hashes:
-        #     self.node.debug_print(
-        #         "ContractManager -> No validators to remove or jobs to complete.",
-        #         colour="yellow",
-        #         level=logging.INFO,
-        #     )
-        #     return
+            # Create and store proposal
+            proposal = {
+                "validators": validators_to_remove,
+                "jobs": job_hashes,
+                "job_capacities": job_capacities,
+                "workers": job_workers,
+                "total_capacity": total_capacity,
+            }
+            proposal_hash = self._hash_proposal_data(proposal)
+            self.node.store_value(proposal_hash.hex(), proposal)
 
-        # Create and store proposal
-        proposal = {
-            "validators": validators_to_remove,
-            "jobs": job_hashes,
-            "job_capacities": job_capacities,
-            "workers": job_workers,
-            "total_capacity": total_capacity,
-        }
-        proposal_hash = self._hash_proposal_data(list(proposal.values()))
-        proposal = {}
-        self.node.store_value(proposal_hash.hex(), proposal)
+            # Submit proposal
+            code = self._submit_proposal(proposal_hash)
 
-        # Submit proposal
-        if not self._submit_proposal(proposal_hash):
-            return
+            if code == 0:
+                break  # Exit loop if already submitted or submission is successful
+            elif code == 1:
+                return  # Exit method (error)
+            elif code == 2:
+                continue  # Restart and continue to build proposal datazo
 
-        # Wait for next block
+        # Wait for next block before monitoring
         self._wait_for_next_block()
 
         # Monitor and execute proposal
@@ -411,14 +410,14 @@ class ContractManager:
         worker_node = self.node.nodes[worker_id]
         return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
 
-    def _hash_proposal_data(self, proposal_data):
+    def _hash_proposal_data(self, proposal_data: dict):
         (
             validators_to_remove,
             job_hashes,
             job_capacities,
             job_workers,
             total_capacity,
-        ) = proposal_data
+        ) = proposal_data.values()
 
         validators_to_remove = [
             self.chain.to_checksum_address(validator)
@@ -432,7 +431,7 @@ class ContractManager:
 
         return self.chain.keccak(encoded_data)
 
-    def _submit_proposal(self, proposal_hash: bytes) -> bool:
+    def _submit_proposal(self, proposal_hash: bytes) -> int:
         """Submit the proposal to the blockchain."""
         while not self.terminate_flag.is_set():
             try:
@@ -450,31 +449,32 @@ class ContractManager:
                     colour="green",
                     level=logging.INFO,
                 )
-                return True
+                return 0
 
             except Exception as e:
-                if "Validator has already submitted a proposal this round!" in str(e):
+                if "Validator has already submitted a proposal this round" in str(e):
                     self.node.debug_print(
                         "ContractManager -> Validator has already submitted a proposal this round!",
                         colour="bright_red",
                         level=logging.INFO,
                     )
-                    return True
+                    return 0
 
-                elif "Proposals must be submitted" in str(e):
+                elif "updateTime - 2min" in str(e):
                     self.node.debug_print(
                         "ContractManager -> Not enough time since last proposal! Sleeping...",
                         colour="green",
                         level=logging.DEBUG,
                     )
                     time.sleep(30)
+                    return 2
                 else:
                     self.node.debug_print(
                         f"ContractManager -> Error creating proposal: {str(e)}",
                         colour="bright_red",
                         level=logging.INFO,
                     )
-                    return False
+                    return 1
 
     def _build_proposal_transaction(self, proposal_hash: bytes) -> Dict[str, Any]:
         """Build the proposal transaction."""

@@ -92,32 +92,21 @@ class Validator(TorchNode):
                 self, self.multi_sig_contract, self.chain, self.public_key
             )
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
-            self.id = self.contract.functions.validatorIdByAddress(
+
+            time.sleep(0.1)
+            (is_active, pub_key_hash) = self.contract.functions.getValidatorInfo(
                 self.public_key
             ).call()
-            if self.id:
-                time.sleep(0.1)
-                (
-                    is_active,
-                    pub_key_hash,
-                    wallet_address,
-                ) = self.contract.functions.getValidatorInfo(self.id).call()
 
-                if is_active and bytes.hex(pub_key_hash) == self.rsa_key_hash:
-                    self.current_proposal = (
-                        self.multi_sig_contract.functions.nextProposalId.call()
-                    )
-                    # self.bootstrap()
-                else:
-                    self.debug_print(
-                        "Validator is inactive on SmartnodesMultiSig or has a different RSA "
-                        f"key [expected: {bytes.hex(pub_key_hash)}, received: {self.rsa_key_hash}).",
-                        level=logging.CRITICAL,
-                    )
-                    self.terminate_flag.set()
+            if is_active and bytes.hex(pub_key_hash) == self.rsa_key_hash:
+                self.current_proposal = (
+                    self.multi_sig_contract.functions.nextProposalId.call()
+                )
+                # self.bootstrap()
             else:
                 self.debug_print(
-                    "Validator not listed on SmartnodesMultiSig.",
+                    "Validator is inactive on SmartnodesMultiSig or has a different RSA "
+                    f"key [expected: {bytes.hex(pub_key_hash)}, received: {self.rsa_key_hash}).",
                     level=logging.CRITICAL,
                 )
                 self.terminate_flag.set()
@@ -870,8 +859,8 @@ class Validator(TorchNode):
                     structured_state[category] = {
                         hash_key: data for hash_key, data in items.items()
                     }
+                    self.routing_table.update(items)
 
-                self.routing_table.update(structured_state)
                 self.debug_print(
                     "SmartNode -> DHT state loaded successfully.", level=logging.INFO
                 )

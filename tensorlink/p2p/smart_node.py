@@ -155,13 +155,13 @@ def clean():
 def _parse_initial_connection(connection: socket.socket) -> dict:
     """Parse and extract initial connection information"""
     id_info = connection.recv(1024)
-    _, role, id_no, connected_node_id = json.loads(id_info)
+    _, role, node_address, connected_node_id = json.loads(id_info)
     connected_node_id = connected_node_id.encode()
     node_id_hash = hashlib.sha256(connected_node_id).hexdigest()
 
     return {
         'role': role,
-        'id_no': id_no,
+        'node_address': node_address,
         'node_id': connected_node_id,
         'node_id_hash': node_id_hash,
         'random': _,
@@ -251,7 +251,6 @@ class SmartNode(threading.Thread):
         self.role = role
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
         self.rsa_key_hash = hashlib.sha256(self.rsa_pub_key).hexdigest()
-        self.id = 0
 
         # Stores key of stored values
         self.validators = []
@@ -276,6 +275,7 @@ class SmartNode(threading.Thread):
             self.url = CHAIN_URL
             self.chain = Web3(Web3.HTTPProvider(CHAIN_URL))
             self.contract_address = Web3.to_checksum_address(CONTRACT)
+            self.public_key = None
 
             # Grab the SmartNode contract
             try:
@@ -804,7 +804,7 @@ class SmartNode(threading.Thread):
         try:
             if node_info['role'] == "V":
                 is_active, pub_key_hash = self.contract.functions.getValidatorInfo(
-                    node_info['id_no']
+                    node_info['node_address']
                 ).call()
 
                 if not is_active or node_info['node_id_hash'] != bytes.hex(
@@ -851,7 +851,7 @@ class SmartNode(threading.Thread):
                 (
                     encrypted_number.decode(),
                     self.role,
-                    self.id,
+                    self.public_key,
                     self.rsa_pub_key.decode(),
                 )
             )
@@ -1057,7 +1057,7 @@ class SmartNode(threading.Thread):
 
                     # Send our info to node
                     message = json.dumps(
-                        (None, self.role, self.id, self.rsa_pub_key.decode())
+                        (None, self.role, self.public_key, self.rsa_pub_key.decode())
                     )
                     sock.send(message.encode())
 

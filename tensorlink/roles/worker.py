@@ -55,9 +55,10 @@ class Worker(TorchNode):
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
-            self.debug_print(
-                "Public key not found in .env file, using donation wallet..."
-            )
+            # if not self.public_key:
+            #     self.debug_print(
+            #         "Public key not found in .env file, using donation wallet..."
+            #     )
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             # attempts = 0
