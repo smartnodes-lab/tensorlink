@@ -1,6 +1,7 @@
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.roles.contract_manager import ContractManager
+from tensorlink.roles.job_monitor import JobMonitor
 
 from dotenv import get_key
 import hashlib
@@ -310,7 +311,7 @@ class Validator(TorchNode):
 
     def check_job_availability(self, job_data: dict):
         """Asserts that the specified user does not have an active job, and that
-        the job capacity can be handled by the network"""
+        the job capacity can be handled by the network."""
         # job_id = job_data["id"]
         user_id = job_data["author"]
         capacity = job_data["capacity"]
@@ -384,9 +385,10 @@ class Validator(TorchNode):
 
         # If no workers available, decline job
         if not assigned_workers:
-            self.send_to_node(requesting_node, b"DECLINE-JOB")
+            self.decline_job(requesting_node)
             return
 
+        # Store job
         self.store_value(job_id, job_data)
 
         # Temporary structure to hold worker connection info
@@ -398,13 +400,12 @@ class Validator(TorchNode):
                 []
             )  # Track assigned workers per pipeline for this module
 
+            # For each pipeline, recruit unique workers (replicated model workflow)
             for stream in range(n_pipelines):
                 worker_found = False
 
                 # Recruit a worker that hasn't been assigned this module in other pipelines
                 for worker_id in assigned_workers:
-                    # worker = self.nodes[worker_id]
-
                     # Ensure worker isn't already assigned this module in a different pipeline
                     if worker_id not in worker_assignment:
                         if self.recruit_worker(
@@ -425,7 +426,7 @@ class Validator(TorchNode):
 
                 # If no suitable worker found for this pipeline, decline job
                 if not worker_found:
-                    self.decline_job()
+                    self.decline_job(requesting_node)
                     return
 
             # Temporarily store worker connection info for this module
@@ -441,7 +442,7 @@ class Validator(TorchNode):
         # Check if all modules have the required number of pipelines assigned
         for module, module_info in job_data["distribution"].items():
             if len(module_info["workers"]) != n_pipelines:
-                self.decline_job()
+                self.decline_job(requesting_node)
                 return
 
         # Send the updated job data with worker info to the user
@@ -463,113 +464,14 @@ class Validator(TorchNode):
         self.store_value(job_id, job_data)
 
         # Start monitor_job as a background task and store it in the list
-        t = threading.Thread(target=self.monitor_job, args=(job_id,))
-        self.active_jobs[job_id] = t
+        job_monitor = JobMonitor(self)
+        t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
+        self.active_jobs[job_id] = job_monitor
         t.start()
 
-    def decline_job(self):
+    def decline_job(self, node):
+        self.send_to_node(node, b"DECLINE-JOB")
         pass
-
-    def monitor_job(self, job_id: str):
-        """Monitor job progress and workers."""
-        self.debug_print(
-            f"Job monitor beginning for job: {job_id}",
-            colour="blue",
-            level=logging.INFO,
-        )
-        job_data = self.query_dht(job_id)
-        online = True
-
-        try:
-            while not self.terminate_flag.is_set():
-                time.sleep(45)
-                self.debug_print(
-                    f"Validator -> Inspecting job: {job_id}", colour="blue"
-                )
-
-                try:
-                    user_data = self.query_dht(job_data["author"])
-
-                    # Check that user is still online
-                    connected = self.connect_node(
-                        job_data["author"], user_data["host"], user_data["port"]
-                    )
-                    if not connected:
-                        online = False
-
-                    if online:
-                        # job_data_from_user = self.query_node(job_id, self.nodes[job_data["author"]])
-                        # if job_data_from_user is None:
-                        #     online = False
-                        #
-                        # if job_data_from_user is None or not job_data_from_user.get("active"):
-                        #     self.debug_print(f"Validator -> Job {job_id} has been marked inactive by user.",
-                        #                      colour="red")
-                        #     online = False
-
-                        for module_id, module_info in job_data["distribution"].items():
-                            if module_info["type"] == "offloaded":
-                                for worker in module_info["workers"]:
-                                    # TODO Request epoch info from workers
-                                    pass
-
-                    # Check if job can be officially marked as done/offline
-                    if not online:
-                        # Wait for job to be offline for at least 2 minutes to mark as complete
-                        if time.time() - job_data["last_seen"] > 60:
-                            # Completely delete jobs that went offline within first 3 minutes
-                            if time.time() - job_data["timestamp"] < 120:
-                                self.debug_print(
-                                    "Validator -> Job timed out during creation.",
-                                    colour="red",
-                                )
-                            else:
-                                self.debug_print(
-                                    "Validator -> Job timed out, marking as complete for Smartnodes...",
-                                    colour="red",
-                                )
-                                job_data["active"] = False
-                                self.jobs_to_complete.append(job_id)
-                            break
-
-                        self.debug_print(
-                            "Validator -> User timed out, awaiting user...",
-                            colour="red",
-                        )
-
-                    else:
-                        self.debug_print(
-                            f"Validator -> Job inspection complete for job: {job_id}",
-                            colour="blue",
-                        )
-                        job_data["last_seen"] = time.time()
-                        self.routing_table[job_id] = job_data
-
-                except Exception as e:
-                    self.debug_print(
-                        f"Error monitoring job: {e}",
-                        colour="bright_red",
-                        level=logging.CRITICAL,
-                    )
-                    break
-
-        finally:
-            # Ensure shutdown job is always called at the end
-            self.shutdown_job(job_data)
-
-    def shutdown_job(self, job_data):
-        del self.active_jobs[job_data["id"]]
-
-        for module_id, module_info in job_data["distribution"].items():
-            if module_info["type"] == "offloaded":
-                for worker in module_info["workers"]:
-                    # TODO Request epoch info from workers
-                    try:
-                        node = self.nodes[worker]
-                        self.send_to_node(node, b"SHUTDOWN-JOB" + module_id.encode())
-
-                    except KeyError:
-                        pass
 
     def recruit_worker(
         self,

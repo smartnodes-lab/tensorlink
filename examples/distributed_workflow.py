@@ -52,7 +52,7 @@ if __name__ == "__main__":
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
     # Temporary sleep for preventing two nodes from starting on the same port and conflicting
-    time.sleep(0.5)
+    time.sleep(3)
     user = UserNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
@@ -96,6 +96,7 @@ if __name__ == "__main__":
     #     loss = mse_loss(outputs, outputs)
     #     loss.backward()
     #     distributed_optimizer.step()
+    time.sleep(600)
 
     # Gracefully shut down nodes
     user.cleanup()

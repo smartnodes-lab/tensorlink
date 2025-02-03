@@ -26,10 +26,10 @@ from transformers import (
 from tensorlink import UserNode, ValidatorNode, WorkerNode
 
 # Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
-LOCAL = True
+LOCAL = False
 
 # Must be activated for public network use. Hopefully this is upgraded to STUN or equivalent in the near future.
-UPNP = False
+UPNP = True
 
 # Parameters for distributed model request.
 BATCH_SIZE = 16

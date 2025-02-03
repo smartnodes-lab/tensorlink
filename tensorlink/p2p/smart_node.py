@@ -9,7 +9,7 @@ from tensorlink.p2p.connection import Connection
 from logging.handlers import TimedRotatingFileHandler
 from collections import defaultdict
 from dotenv import get_key, set_key
-from typing import Tuple
+from typing import Tuple, Union
 from miniupnpc import UPnP
 from web3 import Web3
 import hashlib
@@ -264,6 +264,7 @@ class SmartNode(threading.Thread):
         }
         self.off_chain_test = off_chain_test
         self.local_test = local_test
+        self.public_key = None
 
         if upnp:
             self._init_upnp()
@@ -275,7 +276,6 @@ class SmartNode(threading.Thread):
             self.url = CHAIN_URL
             self.chain = Web3(Web3.HTTPProvider(CHAIN_URL))
             self.contract_address = Web3.to_checksum_address(CONTRACT)
-            self.public_key = None
 
             # Grab the SmartNode contract
             try:
@@ -1019,11 +1019,14 @@ class SmartNode(threading.Thread):
             thread_client.adjust_chunk_size("large")
 
     def connect_node(
-        self, id_hash: bytes, host: str, port: int, reconnect: bool = False
+        self, id_hash: Union[bytes, str], host: str, port: int, reconnect: bool = False
     ) -> bool:
         """
         Connect to a node and exchange information to confirm its role in the Smartnodes network.
         """
+        if isinstance(id_hash, bytes):
+            id_hash = id_hash.decode()
+
         _can_connect = self._can_connect(host, port)
 
         # Check that we are not already connected
@@ -1313,7 +1316,7 @@ class SmartNode(threading.Thread):
 
         # Check if already connected
         for node in self.nodes.values():
-            if node.host == host and node.port == port:
+            if node.host == host and (node.port == port or node.main_port == port):
                 self.debug_print(
                     f"SmartNode -> connect_with_node: already connected with node: {node.node_id}"
                 )

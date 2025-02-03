@@ -168,7 +168,10 @@ class User(TorchNode):
         Runs in a separate thread.
         """
         try:
-            if node.node_id in self.jobs[-1]["seed_validators"]:
+            job_id = self.jobs[-1]
+            job_data = self.query_dht(job_id)
+
+            if job_data and node.node_id in job_data["seed_validators"]:
                 self.debug_print(
                     f"User -> Validator ({node.node_id}) accepted job!",
                     colour="bright_green",
@@ -308,7 +311,8 @@ class User(TorchNode):
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
         job_request["id"] = job_hash
-        self.jobs.append(job_request)
+        self.store_value(job_hash, job_request)
+        self.jobs.append(job_hash)
 
         # Send job request to multiple validators (seed validators)
         job_req_threads = []
@@ -352,8 +356,6 @@ class User(TorchNode):
         # TODO Send activation message to validators
         # for validator in validators:
         #     self.send_job_status_update(validator, job_request)
-
-        self.jobs[-1] = job_request
 
         return dist_model_config
 

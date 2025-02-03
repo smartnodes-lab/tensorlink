@@ -32,8 +32,8 @@ class ContractManager:
         self.public_key = public_key
 
         # State tracking
-        self.validators_to_clear: List[str] = []
-        self.jobs_to_complete: List[str] = []
+        self.validators_to_clear: List[str] = self.node.validators_to_clear
+        self.jobs_to_complete: List[str] = self.node.jobs_to_complete
         self.current_proposal: Optional[int] = (
             self.multi_sig_contract.functions.nextProposalId.call()
         )
