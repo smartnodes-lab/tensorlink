@@ -267,7 +267,7 @@ class User(TorchNode):
 
             # Delete space for roles info if not found and move on to the next validator
             if node_info is None:
-                self.__delete(validator_id)
+                self._delete_item(validator_id)
                 self.debug_print(
                     "User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
@@ -281,7 +281,7 @@ class User(TorchNode):
             )
 
             if not connected:
-                self.__delete(validator_id)
+                self._delete_item(validator_id)
                 self.debug_print(
                     "User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",

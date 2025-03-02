@@ -42,7 +42,7 @@ class ContractManager:
         self.proposals = {}
 
     def proposal_validator(self):
-        """Listen for new proposals created on SmartnodesMultiSig"""
+        """Listen for new proposals created on SmartnodesMultiSig and validate them."""
 
         # Initialize last_execution_block from existing proposals
         while not self.terminate_flag.is_set():
@@ -81,19 +81,11 @@ class ContractManager:
                     )
                     self.proposals[proposal_hash] = t
                     t.start()
-
-                    # TODO dynamic based off multisig contract max proposal numbers (instead of 1)
-                    if current_proposal_num == 1:
-                        self.node.debug_print(
-                            "Validator -> All proposals validated! Sleeping...",
-                            colour="green",
-                            level=logging.DEBUG,
-                        )
-                        time.sleep(70)
+                    time.sleep(5)
 
                 except ContractLogicError:
                     # Proposal has not been published yet, keep waiting
-                    time.sleep(60)
+                    time.sleep(15)
                     pass
 
             except Exception as e:
@@ -103,7 +95,7 @@ class ContractManager:
                     level=logging.ERROR,
                 )
 
-            time.sleep(30)
+            time.sleep(15)
 
     def validate_proposal(self, proposal_hash, proposal_num):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
@@ -121,7 +113,7 @@ class ContractManager:
         if proposal_data is None:
             # Perhaps some logic to directly query the node who published the proposal to ensure it is not found TODO
             self.node.debug_print(
-                f"Validator -> Proposal {proposal_hash} not found in DHT!"
+                f"ContractManager -> Validating proposal {proposal_hash} not found in DHT!"
             )
             return
 
@@ -254,7 +246,7 @@ class ContractManager:
         """
         validators_to_remove = []
 
-        for validator in self.validators_to_clear:
+        for validator in self.node.validators_to_clear:
             node_info = self.node.query_dht(validator)
             if not node_info:
                 continue
@@ -332,11 +324,23 @@ class ContractManager:
             level=logging.INFO,
         )
 
-        while True:  # Loop to handle `signal 2`
+        while True:
+            # Request all workers connected to the network
+            self.node.get_workers()
+
             # Process validators and jobs
             validators_to_remove = self.verify_and_remove_validators()
             job_hashes, job_capacities, job_workers = self.process_jobs()
-            total_capacity = sum(job_capacities)
+
+            total_capacities = [
+                int(
+                    sum(
+                        worker["total_memory"]
+                        for worker in self.node.all_workers.values()
+                    )
+                )
+            ]
+            total_workers = [len(self.node.all_workers)]
 
             # Create and store proposal
             proposal = {
@@ -344,7 +348,8 @@ class ContractManager:
                 "jobs": job_hashes,
                 "job_capacities": job_capacities,
                 "workers": job_workers,
-                "total_capacity": total_capacity,
+                "total_capacity": total_capacities,
+                "total_workers": total_workers,
             }
             proposal_hash = self._hash_proposal_data(proposal)
             self.node.store_value(proposal_hash.hex(), proposal)
@@ -357,7 +362,8 @@ class ContractManager:
             elif code == 1:
                 return  # Exit method (error)
             elif code == 2:
-                continue  # Restart and continue to build proposal datazo
+                time.sleep(30)
+                continue  # Restart and continue to build proposal data
 
         # Wait for next block before monitoring
         self._wait_for_next_block()
@@ -368,7 +374,8 @@ class ContractManager:
             job_hashes,
             job_capacities,
             job_workers,
-            total_capacity,
+            total_capacities,
+            total_workers,
         )
 
     def _is_validator_online(self, node_info: Dict[str, Any]) -> bool:
@@ -411,13 +418,9 @@ class ContractManager:
         return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
 
     def _hash_proposal_data(self, proposal_data: dict):
-        (
-            validators_to_remove,
-            job_hashes,
-            job_capacities,
-            job_workers,
-            total_capacity,
-        ) = proposal_data.values()
+        (validators_to_remove, job_hashes, job_capacities, job_workers, _, _) = (
+            proposal_data.values()
+        )
 
         validators_to_remove = [
             self.chain.to_checksum_address(validator)
@@ -425,8 +428,8 @@ class ContractManager:
         ]
         workers = [self.chain.to_checksum_address(worker) for worker in job_workers]
         encoded_data = encode(
-            ["address[]", "bytes32[]", "uint256[]", "address[]", "uint256"],
-            [validators_to_remove, job_hashes, job_capacities, workers, total_capacity],
+            ["address[]", "bytes32[]", "uint256[]", "address[]"],
+            [validators_to_remove, job_hashes, job_capacities, workers],
         )
 
         return self.chain.keccak(encoded_data)
@@ -466,7 +469,7 @@ class ContractManager:
                         colour="green",
                         level=logging.DEBUG,
                     )
-                    time.sleep(30)
+                    time.sleep(60)
                     return 2
                 else:
                     self.node.debug_print(
@@ -511,7 +514,8 @@ class ContractManager:
         job_hashes: List[bytes],
         job_capacities: List[int],
         job_workers: List[str],
-        total_capacity: int,
+        total_capacities: List[int],
+        total_workers: List[int],
     ) -> None:
         """Monitor proposal status and execute when ready."""
         while not self.terminate_flag.is_set():
@@ -519,16 +523,17 @@ class ContractManager:
                 return
 
             if self._is_proposal_ready():
-                if self._execute_proposal(
+                self._execute_proposal(
                     validators_to_remove,
                     job_hashes,
                     job_capacities,
                     job_workers,
-                    total_capacity,
-                ):
-                    return
+                    total_capacities,
+                    total_workers,
+                )
+                return
 
-            time.sleep(30)
+            time.sleep(15)
 
     def _is_proposal_valid(self) -> bool:
         """Check if the current proposal is still valid."""
@@ -550,7 +555,8 @@ class ContractManager:
         job_hashes: List[bytes],
         job_capacities: List[int],
         job_workers: List[str],
-        total_capacity: int,
+        total_capacities: List[int],
+        total_workers: List[int],
     ) -> bool:
         """Execute the proposal once it's ready."""
         try:
@@ -559,7 +565,8 @@ class ContractManager:
                 job_hashes,
                 job_capacities,
                 job_workers,
-                total_capacity,
+                total_capacities,
+                total_workers,
             ).call({"from": self.public_key})
 
             execute_tx = self._build_execution_transaction(
@@ -567,7 +574,8 @@ class ContractManager:
                 job_hashes,
                 job_capacities,
                 job_workers,
-                total_capacity,
+                total_capacities,
+                total_workers,
             )
             execute_tx_hash = self._submit_transaction(execute_tx)
 
@@ -590,15 +598,17 @@ class ContractManager:
         job_hashes: List[bytes],
         job_capacities: List[int],
         job_workers: List[str],
-        total_capacity: int,
+        total_capacities: List[int],
+        total_workers: List[int],
     ) -> Dict[str, Any]:
-        """Build the execution transaction."""
+        """Build the execution transaction"""
         return self.node.multi_sig_contract.functions.executeProposal(
             validators_to_remove,
             job_hashes,
             job_capacities,
             job_workers,
-            total_capacity,
+            total_capacities,
+            total_workers,
         ).build_transaction(
             {
                 "from": self.public_key,

@@ -49,10 +49,14 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(base_dir, "../config")
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCore.json")
 MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesMultiSig.json")
+API = get_key(".env", "API")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
-    CHAIN_URL = config["api"]["chain-url-local"]
+    CHAIN_URL = config["api"]["chain-url"]
+    if API:
+        CHAIN_URL = API
+
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
 
@@ -63,6 +67,15 @@ ABI = METADATA["abi"]
 with open(MS_CONFIG_PATH, "r") as f:
     MS_METADATA = json.load(f)
 MULTI_SIG_ABI = MS_METADATA["abi"]
+
+SNO_EVENT_SIGNATURES = {
+    "JobRequest": "JobRequested(uint256,uint256,address[])",
+    "JobComplete": "JobCompleted(uint256,uint256)",
+    "JobDispute": "JobDisputed(uint256,uint256)",
+    "ProposalCreated": "ProposalCreated(uint256,bytes)",
+    "ProposalExecuted": "ProposalExecuted(uint256)",
+}
+
 
 # Configure logging with TimedRotatingFileHandler
 os.makedirs("logs", exist_ok=True)
@@ -76,15 +89,6 @@ log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.DEBUG)
 BASE_PORT = 38751
-
-
-SNO_EVENT_SIGNATURES = {
-    "JobRequest": "JobRequested(uint256,uint256,address[])",
-    "JobComplete": "JobCompleted(uint256,uint256)",
-    "JobDispute": "JobDisputed(uint256,uint256)",
-    "ProposalCreated": "ProposalCreated(uint256,bytes)",
-    "ProposalExecuted": "ProposalExecuted(uint256)",
-}
 
 
 def hash_key(key: bytes, number=False):
@@ -511,7 +515,7 @@ class SmartNode(threading.Thread):
         if closest_node is not None:
             # The case where the stored value was not properly deleted (ie is None)
             if closest_node[1] is None:
-                self.__delete(closest_node[0])
+                self._delete_item(closest_node[0])
 
                 # Get another closest nodes
                 return self.query_dht(key_hash, requester, ids_to_exclude)
@@ -537,9 +541,9 @@ class SmartNode(threading.Thread):
 
     def query_node(
         self,
-        key_hash: str,
+        key_hash: Union[str, bytes],
         node: Connection,
-        requester: bytes = None,
+        requester: Union[str, bytes] = None,
         ids_to_exclude: list = None,
     ):
         """Query a specific nodes for a value"""
@@ -548,6 +552,11 @@ class SmartNode(threading.Thread):
 
         if node.terminate_flag.is_set():
             return
+
+        if isinstance(key_hash, bytes):
+            key_hash = key_hash.decode()
+        if isinstance(requester, bytes):
+            requester = requester.decode()
 
         start_time = time.time()
         message = b"REQUEST-VALUE" + key_hash.encode() + requester.encode()
@@ -612,7 +621,7 @@ class SmartNode(threading.Thread):
         if node_id in self.requests:
             self.requests[node_id].remove(key)
 
-    def __delete(self, key: str):
+    def _delete_item(self, key: str):
         """
         Delete a key-value pair from the DHT.
         """
@@ -1101,7 +1110,7 @@ class SmartNode(threading.Thread):
                 if connected:
                     candidates.append(id_hash)
                 else:
-                    self.__delete(id_hash)
+                    self._delete_item(id_hash)
 
         # Connect to additional randomly selected validators from the network
         n_validators = self.get_validator_count()
@@ -1119,7 +1128,7 @@ class SmartNode(threading.Thread):
                 validator_p2p_info = self.query_dht(id_hash)
 
                 if validator_p2p_info is None:
-                    self.__delete(id_hash)
+                    self._delete_item(id_hash)
                     continue
 
                 # Connect to the validator's node and exchange information
@@ -1129,7 +1138,7 @@ class SmartNode(threading.Thread):
                 )
 
                 if not connected:
-                    self.__delete(id_hash)
+                    self._delete_item(id_hash)
                     continue
 
                 candidates.append(validator_id)
@@ -1413,7 +1422,7 @@ class SmartNode(threading.Thread):
 
     def get_self_info(self):
         data = {
-            "id": self.rsa_key_hash.decode(),
+            "id": self.rsa_key_hash,
             "validators": [k.decode() for k in self.validators],
             "workers": [k.decode() for k in self.workers],
             "users": [k.decode() for k in self.users],

@@ -52,6 +52,7 @@ class Worker(TorchNode):
             level=logging.INFO,
         )
         self.available_memory = get_gpu_memory()
+        self.total_memory = self.available_memory
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
@@ -61,22 +62,23 @@ class Worker(TorchNode):
             #     )
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-            # attempts = 0
-            #
-            # self.debug_print("Bootstrapping...")
-            # while attempts < 3 and len(self.validators) == 0:
-            #     self.bootstrap()
-            #     if len(self.validators) == 0:
-            #         time.sleep(15)
-            #         self.debug_print("No validators found, trying again...")
-            #         attempts += 1
-            #
-            # if len(self.validators) == 0:
-            #     self.debug_print(
-            #         "No validators found, shutting down...", level=logging.CRITICAL
-            #     )
-            #     self.stop()
-            #     self.terminate_flag.set()
+            if self.local_test is False:
+                attempts = 0
+
+                self.debug_print("Bootstrapping...")
+                while attempts < 3 and len(self.validators) == 0:
+                    self.bootstrap()
+                    if len(self.validators) == 0:
+                        time.sleep(15)
+                        self.debug_print("No validators found, trying again...")
+                        attempts += 1
+
+                if len(self.validators) == 0:
+                    self.debug_print(
+                        "No validators found, shutting down...", level=logging.CRITICAL
+                    )
+                    self.stop()
+                    self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -213,6 +215,7 @@ class Worker(TorchNode):
         stats = {
             "id": self.rsa_key_hash,
             "memory": self.available_memory,
+            "total_memory": self.total_memory,
             "role": self.role,
             "training": self.training,
             # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
@@ -256,7 +259,7 @@ class Worker(TorchNode):
 
                 if job_data["active"] is False:
                     self.jobs.remove(job_id)
-                    self.__delete(job_id)
+                    self._delete_item(job_id)
 
             clean_nodes(self.workers)
             clean_nodes(self.validators)

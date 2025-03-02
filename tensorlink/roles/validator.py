@@ -14,6 +14,7 @@ from collections import Counter
 
 
 STATE_FILE = "logs/dht_state.json"
+LATEST_STATE_FILE = "logs/latest_state.json"
 
 
 def assert_job_req(job_req: dict, node_id):
@@ -70,8 +71,6 @@ class Validator(TorchNode):
         self.proposals = {}
 
         # Job monitoring and storage
-        self.active_jobs = {}
-        self.jobs_to_delete = []
         self.jobs_to_complete = []
         self.validators_to_clear = []
 
@@ -466,7 +465,6 @@ class Validator(TorchNode):
         # Start monitor_job as a background task and store it in the list
         job_monitor = JobMonitor(self)
         t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
-        self.active_jobs[job_id] = job_monitor
         t.start()
 
     def decline_job(self, node):
@@ -511,12 +509,14 @@ class Validator(TorchNode):
         return True
 
     def get_workers(self):
+        self.all_workers = {}
+
         self.request_worker_stats()
 
         for node_id, node in self.nodes.items():
             if node.role == "V":
                 self.send_to_node(node, b"REQUEST-WORKERS")
-                self._store_request(node_id, b"ALL-WORKER-STATS")
+                self._store_request(node_id, "ALL-WORKER-STATS")
 
         time.sleep(6)
 
@@ -572,6 +572,10 @@ class Validator(TorchNode):
     #     events = event_filter.get_all_entries()
     #     for event in events:
     #         print(event)
+
+    def complete_job(self, job_data: dict):
+        """Decide whether to remove the job or add it to the next state update"""
+        pass
 
     def validate_job(
         self,
@@ -682,61 +686,91 @@ class Validator(TorchNode):
 
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            time.sleep(1)
+            time.sleep(3)
 
     def stop(self):
         self.save_dht_state()
         super().stop()
 
-    def save_dht_state(self):
-        """Serialize and save the DHT state to a file."""
+    def save_dht_state(self, latest_only=False):
+        """
+        Serialize and save the DHT state to a file.
+
+        Args:
+            latest_only (bool): If True, save only to the latest state file.
+                               If False, save to both archive and latest files.
+        """
         try:
-            # Load existing data if available
-            existing_data = {
+            # Prepare current state data
+            current_data = {
                 "workers": {},
                 "validators": {},
                 "users": {},
                 "jobs": {},
                 "proposals": {},
+                "timestamp": time.time(),  # Add timestamp
             }
 
-            if os.path.exists(STATE_FILE):
-                try:
-                    with open(STATE_FILE, "r") as f:
-                        existing_data = json.load(f)
-                except json.JSONDecodeError:
-                    self.debug_print(
-                        "SmartNode -> Existing state file read error.",
-                        level=logging.WARNING,
-                        colour="red",
-                    )
-
-            # Append data to each category
+            # Collect current state
             for worker_id in self.workers:
                 worker = self.query_dht(worker_id)
-                existing_data["workers"][worker_id] = worker
+                current_data["workers"][worker_id] = worker
 
             for validator_id in self.validators:
                 validator = self.query_dht(validator_id)
-                existing_data["validators"][validator_id] = validator
+                current_data["validators"][validator_id] = validator
 
             for user_id in self.users:
                 user = self.query_dht(user_id)
-                existing_data["users"][user_id] = user
+                current_data["users"][user_id] = user
 
             for job_id in self.jobs:
                 job = self.query_dht(job_id)
-                existing_data["jobs"][job_id] = job
+                current_data["jobs"][job_id] = job
 
             for proposal_id in self.proposals:
-                pass
+                proposal = self.query_dht(proposal_id)
+                current_data["proposals"][
+                    proposal_id
+                ] = proposal  # Fixed missing implementation
 
-            # Save updated data back to the file
-            with open(STATE_FILE, "w") as f:
-                json.dump(existing_data, f, indent=4)
+            # Save to the latest state file (overwriting previous version)
+            with open(LATEST_STATE_FILE, "w") as f:
+                json.dump(current_data, f, indent=4)
+
+            # If not latest_only, also save to the archive/permanent state file
+            if not latest_only:
+                # Load existing archive data if available
+                existing_data = {
+                    "workers": {},
+                    "validators": {},
+                    "users": {},
+                    "jobs": {},
+                    "proposals": {},
+                }
+
+                if os.path.exists(STATE_FILE):
+                    try:
+                        with open(STATE_FILE, "r") as f:
+                            existing_data = json.load(f)
+                    except json.JSONDecodeError:
+                        self.debug_print(
+                            "SmartNode -> Existing state file read error.",
+                            level=logging.WARNING,
+                            colour="red",
+                        )
+
+                # Update the archive with current data
+                for category in ["workers", "validators", "users", "jobs", "proposals"]:
+                    existing_data[category].update(current_data[category])
+
+                # Save updated archive data
+                with open(STATE_FILE, "w") as f:
+                    json.dump(existing_data, f, indent=4)
 
             self.debug_print(
-                "SmartNode -> DHT state saved successfully.",
+                "SmartNode -> DHT state saved successfully to "
+                + f"{'both files' if not latest_only else 'latest file only'}.",
                 level=logging.INFO,
                 colour="green",
             )
@@ -750,18 +784,19 @@ class Validator(TorchNode):
 
     def load_dht_state(self):
         """Load the DHT state from a file."""
-        if os.path.exists(STATE_FILE):
+        if os.path.exists(LATEST_STATE_FILE):
             try:
-                with open(STATE_FILE, "r") as f:
+                with open(LATEST_STATE_FILE, "r") as f:
                     state = json.load(f)
 
                 # Restructure state: list only hash and corresponding data
                 structured_state = {}
                 for category, items in state.items():
-                    structured_state[category] = {
-                        hash_key: data for hash_key, data in items.items()
-                    }
-                    self.routing_table.update(items)
+                    if category != "timestamp":
+                        structured_state[category] = {
+                            hash_key: data for hash_key, data in items.items()
+                        }
+                        self.routing_table.update(items)
 
                 self.debug_print(
                     "SmartNode -> DHT state loaded successfully.", level=logging.INFO
@@ -784,38 +819,35 @@ class Validator(TorchNode):
         def clean_nodes(nodes):
             nodes_to_remove = []
             for node_id in nodes:
-                # Remove any ghost user_ids in self.users
+                # Remove any ghost ids in the list
                 if node_id not in self.nodes:
                     nodes_to_remove.append(node_id)
 
                 # Remove any terminated connections
                 elif self.nodes[node_id].terminate_flag.is_set():
+                    role = self.nodes[node_id].role
                     nodes_to_remove.append(node_id)
                     del self.nodes[node_id]
+
+                    if role == "W":
+                        del self.all_workers[node_id]
 
             for node in nodes_to_remove:
                 nodes.remove(node)
 
+        timer_count = 0
+
         while not self.terminate_flag.is_set():
-            time.sleep(300)
+            if timer_count % 300 == 0:
+                self.save_dht_state()
 
-            self.save_dht_state()
+            if timer_count % 60 == 0:
+                clean_nodes(self.workers)
+                clean_nodes(self.validators)
+                clean_nodes(self.users)
 
-            for job_id in self.jobs:
-                job_data = self.query_dht(job_id)
-
-                if job_data["active"] is False:
-                    # Remove old jobs (not in jobs to upload to contract or in ones to delete
-                    if (
-                        job_id not in self.jobs_to_complete
-                        or job_id in self.jobs_to_delete
-                    ):
-                        self.jobs.remove(job_id)
-                        self.__delete(job_id)
-
-            clean_nodes(self.workers)
-            clean_nodes(self.validators)
-            clean_nodes(self.users)
+            time.sleep(1)
+            timer_count += 1
 
             # TODO method / request to delete job after certain time or by request of the user.
             #   Perhaps after a job is finished there is a delete request

@@ -91,7 +91,7 @@ class JobMonitor:
         self.JOB_CREATION_TIMEOUT_SECONDS = 180
         self.JOB_OFFLINE_THRESHOLD_SECONDS = 120
         self.HEALTH_CHECK_INTERVAL_SECONDS = 30
-        self.PROOF_OF_WORK_INTERVAL = 5  # Check every 5 epochs
+        self.PROOF_OF_WORK_INTERVAL = 5
 
     def monitor_job(self, job_id: str):
         """Monitor job progress and workers asynchronously."""
@@ -367,20 +367,30 @@ class JobMonitor:
         try:
             # Update job status
             job_data["active"] = False
-            job_data["end_time"] = datetime.now().isoformat()
+            job_data["end_time"] = time.time()
             job_data["final_status"] = final_status.value
+            job_data["gigabyte_hours"] = (
+                job_data["capacity"]
+                * (job_data["end_time"] - job_data["timestamp"])
+                / 60
+                / 60
+            )  # Capacity in Gb hours
 
             # Clean up worker resources
             self._cleanup_workers(job_data)
-
-            # Remove job from active jobs
-            del self.node.active_jobs[job_data["id"]]
 
             self.node.debug_print(
                 f"Job {job_data['id']} cleaned up successfully with status: {final_status.value}",
                 colour="green",
                 level=logging.INFO,
             )
+
+            # Update job to contract if a certain threshold of work was done
+            if (
+                job_data["timestamp"] - job_data["last_seen"] > 180
+                and job_data["gigabyte_hours"] > 5e8
+            ):
+                self.node.contract_manager.jobs_to_complete.append(job_data)
 
         except Exception as e:
             self.node.debug_print(
@@ -474,35 +484,31 @@ class JobMonitor:
             job_data["failure_time"] = datetime.now().isoformat()
 
             # Notify job owner
-            try:
-                user_data = self.node.query_dht(job_data["author"])
-                if user_data:
-                    connected = self.node.connect_node(
-                        job_data["author"].encode(),
-                        user_data["host"],
-                        user_data["port"],
-                    )
-                    if connected:
-                        # Send alert (decline or cancel job)
-                        pass
-
-            except Exception as e:
-                self.node.debug_print(
-                    f"Failed to notify job owner of failure: {str(e)}",
-                    colour="yellow",
-                    level=logging.WARNING,
-                )
+            # try:
+            #     user_data = self.node.query_dht(job_data["author"])
+            #     if user_data:
+            #         connected = self.node.connect_node(
+            #             job_data["author"].encode(),
+            #             user_data["host"],
+            #             user_data["port"],
+            #         )
+            #         if connected:
+            #             # Send alert (decline or cancel job)
+            #             pass
+            #
+            # except Exception as e:
+            #     self.node.debug_print(
+            #         f"Failed to notify job owner of failure: {str(e)}",
+            #         colour="yellow",
+            #         level=logging.WARNING,
+            #     )
 
             # Clean up worker resources
             self._cleanup_workers(job_data)
 
-            # Remove from active jobs
-            if job_id in self.node.active_jobs:
-                del self.node.active_jobs[job_id]
-
             # Log failure
             self.node.debug_print(
-                f"Job {job_id} failed: {reason}",
+                f"Job {job_id} failed: {reason}. Cleaning Up",
                 colour="bright_red",
                 level=logging.ERROR,
             )
