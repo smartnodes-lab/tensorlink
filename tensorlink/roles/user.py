@@ -1,3 +1,7 @@
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.torch_node import TorchNode
+
+from dotenv import get_key
 import hashlib
 import json
 import logging
@@ -5,13 +9,6 @@ import queue
 import random
 import threading
 import time
-
-from dotenv import get_key
-
-from tensorlink.crypto.rsa import get_rsa_pub_key
-from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.node_api import *
-from tensorlink.p2p.torch_node import TorchNode
 
 
 class User(TorchNode):
@@ -70,21 +67,21 @@ class User(TorchNode):
             self.public_key = get_key(".env", "PUBLIC_KEY")
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-            attempts = 0
-            self.debug_print(f"Bootstrapping...")
-            while attempts < 3 and len(self.validators) == 0:
-                self.bootstrap()
-                if len(self.validators) == 0:
-                    time.sleep(15)
-                    self.debug_print(f"No validators found, trying again...")
-                    attempts += 1
-
-            if len(self.validators) == 0:
-                self.debug_print(
-                    f"No validators found, shutting down...", level=logging.CRITICAL
-                )
-                self.stop()
-                self.terminate_flag.set()
+            # attempts = 0
+            # self.debug_print("Bootstrapping...")
+            # while attempts < 3 and len(self.validators) == 0:
+            #     self.bootstrap()
+            #     if len(self.validators) == 0:
+            #         time.sleep(15)
+            #         self.debug_print("No validators found, trying again...")
+            #         attempts += 1
+            #
+            # if len(self.validators) == 0:
+            #     self.debug_print(
+            #         "No validators found, shutting down...", level=logging.CRITICAL
+            #     )
+            #     self.stop()
+            #     self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -171,7 +168,10 @@ class User(TorchNode):
         Runs in a separate thread.
         """
         try:
-            if node.node_id in self.jobs[-1]["seed_validators"]:
+            job_id = self.jobs[-1]
+            job_data = self.query_dht(job_id)
+
+            if job_data and node.node_id in job_data["seed_validators"]:
                 self.debug_print(
                     f"User -> Validator ({node.node_id}) accepted job!",
                     colour="bright_green",
@@ -267,9 +267,9 @@ class User(TorchNode):
 
             # Delete space for roles info if not found and move on to the next validator
             if node_info is None:
-                self.__delete(validator_id)
+                self._delete_item(validator_id)
                 self.debug_print(
-                    f"User -> Could not connect to validator for job initialization, try again.",
+                    "User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
                     level=logging.WARNING,
                 )
@@ -281,9 +281,9 @@ class User(TorchNode):
             )
 
             if not connected:
-                self.__delete(validator_id)
+                self._delete_item(validator_id)
                 self.debug_print(
-                    f"User -> Could not connect to validator for job initialization, try again.",
+                    "User -> Could not connect to validator for job initialization, try again.",
                     colour="bright_yellow",
                     level=logging.WARNING,
                 )
@@ -311,7 +311,8 @@ class User(TorchNode):
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
         job_request["id"] = job_hash
-        self.jobs.append(job_request)
+        self.store_value(job_hash, job_request)
+        self.jobs.append(job_hash)
 
         # Send job request to multiple validators (seed validators)
         job_req_threads = []
@@ -333,13 +334,13 @@ class User(TorchNode):
             worker_info = self.modules[mod_id]
             if len(worker_info["workers"]) < 1:
                 self.debug_print(
-                    f"Network could not find workers for job.",
+                    "Network could not find workers for job.",
                     level=logging.INFO,
                     colour="red",
                 )
                 return
 
-            worker_id = worker_info["workers"][0]
+            # worker_id = worker_info["workers"][0]
             # module, name = access_module(model, config[mod_id]["mod_id"])
 
             # Update job with selected worker
@@ -355,8 +356,6 @@ class User(TorchNode):
         # TODO Send activation message to validators
         # for validator in validators:
         #     self.send_job_status_update(validator, job_request)
-
-        self.jobs[-1] = job_request
 
         return dist_model_config
 

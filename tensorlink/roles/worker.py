@@ -1,17 +1,15 @@
+from tensorlink.ml.utils import get_gpu_memory, handle_output
+from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.torch_node import TorchNode
+
+import torch
+import torch.nn as nn
+from dotenv import get_key
 import hashlib
 import json
 import logging
 import threading
 import time
-
-import torch
-import torch.nn as nn
-from dotenv import get_key
-
-from tensorlink.crypto.rsa import get_rsa_pub_key
-from tensorlink.ml.utils import estimate_memory, get_gpu_memory, handle_output
-from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torch_node import TorchNode
 
 
 class Worker(TorchNode):
@@ -54,30 +52,33 @@ class Worker(TorchNode):
             level=logging.INFO,
         )
         self.available_memory = get_gpu_memory()
+        self.total_memory = self.available_memory
 
         if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
-            self.debug_print(
-                "Public key not found in .env file, using donation wallet..."
-            )
+            # if not self.public_key:
+            #     self.debug_print(
+            #         "Public key not found in .env file, using donation wallet..."
+            #     )
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-            attempts = 0
+            if self.local_test is False:
+                attempts = 0
 
-            self.debug_print(f"Bootstrapping...")
-            while attempts < 3 and len(self.validators) == 0:
-                self.bootstrap()
+                self.debug_print("Bootstrapping...")
+                while attempts < 3 and len(self.validators) == 0:
+                    self.bootstrap()
+                    if len(self.validators) == 0:
+                        time.sleep(15)
+                        self.debug_print("No validators found, trying again...")
+                        attempts += 1
+
                 if len(self.validators) == 0:
-                    time.sleep(15)
-                    self.debug_print(f"No validators found, trying again...")
-                    attempts += 1
-
-            if len(self.validators) == 0:
-                self.debug_print(
-                    f"No validators found, shutting down...", level=logging.CRITICAL
-                )
-                self.stop()
-                self.terminate_flag.set()
+                    self.debug_print(
+                        "No validators found, shutting down...", level=logging.CRITICAL
+                    )
+                    self.stop()
+                    self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -107,49 +108,7 @@ class Worker(TorchNode):
                         self.modules[module_id]["termination"] = True
 
                 elif b"JOB-REQ" == data[:7]:
-                    try:
-                        if node.role == "V":
-                            # Accept job request from validator if we can handle it
-                            (
-                                user_id,
-                                job_id,
-                                module_id,
-                                module_size,
-                                module_name,
-                                optimizer_name,
-                            ) = json.loads(data[7:])
-
-                            if (
-                                self.available_memory >= module_size
-                            ):  # TODO Ensure were active?
-                                # Respond to validator that we can accept the job
-                                if module_name is None:
-                                    module_name = ""
-
-                                # Store a request to wait for the user connection
-                                self._store_request(user_id, module_id + module_name)
-                                self._store_request(
-                                    user_id, "OPTIMIZER" + optimizer_name
-                                )
-                                data = (
-                                    b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
-                                )
-
-                                # Update available memory
-                                self.available_memory -= module_size
-
-                            else:
-                                data = b"DECLINE-JOB"
-
-                        else:
-                            node.stop()
-
-                        self.send_to_node(node, data)
-
-                    except Exception as e:
-                        print(data)
-                        print(node.main_port)
-                        raise e
+                    self._handle_job_req(data, node)
 
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
@@ -188,6 +147,45 @@ class Worker(TorchNode):
             )
             raise e
 
+    def _handle_job_req(self, data: bytes, node: Connection):
+        try:
+            if node.role == "V":
+                # Accept job request from validator if we can handle it
+                (
+                    user_id,
+                    job_id,
+                    module_id,
+                    module_size,
+                    module_name,
+                    optimizer_name,
+                ) = json.loads(data[7:])
+
+                if self.available_memory >= module_size:  # TODO Ensure were active?
+                    # Respond to validator that we can accept the job
+                    if module_name is None:
+                        module_name = ""
+
+                    # Store a request to wait for the user connection
+                    self._store_request(user_id, module_id + module_name)
+                    self._store_request(user_id, "OPTIMIZER" + optimizer_name)
+                    data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+
+                    # Update available memory
+                    self.available_memory -= module_size
+
+                else:
+                    data = b"DECLINE-JOB"
+
+            else:
+                node.stop()
+
+            self.send_to_node(node, data)
+
+        except Exception as e:
+            print(data)
+            print(node.main_port)
+            raise e
+
     def run(self):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
@@ -217,6 +215,7 @@ class Worker(TorchNode):
         stats = {
             "id": self.rsa_key_hash,
             "memory": self.available_memory,
+            "total_memory": self.total_memory,
             "role": self.role,
             "training": self.training,
             # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
@@ -260,7 +259,7 @@ class Worker(TorchNode):
 
                 if job_data["active"] is False:
                     self.jobs.remove(job_id)
-                    self.__delete(job_id)
+                    self._delete_item(job_id)
 
             clean_nodes(self.workers)
             clean_nodes(self.validators)

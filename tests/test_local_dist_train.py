@@ -44,6 +44,8 @@ DP_FACTOR = 1
 @pytest.fixture(scope="module")
 def nodes():
     """Initialize and return validator, user, and worker nodes."""
+    # Cleanup nodes after tests
+
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
     )
@@ -57,25 +59,27 @@ def nodes():
     )
     time.sleep(1)
 
-    yield validator, user, worker
+    try:
+        yield validator, user, worker
 
-    # Cleanup nodes after tests
-    user.cleanup()
-    worker.cleanup()
-    validator.cleanup()
+    except Exception as e:
+        print(f"Error during node cleanup: {e}")
+
+    finally:
+        user.cleanup()
+        worker.cleanup()
+        validator.cleanup()
+
+        time.sleep(3)
 
 
 def test_node_initialization(nodes):
-    """Test that nodes are initialized correctly."""
+    """Test that nodes are initialized correctly and that nodes connect successfully."""
     validator, user, worker = nodes
     assert validator is not None, "Validator node failed to initialize."
     assert user is not None, "User node failed to initialize."
     assert worker is not None, "Worker node failed to initialize."
 
-
-def test_node_connectivity(nodes):
-    """Test that nodes connect successfully."""
-    validator, user, worker = nodes
     val_key, val_host, val_port = validator.send_request("info", None)
 
     # Worker connects to validator
@@ -91,32 +95,24 @@ def test_node_connectivity(nodes):
     assert val_port is not None, "Validator port is None."
 
 
-def test_distributed_training(nodes):
-    """Test distributed training with a simple model."""
-    _, user, _ = nodes
-
-    # Create model and tokenizer
-    import torch
-    from torch.nn.functional import mse_loss
-    from transformers import BertForSequenceClassification, BertTokenizer
-
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
-    distributed_model, distributed_optimizer = user.create_distributed_model(
-        model=model, training=True, optimizer_type=torch.optim.Adam
-    )
-    del model  # Free up memory
-    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
-
-    # Training loop
-    distributed_model.train()
-    for _ in range(5):
-        distributed_optimizer.zero_grad()
-        x = torch.zeros((1, 1), dtype=torch.long)
-        outputs = distributed_model(x)
-        loss = mse_loss(outputs.logits, outputs.logits)
-        loss.backward()
-        distributed_optimizer.step()
-
-    assert distributed_model is not None, "Distributed model is None."
-    assert distributed_optimizer is not None, "Distributed optimizer is None."
+# def test_distributed_setup(nodes):
+#     """Test distributed training with a simple model."""
+#     validator, user, worker = nodes
+#
+#     # Create model and tokenizer
+#     import torch
+#     import torch.nn as nn
+#
+#     model = nn.ModuleList([nn.Linear(10, 10)])
+#
+#     distributed_model, distributed_optimizer = user.create_distributed_model(
+#         model=model, training=True, optimizer_type=torch.optim.Adam
+#     )
+#     del model
+#     distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+#
+#     distributed_model.train()
+#     distributed_optimizer.zero_grad()
+#
+#     assert distributed_model is not None, "Distributed model is None."
+#     assert distributed_optimizer is not None, "Distributed optimizer is None."

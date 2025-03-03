@@ -34,11 +34,9 @@ from torch.nn.functional import mse_loss
 
 from tensorlink import UserNode, ValidatorNode, WorkerNode
 
-# Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
-LOCAL = True
-
-# Must be activated for public network use. Hopefully this is upgraded to STUN or equivalent in the near future.
-UPNP = False
+LOCAL = True  # Network operations are on localhost when true (i.e. 127.0.0.1)
+UPNP = False  # Must be activated for public network use. Upgrade to STUN or equivalent in the near future.
+OFFCHAIN = False  # Can be used to deactivate on-chain features (for private jobs)
 
 # Parameters for distributed model request.
 BATCH_SIZE = 16
@@ -49,19 +47,18 @@ DP_FACTOR = 1
 if __name__ == "__main__":
     # Launches a node of each type in their own process
     validator = ValidatorNode(
-        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(
-        2
-    )  # Temporary sleep for preventing two nodes from starting on the same port and conflicting
+    # Temporary sleep for preventing two nodes from starting on the same port and conflicting
+    time.sleep(3)
     user = UserNode(
-        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(2)
+    time.sleep(0.5)
     worker = WorkerNode(
-        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
+        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(2)
+    time.sleep(0.5)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -91,7 +88,7 @@ if __name__ == "__main__":
     distributed_model.train()
     for _ in range(5):
         distributed_optimizer.zero_grad()  # Distributed optimizer calls relay to worker nodes
-        x = torch.zeros((1, 1), dtype=torch.long)
+        x = torch.zeros((1, 1))
         outputs = distributed_model(x)
         outputs = outputs.logits
         loss = mse_loss(outputs, outputs)
@@ -102,3 +99,4 @@ if __name__ == "__main__":
     user.cleanup()
     worker.cleanup()
     validator.cleanup()
+    time.sleep(3)
