@@ -65,7 +65,8 @@ class ContractManager:
                     # If proposal exists, get its hash
                     proposal_hash = (
                         self.multi_sig_contract.functions.currentProposals(
-                            current_proposal_num  # index for querying next proposal candidate
+                            current_proposal_num
+                            - 1  # index for querying next proposal candidate
                         )
                         .call()
                         .hex()
@@ -357,8 +358,8 @@ class ContractManager:
             }
             proposal_hash = self._hash_proposal_data(proposal)
             self.node.store_value(proposal_hash.hex(), proposal)
-            self.node.proposals.append(proposal_hash)
-            self.proposals[proposal_hash] = proposal
+            self.node.proposals.append(proposal_hash.hex())
+            self.proposals[proposal_hash.hex()] = proposal
 
             # Submit proposal
             code = self._submit_proposal(proposal_hash)

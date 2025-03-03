@@ -68,7 +68,7 @@ class Validator(TorchNode):
 
         self.worker_memories = {}
         self.all_workers = {}
-        self.proposals = {}
+        self.proposals = []
 
         # Job monitoring and storage
         self.jobs_to_complete = []
