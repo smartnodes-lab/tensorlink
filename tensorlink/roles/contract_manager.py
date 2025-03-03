@@ -43,6 +43,7 @@ class ContractManager:
 
     def proposal_validator(self):
         """Listen for new proposals created on SmartnodesMultiSig and validate them."""
+        current_proposal_num = 1
 
         # Initialize last_execution_block from existing proposals
         while not self.terminate_flag.is_set():
@@ -57,15 +58,14 @@ class ContractManager:
                 if current_proposal_id != self.current_proposal:
                     self.current_proposal = current_proposal_id
                     self.proposals = {}
+                    current_proposal_num = 1
 
                 # Get ID for next proposal in round
-                current_proposal_num = len(self.proposals) + 1
                 try:
                     # If proposal exists, get its hash
                     proposal_hash = (
                         self.multi_sig_contract.functions.currentProposals(
-                            current_proposal_num
-                            - 1  # index for querying next proposal candidate
+                            current_proposal_num  # index for querying next proposal candidate
                         )
                         .call()
                         .hex()
@@ -81,11 +81,15 @@ class ContractManager:
                     )
                     self.proposals[proposal_hash] = t
                     t.start()
-                    time.sleep(5)
+                    current_proposal_num += 1
+                    time.sleep(1)
+
+                    if current_proposal_num > 1:
+                        time.sleep(600)
 
                 except ContractLogicError:
                     # Proposal has not been published yet, keep waiting
-                    time.sleep(15)
+                    time.sleep(30)
                     pass
 
             except Exception as e:
@@ -95,7 +99,7 @@ class ContractManager:
                     level=logging.ERROR,
                 )
 
-            time.sleep(15)
+            time.sleep(3)
 
     def validate_proposal(self, proposal_hash, proposal_num):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
@@ -353,6 +357,8 @@ class ContractManager:
             }
             proposal_hash = self._hash_proposal_data(proposal)
             self.node.store_value(proposal_hash.hex(), proposal)
+            self.node.proposals.append(proposal_hash)
+            self.proposals[proposal_hash] = proposal
 
             # Submit proposal
             code = self._submit_proposal(proposal_hash)
