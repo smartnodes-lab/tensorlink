@@ -1,8 +1,8 @@
 # Tensorlink
-![Static Badge](https://img.shields.io/badge/v0.1.1-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
+![Static Badge](https://img.shields.io/badge/v0.1.2-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
 <!-- ![GitHub all releases](https://img.shields.io/github/downloads/smartnodes-lab/tensorlink/total) -->
 
-**Tensorlink** is a library designed to simplify the scaling of PyTorch model training and inference, offering tools 
+**Tensorlink** is a library designed to simplify distributed PyTorch model training and inference, offering tools 
 to easily distribute models across a network of peers and share computational resources both locally and globally.
 
 ## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch

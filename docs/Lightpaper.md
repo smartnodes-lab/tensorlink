@@ -75,7 +75,7 @@ one stage, the next batch can start processing in a different stage. This overla
 significantly speed up training by maximizing throughput.
 
 <p align="center">
-  <img src="docs/images/pipeline.png" alt="Distributed model architecture." width="520"/>
+  <img src="images/pipeline.png" alt="Distributed model architecture." width="520"/>
 </p>
 <p align="center"><strong>Figure 1:</strong> <em>Pipeline parallelism micro-batching to mitigate latency in distributed learning environments.</em></p>
 
@@ -97,7 +97,7 @@ at the potential sacrifice of additional training time or computational cost.
 
 
 <p align="center">
-  <img src="docs/images/ML Flow Chart.png" alt="Distributed model architecture." width="520"/>
+  <img src="images/ML Flow Chart.png" alt="Distributed model architecture." width="520"/>
 </p>
 <p align="center"><strong>Figure 2:</strong> <em>An example illustrating model distribution and parallelization among
 workers, as well as intermediate computation by the user.</em></p>
