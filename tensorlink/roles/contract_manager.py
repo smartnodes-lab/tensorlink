@@ -73,25 +73,25 @@ class ContractManager:
                     )
                     time.sleep(1)
 
-                    # Validator proposal
-                    t = threading.Thread(
-                        target=self.validate_proposal,
-                        args=(proposal_hash, current_proposal_num),
-                        name=f"proposal_validator_{current_proposal_num}",
-                        daemon=True,
-                    )
-                    self.proposals[proposal_hash] = t
-                    t.start()
-                    current_proposal_num += 1
-                    time.sleep(1)
-
-                    if current_proposal_num > 1:
-                        time.sleep(600)
-
                 except ContractLogicError:
                     # Proposal has not been published yet, keep waiting
-                    time.sleep(30)
-                    pass
+                    time.sleep(60)
+                    continue
+
+                # Validator proposal
+                t = threading.Thread(
+                    target=self.validate_proposal,
+                    args=(proposal_hash, current_proposal_num),
+                    name=f"proposal_validator_{current_proposal_num}",
+                    daemon=True,
+                )
+                self.proposals[proposal_hash] = t
+                t.start()
+                current_proposal_num += 1
+                time.sleep(1)
+
+                if current_proposal_num > 1:
+                    time.sleep(3000)
 
             except Exception as e:
                 self.node.debug_print(
@@ -306,7 +306,7 @@ class ContractManager:
                 if self.public_key in round_validators or is_expired:
                     # Wait a bit before creating the proposal
                     self.create_and_submit_proposal()
-                    time.sleep(30)
+                    time.sleep(3000)
 
             except Exception as e:
                 self.node.debug_print(
@@ -330,6 +330,17 @@ class ContractManager:
         )
 
         while True:
+            # Verify proposal can be submitted
+            try:
+                self.multi_sig_contract.functions.createProposal(
+                    hashlib.sha256(b"").hexdigest()
+                ).call({"from": self.public_key})
+
+            except Exception:
+                # If the proposal couldnt be created, we must wait
+                time.sleep(120)
+                pass
+
             # Request all workers connected to the network
             self.node.get_workers()
 
