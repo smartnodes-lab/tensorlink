@@ -333,7 +333,7 @@ class ContractManager:
             # Verify proposal can be submitted
             try:
                 self.multi_sig_contract.functions.createProposal(
-                    hashlib.sha256(b"").hexdigest()
+                    encode(["uint256"], [12345])
                 ).call({"from": self.public_key})
 
             except Exception:
