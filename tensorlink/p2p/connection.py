@@ -3,6 +3,7 @@ import threading
 import logging
 import hashlib
 import socket
+import time
 import os
 import gc
 
@@ -66,6 +67,11 @@ class Connection(threading.Thread):
         # Potential for optimizing data transmission
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32 * 1024 * 1024)  # 4MB receive buffer
         # self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 32 * 1024 * 1024)  # 4MB send buffer
+
+        # Start connection monitoring
+        self.monitor_thread = threading.Thread(target=self.monitor_connection)
+        self.monitor_thread.daemon = True
+        self.monitor_thread.start()
 
     def run(self):
         """
@@ -266,11 +272,15 @@ class Connection(threading.Thread):
         )
         self.main_node.disconnect_node(self.node_id)
 
-    def _handle_connection_close(self):
+    def _handle_connection_close(self, reason=None):
         """Handle graceful connection closure."""
+        message = "Connection -> Connection closed"
+        if reason:
+            message += f": {reason}"
+
         self.terminate_flag.set()
         self.main_node.debug_print(
-            "Connection -> Connection closed.",
+            message,
             colour="bright_red",
             level=logging.INFO,
         )
@@ -306,3 +316,25 @@ class Connection(threading.Thread):
             self.chunk_size = CHUNK_SIZE**2
         else:
             self.chunk_size = CHUNK_SIZE
+
+    def monitor_connection(self):
+        """
+        Periodically check connection health and handle disconnections.
+        """
+        while not self.terminate_flag.is_set():
+            # Check if we haven't received data in a while
+            if self.last_seen is not None:
+                elapsed = (datetime.now() - self.last_seen).total_seconds()
+                if elapsed > 30:  # Configurable timeout threshold
+                    # Optionally send a ping to check if still alive
+                    try:
+                        self.send(b"PING")
+                        self.pinged = time.time()
+
+                    except Exception as e:
+                        self._handle_connection_close(
+                            f"Connection -> No activity from {self.host}:{self.port} for {elapsed:.1f} seconds: {e}"
+                        )
+                        break
+
+            time.sleep(10)
