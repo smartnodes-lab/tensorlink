@@ -237,10 +237,14 @@ class ContractManager:
         if validator_id not in self.validators_to_clear:
             self.validators_to_clear.append(validator_id)
 
-    def add_job_to_complete(self, job_id: str) -> None:
+    def add_job_to_complete(self, job_data: dict) -> None:
         """Add a job to the list of jobs to be completed."""
-        if job_id not in self.jobs_to_complete:
-            self.jobs_to_complete.append(job_id)
+        # Update job to contract if a certain threshold of work was done
+        if (
+            job_data["timestamp"] - job_data["last_seen"] > 180
+            and job_data["gigabyte_hours"] > 5e8
+        ) and job_data["id"] not in self.jobs_to_complete:
+            self.jobs_to_complete.append(job_data["id"])
 
     def verify_and_remove_validators(self) -> List[str]:
         """
@@ -369,7 +373,6 @@ class ContractManager:
             }
             proposal_hash = self._hash_proposal_data(proposal)
             self.node.store_value(proposal_hash.hex(), proposal)
-            self.node.proposals.append(proposal_hash.hex())
             self.proposals[proposal_hash.hex()] = proposal
 
             # Submit proposal

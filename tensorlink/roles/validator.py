@@ -68,7 +68,6 @@ class Validator(TorchNode):
 
         self.worker_memories = {}
         self.all_workers = {}
-        self.proposals = []
 
         # Job monitoring and storage
         self.jobs_to_complete = []
@@ -728,11 +727,12 @@ class Validator(TorchNode):
                 job = self.query_dht(job_id)
                 current_data["jobs"][job_id] = job
 
-            for proposal_id in self.proposals:
-                proposal = self.query_dht(proposal_id)
-                current_data["proposals"][
-                    proposal_id
-                ] = proposal  # Fixed missing implementation
+            if self.contract_manager:
+                for proposal_id in self.contract_manager.proposals:
+                    proposal = self.query_dht(proposal_id)
+                    current_data["proposals"][
+                        proposal_id
+                    ] = proposal  # Fixed missing implementation
 
             # Save to the latest state file (overwriting previous version)
             with open(LATEST_STATE_FILE, "w") as f:

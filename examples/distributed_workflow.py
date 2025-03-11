@@ -1,3 +1,5 @@
+from torch.nn.functional import mse_loss
+
 """
 Tensorlink Distributed Model Workflow Example
 
@@ -24,24 +26,25 @@ Overview:
    - Demonstrates model distribution, gradient updates, and optimization across nodes.
 
 """
+from tensorlink import UserNode, ValidatorNode, WorkerNode
 
+from transformers import BertForSequenceClassification
+import torch
 import logging
 import time
 
-import torch
-import torch.nn as nn
-from torch.nn.functional import mse_loss
-
-from tensorlink import UserNode, ValidatorNode, WorkerNode
 
 LOCAL = True  # Network operations are on localhost when true (i.e. 127.0.0.1)
-UPNP = False  # Must be activated for public network use. Upgrade to STUN or equivalent in the near future.
-OFFCHAIN = False  # Can be used to deactivate on-chain features (for private jobs)
+UPNP = (
+    True if not LOCAL else False
+)  # Must be activated for public network use. Upgrade to STUN or other in the future.
+OFFCHAIN = LOCAL  # Can be used to deactivate on-chain features (for private jobs)
 
 # Parameters for distributed model request.
 BATCH_SIZE = 16
 PIPELINES = 1
 DP_FACTOR = 1
+TRAINING = False  # Set true to request train job and get a distributed optimizer
 
 
 if __name__ == "__main__":
@@ -50,15 +53,15 @@ if __name__ == "__main__":
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
     # Temporary sleep for preventing two nodes from starting on the same port and conflicting
-    time.sleep(3)
+    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(0.5)
+    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(0.5)
+    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -72,31 +75,35 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Create a model to distribute
-    model = nn.ModuleList([nn.Linear(20, 40), nn.Linear(40, 40), nn.Linear(40, 20)])
+    model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # User requests a distributed model and optimizer from a validator
     distributed_model, distributed_optimizer = user.create_distributed_model(
-        model=model, training=True, optimizer_type=torch.optim.Adam
+        model=model, training=TRAINING, optimizer_type=torch.optim.Adam
     )
     del model  # Free up some space
 
     # Initialize distributed optimizer
-    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    if TRAINING:
+        distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+        distributed_model.train()
 
-    # Run a dummy training loop
-    distributed_model.train()
+    # Run a dummy training loop to showcase functionality
     for _ in range(5):
-        distributed_optimizer.zero_grad()  # Distributed optimizer calls relay to worker nodes
         x = torch.zeros((1, 1))
         outputs = distributed_model(x)
-        outputs = outputs.logits
-        loss = mse_loss(outputs, outputs)
-        loss.backward()
-        distributed_optimizer.step()
+
+        if TRAINING:
+            outputs = outputs.logits
+            loss = mse_loss(outputs, outputs)
+            loss.backward()  # Graph is connected directly to distributed workers allowing for .backwards() call
+
+            # Distributed optimizer calls relay to worker nodes
+            distributed_optimizer.step()
+            distributed_optimizer.zero_grad()
 
     # Gracefully shut down nodes
     user.cleanup()
     worker.cleanup()
     validator.cleanup()
-    time.sleep(3)
