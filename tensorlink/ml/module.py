@@ -1,21 +1,22 @@
-import gc
+from typing import Generator, OrderedDict, Optional, Type, Dict, Any
+from collections import defaultdict
+from transformers import PreTrainedModel
+from transformers.utils import ModelOutput
+import torch.optim as optim
+import torch.nn as nn
+import torch
+import threading
 import hashlib
-import json
-import os
 import pickle
 import queue
 import random
-import threading
 import time
-from collections import defaultdict
-from typing import Generator, OrderedDict
-
-import torch
-import torch.nn as nn
-from transformers import PreTrainedModel
-from transformers.utils import ModelOutput
+import json
+import gc
+import os
 
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
+from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.utils import *
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -82,49 +83,85 @@ class CustomAutogradRouter(torch.autograd.Function):
 
 class DistributedModel(nn.Module):
     """
-    DistributedModel:
-        Is able to host offloaded submodules along with local operations. Can be spawned
-        by a Worker or a User. Host is referred to as the 'master' node.
+    A modular distributed model that supports offloading submodules
+    while handling local operations. This model can be instantiated
+    by either a Worker or a User, where the host is referred to as the 'master' node.
+
+    Features:
+    - Handles distributed training across multiple nodes.
+    - Supports user-defined optimizers and learning rate schedulers.
+    - Provides control over GPU memory allocation and computation pipelines.
+    - Enables trusted execution mode with an explicit confirmation.
     """
 
     def __init__(
         self,
-        node_requests,
-        node_responses,
-        mpc_lock,
         model: nn.Module,
-        n_pipelines: int,
-        device=None,
-        trusted=False,
+        n_pipelines: int = 1,
+        optimizer_type: Optional[Type[optim.Optimizer]] = None,
+        scheduler_type: Optional[Type[optim.lr_scheduler._LRScheduler]] = None,
+        device: Optional[str] = None,
+        dtype: torch.dtype = torch.float32,
+        trusted: bool = False,
+        node: Optional[Any] = None,
+        verbose: bool = False,
     ):
-        super(DistributedModel, self).__init__()
+        """
+        Args:
+            model (nn.Module): The base model to distribute.
+            n_pipelines (int): Number of parallel pipelines for computation.
+            optimizer_type (Type[optim.Optimizer]): Optimizer class to use.
+            scheduler_type (Optional[Type[optim.lr_scheduler._LRScheduler]]):
+                Optional learning rate scheduler.
+            device (Optional[str]): Device to run the model on (default: auto-detect).
+            dtype (torch.dtype): Data precision for computations.
+            trusted (bool): If True, requires user confirmation before execution.
+            node (Optional[Any]): Pre-existing node instance for networking.
+            verbose (bool): Enables debug messages if True.
+        """
+        super().__init__()
+
         self.name = str(model).split("(")[0]
 
-        # Node process communication params
-        self.node_requests = node_requests
-        self.node_responses = node_responses
-        self.mpc_lock = mpc_lock
-
-        self.model = model
+        # Store model and training resources
+        self.model = model.to(dtype=dtype)
         self.user_memory = get_gpu_memory()
 
-        self.worker_info = {}
+        self.worker_info: Dict[str, Any] = {}
 
+        # Parallelization settings
         self.n_pipelines = n_pipelines
-        self.n_datalines = 1
+        self.n_datalines = 1  # Default data pipeline setting
 
-        self.distributed_graph = {}
-        self.parameters_storage = {}
+        # Distributed graph and parameters
+        self.distributed_graph: Dict[str, Any] = {}
+        self.parameters_storage: Dict[str, torch.Tensor] = {}
 
-        self.device = (
-            device if device else "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        # Set device
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Optimizer and scheduler placeholders
         self.optimizer = None
+        self.scheduler = None
 
+        # Trusted execution mode
         self.trusted = trusted
-
         if trusted:
             _confirm_action()
+
+        # Setup node if not provided
+        self.node = node if node else self._create_user_node()
+
+        # Node communication attributes
+        self.node_requests = self.node.node_requests
+        self.node_responses = self.node.node_responses
+        self.mpc_lock = self.node.mpc_lock
+
+        if verbose:
+            print(f"DistributedModel '{self.name}' initialized on {self.device}")
+
+        # Initialize model distribution
+        self._initialize_distribution(optimizer_type)  # , scheduler_type)
 
     def forward(self, *args, **kwargs):
         """
@@ -493,117 +530,6 @@ class DistributedModel(nn.Module):
 
         return 0, 0
 
-    def parse_model(
-        self,
-        model: nn.Module,
-        config: dict = None,
-        ids: list = None,
-        handle_layer: bool = True,
-    ) -> dict:
-        """
-        Parse model based on some minimum submodule size and return a config file containing the
-        distributed model configuration.
-        # TODO Commented out model distribution schemes for data processing on user end.
-        """
-        if config is None:
-            config = {}
-            ids = []
-
-        # Create offloaded module data structure for config file
-        def create_offloaded(module: nn.Module, module_index: list, module_size: int):
-            module_id = hashlib.sha256(str(random.random()).encode()).hexdigest()
-            data = {
-                "type": "offloaded",
-                "id_hash": module_id,
-                "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                    :-1
-                ],  # class name
-                "mod_id": module_index,
-                "size": module_size,
-                "workers": [],
-                "training": True,
-            }
-            return module_id, data
-
-        # Create user-loaded module data structure for config file
-        def create_loaded(module: nn.Module, module_index: list, module_size: int):
-            module_id = hashlib.sha256(str(random.random()).encode()).hexdigest()
-            data = {
-                "type": "loaded",
-                "id_hash": module_id,
-                "module": f"{type(module)}".split(".")[-1].split(">")[0][
-                    :-1
-                ],  # class name
-                "mod_id": module_index,
-                "size": module_size,
-                "workers": [],
-            }
-            return module_id, data
-
-        # named_children = list(model.named_children())
-        model_size = estimate_memory(model, self.training, batch_size=1024)
-        assert (
-            model_size < 24e9
-        ), "Models must currently require under ~24Gb of GPU memory due to network availability."
-        # max_worker = max(self.worker_info.items(), key=lambda x: x[1]["memory"])
-        # max_worker_mem = max_worker[1]["memory"]
-
-        # If we do not want to handle initial layers and model can fit on worker.
-        # Temporarily, this is the only option possible as model size must be less than 24
-        if model_size <= 24e9:
-            k, v = create_offloaded(model, [-1], model_size)
-            v["name"] = None
-
-            if isinstance(model, PreTrainedModel):
-                v["name"] = model.name_or_path
-
-            elif not self.trusted:
-                try:
-                    torch.jit.script(model)
-
-                except Exception as e:
-                    raise RuntimeError(
-                        "The model cannot be processed for distributed training due to compatibility or security "
-                        "constraints. Support for additional model types and improved security handling will be "
-                        "included in future updates."
-                    )
-
-            else:
-                v["name"] = model.name_or_path
-
-            config[k] = v
-
-        # Otherwise we break the module down into its components and handle TODO
-        # else:
-        #     for i in range(len(named_children)):
-        #         # Unpack module info
-        #         name, submodule = named_children[i]
-        #         module_memory = estimate_memory(submodule)
-        #
-        #         # Update current module id
-        #         new_ids = ids + [i]
-        #         module_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
-        #
-        #         # Try handling the layer with user memory if possible
-        #         # if self.user_memory >= module_memory and handle_layer:
-        #         #     self.user_memory -= module_memory
-        #         #     k, v = create_loaded(submodule, new_ids, module_memory)
-        #         #     config[k] = v
-        #         #     handle_layer = False
-        #
-        #         if module_memory <= 24e9:
-        #             k, v = create_offloaded(submodule, new_ids, module_memory)
-        #             config[k] = v
-        #         else:
-        #             # Recursively break down larger modules that can't fit in memory
-        #             sub_config = self.parse_model(submodule, config=config.copy(), ids=new_ids,
-        #                                           handle_layer=handle_layer)
-        #             k, v = create_loaded(submodule, new_ids, module_memory)
-        #             v["subconfig"] = sub_config
-        #             config[k] = v
-
-        return config
-
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
         if module_id == [-1]:  # Handling the case of the full model
@@ -711,6 +637,54 @@ class DistributedModel(nn.Module):
             self.mpc_lock.release()
 
         return response["return"]
+
+    def _create_user_node(self):
+        """Create a UserNode instance if one wasn't provided."""
+        from tensorlink import UserNode
+
+        node = UserNode(upnp=True, off_chain_test=False, local_test=False)
+        # Allow time for node to initialize
+        time.sleep(3)
+        return node
+
+    def _initialize_distribution(self, optimizer_type=None):
+        """Initialize the distributed model."""
+        # Parse the model
+        model_parser = ModelParser(self.user_memory)
+
+        if optimizer_type is None and self.training:
+            optimizer_type = torch.optim.Adam
+
+        distribution = model_parser.create_distributed_config(
+            self.model, training=self.training, trusted=False, handle_layers=False
+        )
+
+        # Configure modules for distribution
+        for module_id, module in distribution.items():
+            if module["type"] == "offloaded":
+                if self.training:
+                    if optimizer_type is None:
+                        optimizer_type = torch.optim.Adam
+                    module["optimizer"] = (
+                        f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                    )
+                module["training"] = self.training
+
+        # Request job from network
+        distributed_config = self.node.send_request(
+            "request_job", (self.n_pipelines, 1, distribution), timeout=10
+        )
+
+        if not distributed_config:
+            raise RuntimeError("Could not obtain job from network... Please try again.")
+
+        # Distribute the model according to the configuration
+        self.distribute_model(distributed_config)
+
+        # Create an optimizer creation function
+        self.create_optimizer = lambda **kwargs: create_distributed_optimizer(
+            self, optimizer_type, **kwargs
+        )
 
 
 class OffloadedModule(nn.Module):

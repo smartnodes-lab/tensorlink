@@ -669,6 +669,7 @@ class Validator(TorchNode):
 
     def run(self):
         super().run()
+
         node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
         node_cleaner.start()
 
@@ -683,9 +684,17 @@ class Validator(TorchNode):
             )
             self.execution_listener.start()
 
+        counter = 0
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            time.sleep(3)
+            if counter % 300 == 0:
+                self.save_dht_state()
+            if counter % 60 == 0:
+                self.clean_node()
+                self.clean_port_mappings()
+
+            time.sleep(1)
+            counter += 1
 
     def stop(self):
         self.save_dht_state()
@@ -835,19 +844,9 @@ class Validator(TorchNode):
             for node in nodes_to_remove:
                 nodes.remove(node)
 
-        timer_count = 0
-
-        while not self.terminate_flag.is_set():
-            if timer_count % 300 == 0:
-                self.save_dht_state()
-
-            if timer_count % 60 == 0:
-                clean_nodes(self.workers)
-                clean_nodes(self.validators)
-                clean_nodes(self.users)
-
-            time.sleep(1)
-            timer_count += 1
-
             # TODO method / request to delete job after certain time or by request of the user.
             #   Perhaps after a job is finished there is a delete request
+
+        clean_nodes(self.workers)
+        clean_nodes(self.validators)
+        clean_nodes(self.users)
