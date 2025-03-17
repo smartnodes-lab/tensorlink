@@ -379,7 +379,7 @@ class SmartNode(threading.Thread):
             bool: True if pong processed successfully
         """
         if node.pinged > 0:
-            node.stats["ping"] = time.time() - node.pinged
+            node.ping = time.time() - node.pinged
             node.pinged = -1
         else:
             self.debug_print("Received pong with no corresponding ping", colour="red")
@@ -936,18 +936,24 @@ class SmartNode(threading.Thread):
     ) -> bool:
         """Finalize the node connection process"""
         if instigator:
-            self.debug_print(
-                f"Switching connection to new port: {node_address[0]}:{new_port}"
-            )
-            new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            new_sock.bind((self.host, our_port))
-            new_sock.connect((node_address[0], new_port))
-            new_sock.settimeout(3)
-            connection = new_sock
+            try:
+                self.debug_print(
+                    f"Switching connection to new port: {node_address[0]}:{new_port}"
+                )
+                time.sleep(1)
+                new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                new_sock.connect((node_address[0], new_port))
+                new_sock.settimeout(3)
+                connection = new_sock
+            except Exception as e:
+                self.debug_print(f"Port swap failed ({self.host}:{our_port}): {e}")
+                raise e
         else:
             self.debug_print(
                 f"SmartNode -> Listening for the instigator on the new port: {our_port}"
             )
+            time.sleep(1)
 
             # Create a new socket and bind to the selected port
             new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

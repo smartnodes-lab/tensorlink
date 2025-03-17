@@ -1,6 +1,7 @@
 """To be used as a sandbox for interacting with the main node framework"""
 
-from tensorlink import ValidatorNode
+from tensorlink import ValidatorNode, WorkerNode
+import logging
 import time
 
 
@@ -10,8 +11,8 @@ LOCAL = False
 
 
 if __name__ == "__main__":
-    node = ValidatorNode(
-        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=10
+    node = WorkerNode(
+        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
 
     while True:

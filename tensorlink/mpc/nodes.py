@@ -1,5 +1,4 @@
 import atexit
-import itertools
 import logging
 import multiprocessing
 import signal
@@ -7,13 +6,6 @@ import sys
 import threading
 import time
 
-import miniupnpc
-import torch
-
-from tensorlink.ml.graphing import handle_layers
-from tensorlink.ml.module import DistributedModel
-from tensorlink.ml.optim import create_distributed_optimizer
-from tensorlink.ml.utils import access_module
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.roles.user import User
 from tensorlink.roles.validator import Validator
@@ -218,95 +210,6 @@ class UserNode(BaseNode):
 
         except KeyboardInterrupt:
             node_instance.stop()
-
-    def create_distributed_model(
-        self,
-        model,
-        training,
-        n_pipelines=1,
-        optimizer_type=None,
-        trusted: bool = None,
-        dp_factor=None,
-    ):
-        # stop_spinner = threading.Event()
-        # spinner_thread = threading.Thread(target=show_spinner, args=(stop_spinner, "Creating distributed model"))
-
-        try:
-            # Start the spinner
-            # spinner_thread.start()
-            if trusted is None:
-                trusted = self.trusted
-
-            dist_model = DistributedModel(
-                self.node_requests,
-                self.node_responses,
-                self.mpc_lock,
-                model,
-                n_pipelines,
-                trusted=trusted,
-            )
-            # self.send_request("request_workers", None)
-            # time.sleep(3)
-            # workers = self.send_request("check_workers", None)
-            # if len(workers) == 0:
-            #     self.send_request("request_workers", None)
-            #     time.sleep(5)
-            #     workers = self.send_request("check_workers", None)
-
-            if optimizer_type is None:
-                optimizer_type = torch.optim.Adam
-
-            # attempts = 0
-            # n_validators = self.send_request("check_validators", None)
-            #
-            # while attempts < 3 and n_validators <= 0:
-            #     time.sleep(3)
-            #
-            # if n_validators <= 0:
-            #     print("Could not obtain job from network... Please try again.")
-            #     return False
-
-            # dist_model.worker_info = workers
-            # if len(workers) == 0:
-            #     self.send_request("debug_print", (
-            #         "Job creation failed: network at capacity (not enough workers)!", "bright_red", logging.CRITICAL))
-            #     return None, None
-
-            dist_model.training = training
-            distribution = dist_model.parse_model(model, handle_layer=False)
-
-            if training:
-                for module_id, module in distribution.items():
-                    if module["type"] == "offloaded":
-                        module["optimizer"] = (
-                            f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                        )
-                        module["training"] = training
-
-            distributed_config = self.send_request(
-                "request_job", (n_pipelines, 1, distribution), timeout=10
-            )
-
-            if not distributed_config:
-                print("Could not obtain job from network... Please try again.")
-                return False
-
-            dist_model.distribute_model(distributed_config)
-
-            def _create_distributed_optimizer(**optimizer_kwargs):
-                return create_distributed_optimizer(
-                    dist_model, optimizer_type, **optimizer_kwargs
-                )
-
-            setattr(self, "distributed_model", dist_model)
-
-            return dist_model, _create_distributed_optimizer
-
-        finally:
-            pass
-            # Stop the spinner
-            # stop_spinner.set()
-            # spinner_thread.join()
 
     def cleanup(self):
         """Downloads parameters from workers before shutting down"""

@@ -63,25 +63,33 @@ class User(TorchNode):
         #     ):
         #         time.sleep(5)
 
-        if not self.off_chain_test:
+        if self.off_chain_test is False:
             self.public_key = get_key(".env", "PUBLIC_KEY")
+            if not self.public_key:
+                self.debug_print(
+                    "Public key not found in .env file, using donation wallet..."
+                )
+                self.public_key = "0x1Bc3a15dfFa205AA24F6386D959334ac1BF27336"
+
             self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-            # attempts = 0
-            # self.debug_print("Bootstrapping...")
-            # while attempts < 3 and len(self.validators) == 0:
-            #     self.bootstrap()
-            #     if len(self.validators) == 0:
-            #         time.sleep(15)
-            #         self.debug_print("No validators found, trying again...")
-            #         attempts += 1
-            #
-            # if len(self.validators) == 0:
-            #     self.debug_print(
-            #         "No validators found, shutting down...", level=logging.CRITICAL
-            #     )
-            #     self.stop()
-            #     self.terminate_flag.set()
+            if self.local_test is False:
+                attempts = 0
+
+                self.debug_print("Bootstrapping...")
+                while attempts < 3 and len(self.validators) == 0:
+                    self.bootstrap()
+                    if len(self.validators) == 0:
+                        time.sleep(15)
+                        self.debug_print("No validators found, trying again...")
+                        attempts += 1
+
+                if len(self.validators) == 0:
+                    self.debug_print(
+                        "No validators found, shutting down...", level=logging.CRITICAL
+                    )
+                    self.stop()
+                    self.terminate_flag.set()
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """

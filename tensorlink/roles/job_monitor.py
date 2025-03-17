@@ -22,6 +22,12 @@ class JobStatus(Enum):
     COMPLETED = "completed"
 
 
+class ResourceUsage(Enum):
+    FREE = "free"
+    PAID = "paid"
+    SUSPENDED = "suspended"
+
+
 @dataclass
 class WorkerHealth:
     last_seen: float
@@ -30,6 +36,23 @@ class WorkerHealth:
     metrics: Dict
     last_proof: Dict
     proof_history: List[Dict]
+
+
+@dataclass
+class ResourceUsageTracker:
+    user_id: str
+    job_id: str
+    resource_type: ResourceUsage = ResourceUsage.FREE
+    usage_start_time: float = 0.0
+    total_gpu_hours_used: float = 0.0
+    total_gpu_memory_gb: float = 0.0
+    daily_quota_reset_time: float = 0.0
+    daily_usage_gb_hours: float = 0.0
+    free_quota_gb_hours: float = 48.0  # Default 48 GB-hours per day
+    cost_per_gb_hour: float = 0.10  # $0.10 per GB-hour
+    total_cost: float = 0.0
+    last_billing_time: float = 0.0
+    billing_increment_hours: float = 0.1  # Bill every 6 minutes
 
 
 def calculate_gradient_hash(gradients: List[np.ndarray]) -> bytes:
@@ -92,6 +115,8 @@ class JobMonitor:
         self.JOB_OFFLINE_THRESHOLD_SECONDS = 120
         self.HEALTH_CHECK_INTERVAL_SECONDS = 30
         self.PROOF_OF_WORK_INTERVAL = 5
+        self.RESOURCE_UPDATE_INTERVAL_SECONDS = 60
+        self.BILLING_CYCLE_SECONDS = 360
 
     def monitor_job(self, job_id: str):
         """Monitor job progress and workers asynchronously."""
@@ -310,6 +335,8 @@ class JobMonitor:
         if not worker_status:
             return JobStatus.PENDING_OFFLINE
 
+        # TODO Proof of learning
+
         return JobStatus.ACTIVE
 
     def _check_user_status(self, job_data: Dict) -> bool:
@@ -385,12 +412,9 @@ class JobMonitor:
                 level=logging.INFO,
             )
 
-            # Update job to contract if a certain threshold of work was done
-            if (
-                job_data["timestamp"] - job_data["last_seen"] > 180
-                and job_data["gigabyte_hours"] > 5e8
-            ):
-                self.node.contract_manager.jobs_to_complete.append(job_data)
+            # Pass over job to contract manager
+            if self.node.contract_manager:
+                self.node.contract_manager.add_job_to_complete(job_data)
 
         except Exception as e:
             self.node.debug_print(
