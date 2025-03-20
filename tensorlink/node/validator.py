@@ -1,7 +1,7 @@
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import TorchNode
-from tensorlink.roles.contract_manager import ContractManager
-from tensorlink.roles.job_monitor import JobMonitor
+from tensorlink.node.contract_manager import ContractManager
+from tensorlink.node.job_monitor import JobMonitor
 
 from dotenv import get_key
 import hashlib
@@ -82,7 +82,7 @@ class Validator(TorchNode):
         self.execution_listener = None
 
         if off_chain_test is False:
-            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if self.public_key is None:
                 self.debug_print("Public key not found in .env file, terminating...")
                 self.terminate_flag.set()

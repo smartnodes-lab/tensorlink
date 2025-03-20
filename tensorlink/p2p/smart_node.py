@@ -49,7 +49,7 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(base_dir, "../config")
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCore.json")
 MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesMultiSig.json")
-API = get_key(".env", "API")
+API = get_key(".tensorlink.env", "API")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
@@ -1156,7 +1156,7 @@ class SmartNode(threading.Thread):
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         # Check for prior port usage (best to maintain same port for simple bootstrapping)
-        port = get_key(".env", self.rsa_key_hash)
+        port = get_key(".tensorlink.env", self.rsa_key_hash)
         if port is None or not port:
             # If no port is found, get the next available one
             port = self._get_next_port()
@@ -1182,7 +1182,7 @@ class SmartNode(threading.Thread):
         self.sock.listen(5)
 
         # Update the port in the config if necessary
-        set_key(".env", self.rsa_key_hash, str(port))
+        set_key(".tensorlink.env", self.rsa_key_hash, str(port))
 
     def _init_upnp(self) -> None:
         """Enables UPnP on main socket to allow connections"""

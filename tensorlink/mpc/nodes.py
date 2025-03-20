@@ -7,9 +7,9 @@ import threading
 import time
 
 from tensorlink.ml.worker import DistributedWorker
-from tensorlink.roles.user import User
-from tensorlink.roles.validator import Validator
-from tensorlink.roles.worker import Worker
+from tensorlink.node.user import User
+from tensorlink.node.validator import Validator
+from tensorlink.node.worker import Worker
 
 
 def spinning_cursor():
@@ -35,7 +35,6 @@ def show_spinner(stop_event, message="Processing"):
     sys.stdout.flush()
 
 
-# Set the start method to 'spawn'
 multiprocessing.set_start_method("spawn", force=True)
 
 
@@ -69,7 +68,7 @@ class BaseNode:
         self._stop_event = multiprocessing.Event()
         self._setup_signal_handlers()
         self._initialized = True
-        self.setup()
+        self.start()
 
     def _setup_signal_handlers(self):
         """
@@ -87,11 +86,9 @@ class BaseNode:
         for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGQUIT]:
             signal.signal(sig, handler)
 
-    def setup(self):
+    def start(self):
         self.node_process = multiprocessing.Process(target=self.run_role, daemon=True)
         self.node_process.start()
-
-        # while not self.send_request()
 
     def cleanup(self):
         # Process cleanup

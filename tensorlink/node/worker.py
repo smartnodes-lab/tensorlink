@@ -44,7 +44,6 @@ class Worker(TorchNode):
         self.role = "W"
         self.print_level = print_level
         self.loss = None
-        self.public_key = get_key(".env", "PUBLIC_KEY")
         self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
         self.debug_print(
@@ -55,7 +54,7 @@ class Worker(TorchNode):
         self.total_memory = self.available_memory
 
         if self.off_chain_test is False:
-            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if not self.public_key:
                 self.debug_print(
                     "Public key not found in .env file, using donation wallet..."

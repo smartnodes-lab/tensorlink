@@ -28,8 +28,6 @@ eth-utils==5.0.0
 eth_abi==5.1.0
 filelock==3.16.1
 findimports==2.5.1
-Flask==3.0.3
-Flask-Cors==5.0.0
 fonttools==4.54.1
 frozenlist==1.4.1
 fsspec==2024.6.1
