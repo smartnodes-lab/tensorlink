@@ -1,6 +1,6 @@
-from tensorlink.roles.user import User
-from tensorlink.roles.validator import Validator
-from tensorlink.roles.worker import Worker
+from tensorlink.node.user import User
+from tensorlink.node.validator import Validator
+from tensorlink.node.worker import Worker
 
 from multiprocessing import Queue
 import pytest
