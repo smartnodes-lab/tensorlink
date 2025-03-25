@@ -5,9 +5,9 @@ from tensorlink.crypto.rsa import (
     get_rsa_pub_key,
 )
 from tensorlink.p2p.connection import Connection
+from tensorlink.p2p.monitor import ConnectionMonitor
 
 from logging.handlers import TimedRotatingFileHandler
-from collections import defaultdict
 from dotenv import get_key, set_key
 from typing import Tuple, Union
 from miniupnpc import UPnP
@@ -234,11 +234,11 @@ class SmartNode(threading.Thread):
         # Connection Settings
         self.upnp = None
         self.nodes = {}  # node hash: Connection
-        self.rate_limit = defaultdict(
-            lambda: {"attempts": 0, "last_attempt": 0, "blocked_until": 0}
-        )
         self.max_attempts_per_minute = 5
         self.block_duration = 600
+        self.rate_limiter = ConnectionMonitor(
+            self.max_attempts_per_minute, self.block_duration
+        )
 
         self.debug_colour = None
         if debug_colour:
@@ -653,36 +653,6 @@ class SmartNode(threading.Thread):
 
         return bucket_index
 
-    def is_blocked(self, ip_address):
-        """Check if an IP address is currently blocked."""
-        current_time = int(time.time())
-        block_info = self.rate_limit[ip_address]
-        if block_info["blocked_until"] > current_time:
-            return True
-        return False
-
-    def _record_attempt(self, ip_address):
-        """Record a connection attempt for an IP address."""
-        current_time = time.time()
-        block_info = self.rate_limit[ip_address]
-
-        # Reset the attempt count if the last attempt was over a minute ago
-        if current_time - block_info["last_attempt"] > 60:
-            self.rate_limit[ip_address] = {
-                "attempts": 0,
-                "last_attempt": 0,
-                "blocked_until": 0,
-            }
-
-        self.rate_limit[ip_address]["attempts"] += 1
-        self.rate_limit[ip_address]["last_attempt"] = current_time
-
-        # Block the IP if it exceeds the limit
-        if self.rate_limit[ip_address]["attempts"] > self.max_attempts_per_minute:
-            self.rate_limit[ip_address]["blocked_until"] = (
-                current_time + self.block_duration
-            )
-
     """Peer-to-peer methods"""
 
     def _listen(self):
@@ -697,14 +667,14 @@ class SmartNode(threading.Thread):
                 ip_address = node_address[0]
 
                 # Check rate limiting
-                if self.is_blocked(ip_address):
+                if self.rate_limiter.is_blocked(ip_address):
                     self.close_connection(
                         connection,
                         f"listen: connection refused, rate limit exceeded for {ip_address}",
                     )
                     continue
 
-                self._record_attempt(ip_address)
+                self.rate_limiter.record_attempt(ip_address)
 
                 # Attempt custom handshake
                 if self.max_connections == 0 or len(self.nodes) < self.max_connections:
