@@ -13,8 +13,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import optimization as hf_optim
+from huggingface_hub import HfApi
 from transformers.utils import ModelOutput
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class MemoryType(Enum):
@@ -313,6 +314,59 @@ def format_memory_size(number: int) -> str:
             return f"{number:.2f} {unit}"
         number /= 1024
     return f"{number:.2f} TB"
+
+
+def estimate_hf_model_memory(
+    model_name: str,
+    batch_size: int = 32,
+    dtype: torch.dtype = torch.float32,
+    optimizer_type: str = "adam",
+    precision: str = "fp32",
+    seq_length: int = 256,
+    training: bool = True,
+) -> Tuple[float, float]:
+    api = HfApi()
+
+    try:
+        model_info = api.model_info(repo_id=model_name)
+
+        # Extract model size (if available)
+        num_params = model_info.safetensors.get("parameters", {}).get("F16", 0) // 2
+        dtype_size = {"fp32": 4, "fp16": 2, "int8": 1}.get(precision, 4)
+        param_memory = num_params * dtype_size
+        activation_memory = batch_size * seq_length * dtype_size * 4
+        total_vram = param_memory + activation_memory
+
+        if training:
+            optimizer_memory = param_memory * 2
+            total_vram += optimizer_memory
+
+        total_ram = 1.2 * num_params * dtype_size
+
+        return total_vram, total_ram
+
+    except Exception as e:
+        print(f"Error fetching model info: {e}")
+        return 0, 0
+
+
+def get_hf_model(model_name: str, tokenizer: bool = False):
+    api = HfApi()
+    try:
+        # Get model information from Hugging Face api
+        model = AutoModelForCausalLM.from_pretrained(model_name)
+
+        if tokenizer:
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        else:
+            tokenizer = None
+
+        return model, tokenizer
+
+    except Exception as e:
+        # TODO route error to validator for reporting
+        return
 
 
 distributed_module_ids = []

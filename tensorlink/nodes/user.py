@@ -151,8 +151,10 @@ class User(TorchNode):
 
         if req["type"] == "request_job":
             assert self.role == "U", "Must be user to request a job!"
-            n_pipelines, dp_factor, distribution = req["args"]
-            dist_config = self.request_job(n_pipelines, dp_factor, distribution)
+            n_pipelines, dp_factor, distribution, training = req["args"]
+            dist_config = self.request_job(
+                n_pipelines, dp_factor, distribution, training
+            )
             self.response_queue.put({"status": "SUCCESS", "return": dist_config})
 
         elif req["type"] == "request_workers":
@@ -217,7 +219,7 @@ class User(TorchNode):
             )
             raise e
 
-    def request_job(self, n_pipelines, dp_factor, distribution):
+    def request_job(self, n_pipelines, dp_factor, distribution, training):
         """Request job through smart contract and set up the relevant connections for a distributed model.
         Returns a distributed nn.Module with built-in RPC calls to workers."""
         # Commented out code as user contract interactions will come later
@@ -308,7 +310,9 @@ class User(TorchNode):
         job_request = {
             "author": self.rsa_key_hash,
             "active": True,
+            "hosted": False,
             "capacity": capacity,
+            "payment": 0,
             "n_pipelines": n_pipelines,
             "dp_factor": dp_factor,
             "distribution": distribution,

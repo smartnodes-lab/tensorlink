@@ -29,7 +29,14 @@ from transformers import (
     AutoModelForVision2Seq,
 )
 
-from tensorlink.ml.utils import *
+from tensorlink.ml.utils import (
+    get_optimizer_from_name,
+    bytes_to_tensor,
+    tensor_to_bytes,
+    detach_tensor,
+    attach_tensor,
+    handle_output,
+)
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
