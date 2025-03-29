@@ -1,6 +1,6 @@
-from tensorlink.roles.user import User
-from tensorlink.roles.validator import Validator
-from tensorlink.roles.worker import Worker
+from tensorlink.nodes.user import User
+from tensorlink.nodes.validator import Validator
+from tensorlink.nodes.worker import Worker
 
 # from tensorlink.ml.
 

@@ -23,7 +23,7 @@ from transformers import (
     BertTokenizer,
 )
 
-from tensorlink import UserNode, ValidatorNode, WorkerNode
+from tensorlink import UserNode, DistributedModel
 
 # Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
 LOCAL = False
@@ -50,13 +50,15 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # User requests a distributed model and optimizer from a validator
-    distributed_model, distributed_optimizer = user.create_distributed_model(
-        model=model, training=True, optimizer_type=torch.optim.Adam
+    distributed_model = DistributedModel(
+        model=model, optimizer_type=torch.optim.Adam, node=user
     )
     del model  # Free up some space
 
     # Initialize distributed optimizer
-    distributed_optimizer = distributed_optimizer(lr=0.001, weight_decay=0.01)
+    distributed_optimizer = distributed_model.create_optimizer(
+        lr=0.001, weight_decay=0.01
+    )
 
     # Run a dummy training loop
     distributed_model.train()

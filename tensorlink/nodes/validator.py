@@ -1,16 +1,20 @@
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import TorchNode
-from tensorlink.roles.contract_manager import ContractManager
-from tensorlink.roles.job_monitor import JobMonitor
+from tensorlink.nodes.contract_manager import ContractManager
+from tensorlink.nodes.job_monitor import JobMonitor
+from tensorlink.ml.utils import estimate_hf_model_memory
 
-from dotenv import get_key
-import hashlib
-import json
-import logging
-import os
-import threading
-import time
+# from tensorlink.api.node import
+
 from collections import Counter
+from dotenv import get_key
+import threading
+import hashlib
+import logging
+import queue
+import json
+import time
+import os
 
 
 STATE_FILE = "logs/dht_state.json"
@@ -20,12 +24,13 @@ LATEST_STATE_FILE = "logs/latest_state.json"
 def assert_job_req(job_req: dict, node_id):
     required_keys = [
         "author",
-        "capacity",
         "active",
+        "hosted",
+        "capacity",
+        "payment",
         "n_pipelines",
         "dp_factor",
         "distribution",
-        "id",
         "n_workers",
         "seed_validators",
     ]
@@ -82,7 +87,7 @@ class Validator(TorchNode):
         self.execution_listener = None
 
         if off_chain_test is False:
-            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if self.public_key is None:
                 self.debug_print("Public key not found in .env file, terminating...")
                 self.terminate_flag.set()
@@ -102,6 +107,7 @@ class Validator(TorchNode):
                     self.multi_sig_contract.functions.nextProposalId.call()
                 )
                 # self.bootstrap()
+
             else:
                 self.debug_print(
                     "Validator is inactive on SmartnodesMultiSig or has a different RSA "
@@ -199,7 +205,7 @@ class Validator(TorchNode):
             stats = json.loads(data[14:])
             self.requests[node.node_id].remove(b"STATS")
             self.nodes[node.node_id].stats = stats
-            self.worker_memories[node.node_id] = stats["memory"]
+            self.worker_memories[node.node_id] = stats["gpu_memory"]
 
     def _handle_worker_aggregation_response(self, data: bytes, node: Connection):
         if (
@@ -221,8 +227,142 @@ class Validator(TorchNode):
             )
             t.start()
 
-    def _handle_job_req(self, data: bytes, node: Connection):
+    def handle_requests(self, request=None):
+        """Handles interactions between model and node process"""
+        try:
+            if request is None:
+                try:
+                    request = self.request_queue.get(timeout=3)
+                except queue.Empty:
+                    return
 
+            req_type = request.get("type")
+
+            if not req_type:
+                self.response_queue.put(
+                    {"status": "FAILURE", "error": "Invalid request type"}
+                )
+                return
+
+            handlers = {
+                "get_jobs": self._handle_get_jobs,
+                "send_job": self._handle_send_job,
+            }
+
+            handler = handlers.get(req_type)
+
+            if handler:
+                handler(request)
+            else:
+                super().handle_requests(request)
+
+        except Exception as e:
+            self.response_queue.put({"status": "FAILURE", "error": str(e)})
+
+    def _handle_get_jobs(self, request):
+        """Check if we have received any job requests for fully hosted / api jobs and relay that
+        information back to the DistributedValidator process"""
+        try:
+            # Check for API job requests for this node
+            if self.rsa_key_hash in self.requests:
+                job_req = next(
+                    (
+                        v
+                        for v in self.requests[self.rsa_key_hash]
+                        if v.startswith("API-JOB-REQ")
+                    ),
+                    None,
+                )
+
+                if job_req:
+                    # Parse the job data
+                    job_data = json.loads(job_req[11:])
+
+                    # Remove the request
+                    self._remove_request(self.rsa_key_hash, job_req)
+
+                    # Return with a 'return' key as expected by send_request
+                    self.response_queue.put({"status": "SUCCESS", "return": job_data})
+                else:
+                    # No jobs found
+                    self.response_queue.put({"status": "SUCCESS", "return": None})
+            else:
+                # No requests for this node
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+        except Exception as e:
+            # Handle any unexpected errors
+            self.response_queue.put({"status": "FAILURE", "error": str(e)})
+
+    def _handle_send_job(self, job_data: dict):
+        distribution = job_data.get("distribution", {})
+
+        if distribution:
+            worker = distribution
+
+            # # Send the updated job data with worker info to the user
+            # self.send_to_node(
+            #     requesting_node,
+            #     b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode(),
+            # )
+            #
+            # self.jobs.append(job_id)
+            #
+            # for module, module_info in job_data["distribution"].items():
+            #     # Remove worker info and just replace with id
+            #     worker_ids = list(a[0] for a in module_info["workers"])
+            #     module_info["workers"] = worker_ids
+            #
+            # job_data["timestamp"] = time.time()
+            # job_data["last_seen"] = time.time()
+            #
+            # self.store_value(job_id, job_data)
+            #
+            # # Start monitor_job as a background task and store it in the list
+            # job_monitor = JobMonitor(self)
+            # t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
+            # t.start()
+
+    def request_api_job(self, job_info: dict, requesters_ip: str):
+        # Rate limitation checks
+        if self.rate_limiter.is_blocked(requesters_ip):
+            return False
+
+        self.rate_limiter.record_attempt(requesters_ip)
+
+        # Huggingface model info checks
+        (vram, ram) = estimate_hf_model_memory(
+            job_info.get("model_name"), training=False
+        )
+
+        if job_info.get("payment", 0) == 0:
+            _time = 0.25
+        else:
+            _time = job_info.get("time")
+
+        job_data = {
+            "id": hashlib.sha256(json.dumps(job_info).encode()).hexdigest(),
+            "author": requesters_ip,
+            "active": False,
+            "hosted": True,
+            "ram": ram,
+            "vram": vram,
+            "time": _time,
+            "payment": job_info.get("payment", 0),
+            "n_pipelines": 1,
+            "dp_factor": 1,
+            "distribution": {},
+            "n_workers": 0,
+            "seed_validators": [self.rsa_key_hash],
+            "model_name": job_info.get(
+                "model_name"
+            ),  # Include model name for distribution
+        }
+
+        # Hand off model dissection and worker assignment to DistributedValidator and downstream methods
+        request_value = "API-JOB-REQ" + json.dumps(job_data)
+        self._store_request(self.rsa_key_hash, request_value)
+
+    def _handle_job_req(self, data: bytes, node: Connection):
         self.debug_print(
             f"Validator -> User: {node.node_id} requested job.",
             colour="bright_blue",
@@ -245,9 +385,8 @@ class Validator(TorchNode):
 
             if node.role != "U" or not node_info or node_info["reputation"] < 50:
                 node.ghosts += 1
-
             else:
-                threading.Thread(target=self.create_job, args=(job_req,)).start()
+                threading.Thread(target=self.create_base_job, args=(job_req,)).start()
 
     def _handle_decline_job(self, data: bytes, node: Connection):
         self.debug_print(
@@ -371,11 +510,15 @@ class Validator(TorchNode):
 
         return assigned_workers
 
-    def create_job(self, job_data: dict):
+    def create_base_job(self, job_data: dict):
         modules = job_data["distribution"].copy()
         job_id = job_data["id"]
         author = job_data["author"]
         n_pipelines = job_data["n_pipelines"]
+
+        if job_data.get("hosted", False):
+            pass
+
         requesting_node = self.nodes[author]
 
         # Check network availability for job request
@@ -414,6 +557,7 @@ class Validator(TorchNode):
                             worker_id,
                             module["name"],
                             module["optimizer"],
+                            module["training"],
                         ):
                             worker_assignment.append(
                                 worker_id
@@ -478,17 +622,27 @@ class Validator(TorchNode):
         module_size: int,
         worker_id: str,
         module_name: str,
-        optimizer_name: str,
+        optimizer_name: str = None,
+        training: bool = False,
+        is_api_job: bool = False,
     ) -> bool:
         data = json.dumps(
-            [user_id, job_id, module_id, module_size, module_name, optimizer_name]
+            [
+                user_id,
+                job_id,
+                module_id,
+                module_size,
+                module_name,
+                optimizer_name,
+                training,
+            ]
         )
         data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
 
         # Check worker's available memory
         worker_stats = node.stats
-        if worker_stats["memory"] < module_size:
+        if worker_stats["gpu_memory"] < module_size:
             return False
 
         self._store_request(node.node_id, job_id + module_id)
@@ -501,7 +655,7 @@ class Validator(TorchNode):
                 return False
 
         # Worker accepted the job, update stats
-        node.stats["memory"] -= module_size
+        node.stats["gpu_memory"] -= module_size
         job = self.query_dht(job_id)
         job["distribution"][module_id]["workers"] = node.node_id
 
@@ -692,6 +846,11 @@ class Validator(TorchNode):
             if counter % 60 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
+            if counter % 30 == 0:
+                self.request_api_job(
+                    {"model_name": "bert-base-uncased", "time": 0.25, "payment": 0},
+                    "127.0.0.1",
+                )
 
             time.sleep(1)
             counter += 1

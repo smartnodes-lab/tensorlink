@@ -7,9 +7,10 @@ import threading
 import time
 
 from tensorlink.ml.worker import DistributedWorker
-from tensorlink.roles.user import User
-from tensorlink.roles.validator import Validator
-from tensorlink.roles.worker import Worker
+from tensorlink.ml.validator import DistributedValidator
+from tensorlink.nodes.user import User
+from tensorlink.nodes.validator import Validator
+from tensorlink.nodes.worker import Worker
 
 
 def spinning_cursor():
@@ -35,7 +36,6 @@ def show_spinner(stop_event, message="Processing"):
     sys.stdout.flush()
 
 
-# Set the start method to 'spawn'
 multiprocessing.set_start_method("spawn", force=True)
 
 
@@ -69,7 +69,7 @@ class BaseNode:
         self._stop_event = multiprocessing.Event()
         self._setup_signal_handlers()
         self._initialized = True
-        self.setup()
+        self.start()
 
     def _setup_signal_handlers(self):
         """
@@ -87,11 +87,9 @@ class BaseNode:
         for sig in [signal.SIGINT, signal.SIGTERM, signal.SIGQUIT]:
             signal.signal(sig, handler)
 
-    def setup(self):
+    def start(self):
         self.node_process = multiprocessing.Process(target=self.run_role, daemon=True)
         self.node_process.start()
-
-        # while not self.send_request()
 
     def cleanup(self):
         # Process cleanup
@@ -110,7 +108,7 @@ class BaseNode:
             self.node_process.join()
             self.node_process = None  # Reset to None after cleanup
 
-    def send_request(self, request_type, args, timeout=3):
+    def send_request(self, request_type, args, timeout=5):
         """
         Sends a request to the roles and waits for the response.
         """
@@ -165,8 +163,8 @@ class WorkerNode(BaseNode):
         except KeyboardInterrupt:
             node_instance.stop()
 
-    def setup(self):
-        super().setup()
+    def start(self):
+        super().start()
         distributed_worker = DistributedWorker(
             self.node_requests, self.node_responses, self.mpc_lock, trusted=self.trusted
         )
@@ -195,6 +193,15 @@ class ValidatorNode(BaseNode):
 
         except KeyboardInterrupt:
             node_instance.stop()
+
+    def start(self):
+        super().start()
+        distributed_validator = DistributedValidator(
+            self.node_requests, self.node_responses, self.mpc_lock
+        )
+        t = threading.Thread(target=distributed_validator.run, daemon=True)
+        t.start()
+        time.sleep(3)
 
 
 class UserNode(BaseNode):

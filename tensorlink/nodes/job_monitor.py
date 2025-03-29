@@ -4,7 +4,7 @@ from tensorlink.ml.proofs import MLProofOfWork
 from typing import TYPE_CHECKING, Dict, Optional, List, Tuple
 from cryptography.hazmat.primitives import hashes
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 import numpy as np
 import logging
@@ -108,6 +108,7 @@ class JobMonitor:
         self.terminate_flag = node.terminate_flag
         self.worker_health_checks: Dict[str, WorkerHealth] = {}
         self.ml_pow = MLProofOfWork()
+        self.resource_tracker = None
 
         # Configuration parameters
         self.WORKER_TIMEOUT_SECONDS = 60
@@ -132,6 +133,29 @@ class JobMonitor:
             return
 
         job_status = JobStatus.ACTIVE
+
+        current_date = datetime.fromtimestamp(time.time())
+        next_midnight = datetime(
+            year=current_date.year,
+            month=current_date.month,
+            day=current_date.day,
+            hour=0,
+            minute=0,
+            second=0,
+        ) + timedelta(
+            days=1
+        )  # Add one day to get to the next midnight
+
+        midnight_timestamp = next_midnight.timestamp()
+
+        self.resource_tracker = ResourceUsageTracker(
+            user_id=job_data.get("author"),
+            job_id=job_id,
+            resource_type=ResourceUsage.FREE,
+            usage_start_time=time.time(),
+            total_gpu_memory_gb=job_data.get("capacity", 0),
+            daily_quota_reset_time=midnight_timestamp,
+        )
 
         try:
             while not self.terminate_flag.is_set():
@@ -161,6 +185,22 @@ class JobMonitor:
 
         finally:
             self._cleanup_job(job_data, job_status)
+
+    def _check_job_health(self, job_id: str, job_data: Dict) -> JobStatus:
+        """Comprehensive health check of the job and its components."""
+        # Check user connection
+        user_status = self._check_user_status(job_data)
+        if not user_status:
+            return JobStatus.PENDING_OFFLINE
+
+        # Check worker health
+        worker_status = self._check_workers_health(job_data)
+        if not worker_status:
+            return JobStatus.PENDING_OFFLINE
+
+        # TODO Proof of learning
+
+        return JobStatus.ACTIVE
 
     def _check_single_worker(self, worker: str, module_id: str) -> bool:
         """Enhanced worker check with ML proof of work verification."""
@@ -322,22 +362,6 @@ class JobMonitor:
                 level=logging.ERROR,
             )
             return None
-
-    def _check_job_health(self, job_id: str, job_data: Dict) -> JobStatus:
-        """Comprehensive health check of the job and its components."""
-        # Check user connection
-        user_status = self._check_user_status(job_data)
-        if not user_status:
-            return JobStatus.PENDING_OFFLINE
-
-        # Check worker health
-        worker_status = self._check_workers_health(job_data)
-        if not worker_status:
-            return JobStatus.PENDING_OFFLINE
-
-        # TODO Proof of learning
-
-        return JobStatus.ACTIVE
 
     def _check_user_status(self, job_data: Dict) -> bool:
         """Verify user connection and job activity status."""

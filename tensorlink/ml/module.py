@@ -104,6 +104,7 @@ class DistributedModel(nn.Module):
         dtype: torch.dtype = torch.float32,
         trusted: bool = False,
         node: Optional[Any] = None,
+        training: bool = True,
         verbose: bool = False,
     ):
         """
@@ -143,6 +144,7 @@ class DistributedModel(nn.Module):
         # Optimizer and scheduler placeholders
         self.optimizer = None
         self.scheduler = None
+        self.training = training
 
         # Trusted execution mode
         self.trusted = trusted
@@ -672,7 +674,9 @@ class DistributedModel(nn.Module):
 
         # Request job from network
         distributed_config = self.node.send_request(
-            "request_job", (self.n_pipelines, 1, distribution), timeout=10
+            "request_job",
+            (self.n_pipelines, 1, distribution, self.training),
+            timeout=10,
         )
 
         if not distributed_config:

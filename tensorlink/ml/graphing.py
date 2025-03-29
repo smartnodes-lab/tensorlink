@@ -2,7 +2,6 @@ import hashlib
 import random
 
 import torch.nn as nn
-from huggingface_hub import HfApi
 from transformers import PreTrainedModel
 
 from tensorlink.ml.utils import estimate_memory
@@ -132,7 +131,7 @@ def handle_layer(
 
 
 class ModelParser:
-    def __init__(self, user_memory: int):
+    def __init__(self, user_memory: int = 0):
         self.user_memory = user_memory
         self.gpu_sizes = [1e9, 2e9, 4e9, 8e9, 12e9, 16e9, 24e9]
 
@@ -224,7 +223,7 @@ class ModelParser:
             #             self.user_memory -= submodule_memory
             #             k, v = create_loaded(submodule, new_ids, submodule_memory)
             #             config[k] = v
-            #             data_obfuscation = False
+            #             data_obfuscation = Falsei8
             #
             #         # Else we break down the model even further
             #         else:

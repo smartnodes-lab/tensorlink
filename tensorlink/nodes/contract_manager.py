@@ -355,7 +355,7 @@ class ContractManager:
             total_capacities = [
                 int(
                     sum(
-                        worker["total_memory"]
+                        worker["total_gpu_memory"]
                         for worker in self.node.all_workers.values()
                     )
                 )

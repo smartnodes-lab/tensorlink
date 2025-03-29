@@ -3,7 +3,7 @@ import os
 from setuptools import find_packages, setup
 
 # Version of the package
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 # Description of the package
 DESCRIPTION = (
@@ -49,7 +49,7 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_packages(),  # Automatically find packages in the current directory
     include_package_data=True,
-    exclude_package_data={"": [".env"]},
+    exclude_package_data={"": [".env", ".tensorlink.env"]},
     install_requires=parse_requirements(
         "requirements.txt"
     ),  # Read dependencies from requirements.txt

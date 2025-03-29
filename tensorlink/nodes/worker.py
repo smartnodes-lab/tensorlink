@@ -5,6 +5,7 @@ from tensorlink.p2p.torch_node import TorchNode
 import torch
 import torch.nn as nn
 from dotenv import get_key
+import psutil
 import hashlib
 import json
 import logging
@@ -44,18 +45,18 @@ class Worker(TorchNode):
         self.role = "W"
         self.print_level = print_level
         self.loss = None
-        self.public_key = get_key(".env", "PUBLIC_KEY")
         self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
         self.debug_print(
             f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
             level=logging.INFO,
         )
-        self.available_memory = get_gpu_memory()
-        self.total_memory = self.available_memory
+        self.available_gpu_memory = get_gpu_memory()
+        self.total_gpu_memory = self.available_gpu_memory
+        self.available_ram = psutil.virtual_memory().available
 
         if self.off_chain_test is False:
-            self.public_key = get_key(".env", "PUBLIC_KEY")
+            self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if not self.public_key:
                 self.debug_print(
                     "Public key not found in .env file, using donation wallet..."
@@ -112,6 +113,9 @@ class Worker(TorchNode):
                 elif b"JOB-REQ" == data[:7]:
                     self._handle_job_req(data, node)
 
+                elif b"API-JOB-REQ" == data[:11]:
+                    self._handle_api_job_req(data, node)
+
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
@@ -160,20 +164,67 @@ class Worker(TorchNode):
                     module_size,
                     module_name,
                     optimizer_name,
+                    training,
                 ) = json.loads(data[7:])
 
-                if self.available_memory >= module_size:  # TODO Ensure were active?
+                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
                     # Respond to validator that we can accept the job
                     if module_name is None:
                         module_name = ""
 
                     # Store a request to wait for the user connection
                     self._store_request(user_id, module_id + module_name)
-                    self._store_request(user_id, "OPTIMIZER" + optimizer_name)
+
+                    if training:
+                        self._store_request(user_id, "OPTIMIZER" + optimizer_name)
+
                     data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
 
                     # Update available memory
-                    self.available_memory -= module_size
+                    self.available_gpu_memory -= module_size
+
+                else:
+                    data = b"DECLINE-JOB"
+
+            else:
+                node.stop()
+
+            self.send_to_node(node, data)
+
+        except Exception as e:
+            print(data)
+            print(node.main_port)
+            raise e
+
+    def _handle_api_job_req(self, data: bytes, node: Connection):
+        try:
+            if node.role == "V":
+                # Accept job request from validator if we can handle it
+                (
+                    user_id,
+                    job_id,
+                    module_id,
+                    module_size,
+                    module_name,
+                    optimizer_name,
+                    training,
+                ) = json.loads(data[7:])
+
+                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
+                    # Respond to validator that we can accept the job
+                    if module_name is None:
+                        module_name = ""
+
+                    # Store a request to wait for the user connection
+                    self._store_request(user_id, module_id + module_name)
+
+                    if training:
+                        self._store_request(user_id, "OPTIMIZER" + optimizer_name)
+
+                    data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+
+                    # Update available memory
+                    self.available_gpu_memory -= module_size
 
                 else:
                     data = b"DECLINE-JOB"
@@ -204,7 +255,7 @@ class Worker(TorchNode):
     def proof_of_learning(self, dummy_input: torch.Tensor):
         proof = {
             "node_id": self.name,
-            "memory": self.available_memory,
+            "memory": self.available_gpu_memory,
             "learning": self.training,
             "model": self.model,
         }
@@ -216,8 +267,8 @@ class Worker(TorchNode):
         """When a validator requests a stats request, return stats"""
         stats = {
             "id": self.rsa_key_hash,
-            "memory": self.available_memory,
-            "total_memory": self.total_memory,
+            "gpu_memory": self.available_gpu_memory,
+            "total_gpu_memory": self.total_gpu_memory,
             "role": self.role,
             "training": self.training,
             # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
