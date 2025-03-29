@@ -1,11 +1,11 @@
 # Tensorlink
-![Static Badge](https://img.shields.io/badge/v0.1.2-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
+![Static Badge](https://img.shields.io/badge/v0.1.3-Tensorlink-pink?logo=) ![License](https://img.shields.io/badge/License-MIT-blue.svg) ![GitHub Repo stars](https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social) 
 <!-- ![GitHub all releases](https://img.shields.io/github/downloads/smartnodes-lab/tensorlink/total) -->
 
 **Tensorlink** is a library designed to simplify distributed PyTorch model training and inference, offering tools 
 to easily distribute models across a network of peers and share computational resources both locally and globally.
 
-## Plug-and-Play, Peer-to-Peer Neural Network Scaling for PyTorch
+## Peer-to-Peer, Plug-and-Play Distributed Neural Networks for PyTorch
 
 Tensorlink is a versatile framework designed to facilitate neural network offloading and acceleration within PyTorch, a 
 leading machine learning framework in Python. Tensorlink offers a straightforward, plug-and-play solution that parses 
@@ -17,10 +17,17 @@ parallelism to simplify and enhance the training process, making state-of-the-ar
 For a deeper dive into Tensorlink's features, capabilities, and underlying principles, please refer to the 
 [lightpaper](docs/Lightpaper.md) and [documentation](https://smartnodes.ca/docs).
 
-### Key features
+## Table of Contents
+1. [Key Features & Limitations](#key-features)
+2. [Training & Inference with PyTorch](#training-and-inference-with-pytorch)
+3. [Inference APIs](#inference-apis)
+4. [Running a Node](#running-a-node)
+5. [Contribute](#contributing)
+
+## Key features
 By implementing wrappers for PyTorch's `Module` and `Optimizer` objects, Tensorlink integrates with existing codebases, 
 preserving model workflows while seamlessly harnessing distributed resources. Tensorlink enables individuals and 
-organizations to collaborate, share resources, and scale models dynamically—bringing the power of distributed training 
+organizations to collaborate, share resources, and scale models dynamically, bringing the power of distributed training 
 to a broader community.
 
 - `DistributedModel`: A flexible wrapper for `torch.nn.Module` designed to simplify distributed machine learning workflows.
@@ -29,33 +36,33 @@ to a broader community.
     - Automatically manages partitioning and synchronization of model components across nodes.
     - Seamlessly supports both data and model parallelism.
 
+
 - `DistributedOptimizer`: An optimizer wrapper built for `DistributedModel` to ensure synchronized parameter updates across distributed nodes.
    - Compatible with native PyTorch and Hugging Face optimizers.
 
-- Nodes Types (`tensorlink.nodes`): Tensorlink provides three key node types to enable robust distributed machine learning workflows:
-   - `UserNode`: Handles job submissions and result retrieval, facilitating interaction with `DistributedModel` for training and inference. Required for public network participation.
-   - `WorkerNode`: Manages active jobs, connections to users, and processes data for model execution.
-   - `ValidatorNode`: Secures and coordinates training tasks and node interactions, ensuring job integrity on the public network.
+
+- **APIs** handling job requests and on-demand inference for open-source huggingface models.
+
    
 - **Public Computational Resources**: By default, Tensorlink nodes are integrated with a smart contract-secured network, enabling:
    - Incentive mechanisms to reward contributors for sharing computational power.
    - Access to both free and paid machine learning resources.
    - Configuration options for private networks, supporting local or closed group machine learning workflows.
 
-### Limitations in this Release
+### Current Limitations
 
 - Bugs, performance issues, and limited network availability are expected.
-- **Model Support**: Tensorlink currently supports scriptable PyTorch models (`torch.jit.script`) and select open-source 
-Hugging Face models not requiring API-keys.
-   - **Why?** Security and serialization constraints for un-trusted P2P interactions. We're actively working on custom serialization methods to support all PyTorch model types. Feedback and contributions to accelerate this effort are welcome!
-- **Job Constraints**: 
-    - **Model Size**: Due to limited worker availability in this initial release, public jobs are best suited for models under ~1 billion parameters.
-        - **Future Plans**: We are actively expanding network capacity, and the next update (expected soon) will increase this limit, enabling support for larger models and more complex workflows.
-    - **Worker Allocation**: Public jobs are currently limited to one worker. Data parallel acceleration is temporarily disabled for public tasks but can be enabled for local jobs or private clusters.
-- Internet latency and connection speeds can significantly impact the performance of public jobs, which may become problematic for certain training and inference scenarios.
+- **Model Support**: Tensorlink currently supports open-source Hugging Face models not requiring API-keys. Safe and 
+secure custom model distribution methods are currently under development.
+- **Model Size Constraints**: Due to limited worker availability in this initial release, public jobs are best suited 
+for models under ~10 billion parameters.
+- **Worker Allocation**: Public jobs are currently limited to one worker. Data parallel acceleration is temporarily 
+disabled for public tasks but can be enabled for local jobs or private clusters.
+- Internet latency and connection speeds can significantly impact the performance of public jobs, which may become 
+problematic for certain training and inference scenarios.
 
 
-## Training and Inference with Tensorlink
+## Training and Inference with PyTorch
 
 ### Installation
 
@@ -128,6 +135,10 @@ for epoch in range(epochs):
 Training progress and network information will be trackable through the Tensorlink/Smartnodes dashboard. 
 This feature is a work in progress and is currently not available.
 
+
+## Inference APIs
+
+
 ## Running a Node
 
 Tensorlink is a versatile system designed for use on local, private, and public networks. However, its true power shines on the **public network**, where individuals worldwide contribute computational resources to advance innovation. By running a Worker node, you not only support cutting-edge projects but also earn rewards for your contributions.
@@ -154,7 +165,8 @@ Tensorlink is a versatile system designed for use on local, private, and public 
 3. **Run the Worker**  
    - Execute the *run-worker.sh* script to start your node. (e.g. `./run-worker.sh`)
 
-### Contributing
+
+## Contributing
 
 We’re excited to welcome contributions from the community to help build and enhance Tensorlink! Here’s how you can get involved:
 
@@ -165,7 +177,7 @@ We’re excited to welcome contributions from the community to help build and en
 
 We need more people to help us refine Tensorlink and make it the best possible tool for decentralized neural network training. Your contributions and insights can make a significant impact!
 
-## Donate
+### Donate
 
 If you would like to support our work, consider buying us a coffee! Your contributions help us continue developing and improving Tensorlink.
 

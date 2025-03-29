@@ -3,7 +3,7 @@ import os
 from setuptools import find_packages, setup
 
 # Version of the package
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 
 # Description of the package
 DESCRIPTION = (
