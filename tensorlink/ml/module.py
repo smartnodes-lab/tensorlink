@@ -1,4 +1,4 @@
-from typing import Generator, OrderedDict, Optional, Type, Dict, Any
+from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
 from collections import defaultdict
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -96,7 +96,7 @@ class DistributedModel(nn.Module):
 
     def __init__(
         self,
-        model: nn.Module,
+        model: Union[nn.Module, str],
         n_pipelines: int = 1,
         optimizer_type: Optional[Type[optim.Optimizer]] = None,
         scheduler_type: Optional[Type[optim.lr_scheduler._LRScheduler]] = None,
@@ -122,10 +122,14 @@ class DistributedModel(nn.Module):
         """
         super().__init__()
 
-        self.name = str(model).split("(")[0]
+        if isinstance(model, nn.Module):
+            self.name = str(model).split("(")[0]
+            self.model = model.to(dtype=dtype)
+        else:
+            self.name = model
+            self.model = model
 
         # Store model and training resources
-        self.model = model.to(dtype=dtype)
         self.user_memory = get_gpu_memory()
 
         self.worker_info: Dict[str, Any] = {}
@@ -142,8 +146,8 @@ class DistributedModel(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # Optimizer and scheduler placeholders
-        self.optimizer = None
-        self.scheduler = None
+        self.optimizer = optimizer_type
+        self.scheduler = scheduler_type
         self.training = training
 
         # Trusted execution mode
@@ -163,7 +167,7 @@ class DistributedModel(nn.Module):
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
 
         # Initialize model distribution
-        self._initialize_distribution(optimizer_type)  # , scheduler_type)
+        self._initialize_distribution()
 
     def forward(self, *args, **kwargs):
         """
@@ -649,34 +653,41 @@ class DistributedModel(nn.Module):
         time.sleep(3)
         return node
 
-    def _initialize_distribution(self, optimizer_type=None):
+    def _initialize_distribution(self):
         """Initialize the distributed model."""
         # Parse the model
         model_parser = ModelParser(self.user_memory)
 
-        if optimizer_type is None and self.training:
+        if self.optimizer is None and self.training:
             optimizer_type = torch.optim.Adam
+        else:
+            optimizer_type = self.optimizer
 
-        distribution = model_parser.create_distributed_config(
-            self.model, training=self.training, trusted=False, handle_layers=False
-        )
+        # Create the distribution on our end if we have the model loaded
+        if isinstance(self.model, nn.Module):
+            distribution = model_parser.create_distributed_config(
+                self.model, training=self.training, trusted=False, handle_layers=False
+            )
 
-        # Configure modules for distribution
-        for module_id, module in distribution.items():
-            if module["type"] == "offloaded":
-                if self.training:
-                    if optimizer_type is None:
-                        optimizer_type = torch.optim.Adam
-                    module["optimizer"] = (
-                        f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                    )
-                module["training"] = self.training
+            # Configure modules for distribution
+            for module_id, module in distribution.items():
+                if module["type"] == "offloaded":
+                    if self.training:
+                        if optimizer_type is None:
+                            optimizer_type = torch.optim.Adam
+                        module["optimizer"] = (
+                            f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                        )
+                    module["training"] = self.training
+
+        else:
+            distribution = {"model_name": self.model}
 
         # Request job from network
         distributed_config = self.node.send_request(
             "request_job",
             (self.n_pipelines, 1, distribution, self.training),
-            timeout=10,
+            timeout=60,
         )
 
         if not distributed_config:

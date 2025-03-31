@@ -4,11 +4,8 @@ Tensorlink User Job Request and Distributed Training Example
 This script demonstrates a user's job request on the public network, showcasing distributed training capabilities
 by leveraging random public resources.
 
-Overview:
----------
-- Launches a `UserNode` that connects automatically to the public network.
-- Uses `BertForSequenceClassification` as a sample model for testing.
-- Demonstrates model distribution, gradient updates, and optimization through TensorLink's `DistributedModel` wrapper.
+
+Model distribution, gradient updates, and optimization through TensorLink's `DistributedModel` wrapper.
 """
 
 import logging
@@ -23,7 +20,7 @@ from transformers import (
     BertTokenizer,
 )
 
-from tensorlink import UserNode, DistributedModel
+from tensorlink import DistributedModel
 
 # Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
 LOCAL = False
@@ -38,21 +35,13 @@ DP_FACTOR = 1
 
 
 if __name__ == "__main__":
-    # Launches a node of each type in their own process
-    user = UserNode(
-        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
-    )
-    time.sleep(3)
-
     # Create a model to distribute
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
     model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # User requests a distributed model and optimizer from a validator
-    distributed_model = DistributedModel(
-        model=model, optimizer_type=torch.optim.Adam, node=user
-    )
+    distributed_model = DistributedModel(model=model, optimizer_type=torch.optim.Adam)
     del model  # Free up some space
 
     # Initialize distributed optimizer

@@ -74,15 +74,16 @@ if __name__ == "__main__":
     user.connect_node(val_host, val_port, node_id=val_key, timeout=5)
     time.sleep(1)
 
-    # Create a model to distribute
+    # Create a model to distribute (for hybrid jobs or custom models)
     model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # User requests a distributed model and optimizer from a validator
     distributed_model = DistributedModel(
         model=model, optimizer_type=torch.optim.Adam, node=user
     )
     del model  # Free up some space
+
+    # Second way to get distributed model directly from HuggingFace without loading
+    # distributed_model = DistributedModel("bert-base-uncased", training=False, node=user)
 
     # Initialize distributed optimizer
     if TRAINING:

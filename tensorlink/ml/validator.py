@@ -104,7 +104,14 @@ class DistributedValidator:
                         save_models(self.models)
 
                     job_data["distribution"] = distribution
-                    self.send_request("send_hosted_job_request", job_data)
+
+                    if job_data["hosted"]:
+                        self.send_request("send_hosted_job_request", job_data)
+                    else:
+                        try:
+                            self.send_request("send_hf_job_request", job_data)
+                        except Exception as e:
+                            print(str(e))
 
             time.sleep(3)
 

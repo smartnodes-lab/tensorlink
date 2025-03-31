@@ -69,10 +69,10 @@ problematic for certain training and inference scenarios.
 Before installing Tensorlink, ensure you meet the following requirements:
 
 - UNIX/MacOS (Windows support coming soon...)
-- Python 3.11.9+
+- Python 3.10+
 - PyTorch 2.3+ (ensure model compatibility with torch version)
 
-While we aim to reduce version requirements, Python 3.11.9+ and a UNIX-based OS are required for stable utilization. 
+While we aim to reduce version requirements, Python 3.10+ and a UNIX-based OS are required for stable utilization. 
 You can install Tensorlink using pip.
 
 ```bash
