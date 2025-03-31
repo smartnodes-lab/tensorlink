@@ -648,7 +648,9 @@ class DistributedModel(nn.Module):
         """Create a UserNode instance if one wasn't provided."""
         from tensorlink import UserNode
 
-        node = UserNode(upnp=True, off_chain_test=False, local_test=False)
+        node = UserNode(
+            upnp=True, off_chain_test=False, local_test=False, print_level=10
+        )
         # Allow time for node to initialize
         time.sleep(3)
         return node
@@ -672,12 +674,11 @@ class DistributedModel(nn.Module):
             # Configure modules for distribution
             for module_id, module in distribution.items():
                 if module["type"] == "offloaded":
-                    if self.training:
-                        if optimizer_type is None:
-                            optimizer_type = torch.optim.Adam
-                        module["optimizer"] = (
-                            f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                        )
+                    if optimizer_type is None:
+                        optimizer_type = torch.optim.Adam
+                    module["optimizer"] = (
+                        f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                    )
                     module["training"] = self.training
 
         else:

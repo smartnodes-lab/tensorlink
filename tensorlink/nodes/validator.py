@@ -363,7 +363,7 @@ class Validator(TorchNode):
             node.role != "U" or not node_info or node_info["reputation"] < 50
         ):  # TODO reputation
             node.ghosts += 1
-        elif job_req.get("model_name", None):
+        elif job_req.get("model_name"):
             threading.Thread(
                 target=self.create_hf_job, args=(job_req, node.host)
             ).start()

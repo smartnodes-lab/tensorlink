@@ -244,7 +244,9 @@ class DistributedWorker:
         except IOError as e:
             print(f"Error saving snapshot: {e}")
 
-    def load_module(self, file_name, module_id, node_id, module_name, optimizer_name):
+    def load_module(
+        self, file_name, module_id, node_id, module_name, optimizer_name, training
+    ):
 
         # Load the module in a separate thread with direct de-serialization
         if self.trusted:
@@ -315,7 +317,8 @@ class DistributedWorker:
         module.n_batch = 0
 
         self.modules[module_id] = module
-        self.optimizers[module_id] = get_optimizer_from_name(optimizer_name)
+        if training:
+            self.optimizers[module_id] = get_optimizer_from_name(optimizer_name)
         self.send_request("module_loaded", module_id)
 
     def check_node(self):
@@ -327,9 +330,21 @@ class DistributedWorker:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
-                    file_name, module_id, node_id, module_name, optimizer_name = args
+                    (
+                        file_name,
+                        module_id,
+                        node_id,
+                        module_name,
+                        optimizer_name,
+                        training,
+                    ) = args
                     self.load_module(
-                        file_name, module_id, node_id, module_name, optimizer_name
+                        file_name,
+                        module_id,
+                        node_id,
+                        module_name,
+                        optimizer_name,
+                        training,
                     )
 
                 # Check for job completion/deletion requests

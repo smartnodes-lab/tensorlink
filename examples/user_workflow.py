@@ -22,27 +22,28 @@ from transformers import (
 
 from tensorlink import DistributedModel
 
-# Arg for node, when set to true network operations are on localhost (i.e. 127.0.0.1)
-LOCAL = False
-
-# Must be activated for public network use. Hopefully this is upgraded to STUN or equivalent in the near future.
-UPNP = True
 
 # Parameters for distributed model request.
 BATCH_SIZE = 16
-PIPELINES = 1  #
+PIPELINES = 1
 DP_FACTOR = 1
 
 
 if __name__ == "__main__":
-    # Create a model to distribute
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertForSequenceClassification.from_pretrained("bert-base-uncased")
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Get distributed model directly from HuggingFace without loading
+    distributed_model = DistributedModel(
+        "bert-base-uncased",
+        training=False,
+        n_pipelines=PIPELINES,
+    )
 
-    # User requests a distributed model and optimizer from a validator
-    distributed_model = DistributedModel(model=model, optimizer_type=torch.optim.Adam)
-    del model  # Free up some space
+    # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
+    # model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # distributed_model = DistributedModel(
+    #     model=model, optimizer_type=torch.optim.Adam, training=False
+    # )
+    # del model
 
     # Initialize distributed optimizer
     distributed_optimizer = distributed_model.create_optimizer(
@@ -59,6 +60,3 @@ if __name__ == "__main__":
         loss = mse_loss(outputs, outputs)
         loss.backward()
         distributed_optimizer.step()
-
-    # Gracefully shut down nodes
-    user.cleanup()

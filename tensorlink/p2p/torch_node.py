@@ -221,6 +221,7 @@ class TorchNode(SmartNode):
         module_id = data[6:70].decode()
         module_name = None
         optimizer_name = None
+        training = False
         request_to_remove = []
 
         if node.node_id in self.requests:
@@ -232,6 +233,7 @@ class TorchNode(SmartNode):
                 if "OPTIMIZER" in req:
                     optimizer_name = req[9:]
                     request_to_remove.append(req)
+                    training = True
 
             for req in request_to_remove:
                 self._remove_request(node.node_id, req)
@@ -246,6 +248,7 @@ class TorchNode(SmartNode):
                     "backward_queue": {},
                     "name": module_name,
                     "optimizer": optimizer_name,
+                    "training": training,
                 }
                 self.state_updates[module_id] = []
 
@@ -421,6 +424,7 @@ class TorchNode(SmartNode):
                     module["host"],
                     module["name"],
                     module["optimizer"],
+                    module["training"],
                 )
                 del module["mem_info"]
             elif "termination" in module:
