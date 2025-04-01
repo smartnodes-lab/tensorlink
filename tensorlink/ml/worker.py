@@ -5,6 +5,8 @@ import pickle
 import queue
 import threading
 import time
+import io
+import base64
 from collections import deque
 
 import torch
@@ -36,6 +38,7 @@ from tensorlink.ml.utils import (
     detach_tensor,
     attach_tensor,
     handle_output,
+    enable_grad,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -259,10 +262,20 @@ class DistributedWorker:
             try:
                 # Get model information from Hugging Face api
                 api.model_info(repo_id=module_name)
-                state_dict = torch.load(file_name, weights_only=True)
-                config = state_dict.pop("module_config")
-                module_class = state_dict.pop("module_class")
 
+                with open(file_name, "rb") as f:
+                    metadata_size = int.from_bytes(f.read(4), "big")
+                    metadata_bytes = f.read(metadata_size)
+                    metadata = json.loads(metadata_bytes.decode("utf-8"))
+
+                    state_dict_bytes = f.read()  # Read the rest of the file
+                    state_dict_buffer = io.BytesIO(state_dict_bytes)
+                    state_dict = torch.load(
+                        state_dict_buffer, weights_only=True
+                    )  # Load from buffer
+
+                config = metadata.get("module_config")
+                module_class = metadata.get("module_class")
                 architectures = config.get("architectures", [])
 
                 config = AutoConfig.from_pretrained(
@@ -274,6 +287,7 @@ class DistributedWorker:
                         "No architecture information found in saved config"
                     )
 
+                # Find the appropriate model clas
                 # Find the appropriate model class
                 model_class_name = architectures[0]
                 model_class = None
@@ -302,12 +316,13 @@ class DistributedWorker:
 
             except Exception as e:
                 # TODO route error to validator for reporting
-                return
+                raise e
 
         else:
             module = torch.jit.load(file_name)
 
         os.remove(file_name)
+        print("Cleaning Model...")
 
         # Initialize queues and states
         module.forward_queue = queue.Queue()
@@ -318,7 +333,9 @@ class DistributedWorker:
 
         self.modules[module_id] = module
         if training:
+            print("Creating Optimizer")
             self.optimizers[module_id] = get_optimizer_from_name(optimizer_name)
+
         self.send_request("module_loaded", module_id)
 
     def check_node(self):

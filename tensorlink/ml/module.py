@@ -11,13 +11,28 @@ import pickle
 import queue
 import random
 import time
+import base64
 import json
 import gc
+import io
 import os
 
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
 from tensorlink.ml.graphing import ModelParser
-from tensorlink.ml.utils import *
+from tensorlink.ml.utils import (
+    get_gpu_memory,
+    get_batch_size,
+    chunk,
+    handle_output,
+    combine_micro_batches,
+    split_into_micro_batches,
+    replace_output_with_custom_grad,
+    access_module,
+    detach_tensor,
+    bytes_to_tensor,
+    tensor_to_bytes,
+    enable_grad,
+)
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 MAX_WAIT_TIME = 300
@@ -562,10 +577,25 @@ class DistributedModel(nn.Module):
                 pickle.dump(child_module, f)
 
         elif isinstance(child_module, PreTrainedModel):
-            state_dict = child_module.state_dict()
-            state_dict["module_config"] = child_module.config.to_dict()
-            state_dict["module_class"] = child_module.__class__.__name__
-            torch.save(state_dict, file_name)  # Save the module to disk
+            metadata_bytes = json.dumps(
+                {
+                    "module_config": child_module.config.to_dict(),
+                    "module_class": child_module.__class__.__name__,
+                }
+            ).encode("utf-8")
+            state_dict_buffer = io.BytesIO()
+            torch.save(child_module.state_dict(), state_dict_buffer)
+            state_dict_bytes = state_dict_buffer.getvalue()
+
+            buffer = io.BytesIO()
+            buffer.write(len(metadata_bytes).to_bytes(4, "big"))
+            buffer.write(metadata_bytes)
+            buffer.write(state_dict_bytes)
+            content = buffer.getvalue()
+
+            with open(file_name, "wb") as f:
+                f.write(content)
+                os.fsync(f.fileno())
 
         else:
             try:
