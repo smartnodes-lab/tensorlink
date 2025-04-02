@@ -221,17 +221,22 @@ class TorchNode(SmartNode):
         module_id = data[6:70].decode()
         module_name = None
         optimizer_name = None
+        training = False
         request_to_remove = []
 
         if node.node_id in self.requests:
+            print(self.requests[node.node_id])
             for req in self.requests[node.node_id]:
-                if module_id in req:
+                if module_id in req or (
+                    isinstance(req, dict) and module_id == req["id"]
+                ):
                     module_name = req[len(module_id) :]
                     request_to_remove.append(req)
 
                 if "OPTIMIZER" in req:
                     optimizer_name = req[9:]
                     request_to_remove.append(req)
+                    training = True
 
             for req in request_to_remove:
                 self._remove_request(node.node_id, req)
@@ -246,6 +251,7 @@ class TorchNode(SmartNode):
                     "backward_queue": {},
                     "name": module_name,
                     "optimizer": optimizer_name,
+                    "training": training,
                 }
                 self.state_updates[module_id] = []
 
@@ -421,6 +427,7 @@ class TorchNode(SmartNode):
                     module["host"],
                     module["name"],
                     module["optimizer"],
+                    module["training"],
                 )
                 del module["mem_info"]
             elif "termination" in module:

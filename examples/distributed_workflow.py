@@ -28,7 +28,6 @@ Overview:
 """
 from tensorlink import UserNode, ValidatorNode, WorkerNode, DistributedModel
 
-from transformers import BertForSequenceClassification
 import torch
 import logging
 import time
@@ -48,20 +47,17 @@ TRAINING = False  # Set true to request train job and get a distributed optimize
 
 
 if __name__ == "__main__":
-    # Launches a node of each type in their own process
+    # Launches a node of each type in their own process (Not necessary if just accessing a DistributedModel
+    # as a user, it will do this in the background...
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    # Temporary sleep for preventing two nodes from starting on the same port and conflicting
-    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -74,15 +70,17 @@ if __name__ == "__main__":
     user.connect_node(val_host, val_port, node_id=val_key, timeout=5)
     time.sleep(1)
 
-    # Create a model to distribute
-    model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Get distributed model directly from HuggingFace without loading
+    distributed_model = DistributedModel("bert-base-uncased", training=False, node=user)
 
-    # User requests a distributed model and optimizer from a validator
-    distributed_model = DistributedModel(
-        model=model, optimizer_type=torch.optim.Adam, node=user
-    )
-    del model  # Free up some space
+    # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
+    # from transformers import BertForSequenceClassification
+    # model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # distributed_model = DistributedModel(
+    #     model=model, optimizer_type=torch.optim.Adam, node=user, training=TRAINING
+    # )
+    # del model  # Free up some space
 
     # Initialize distributed optimizer
     if TRAINING:
@@ -93,7 +91,7 @@ if __name__ == "__main__":
 
     # Run a dummy training loop to showcase functionality
     for _ in range(5):
-        x = torch.zeros((1, 1))
+        x = torch.zeros((1, 1), dtype=torch.long)
         outputs = distributed_model(x)
 
         if TRAINING:

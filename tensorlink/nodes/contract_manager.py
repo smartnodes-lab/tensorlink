@@ -212,7 +212,7 @@ class ContractManager:
                 }
             )
             signed_tx = self.chain.eth.account.sign_transaction(
-                tx, get_key(".env", "PRIVATE_KEY")
+                tx, get_key(".tensorlink.env", "PRIVATE_KEY")
             )
             tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
             self.node.debug_print(
@@ -516,7 +516,7 @@ class ContractManager:
     def _submit_transaction(self, tx: Dict[str, Any]) -> str:
         """Submit a transaction to the blockchain."""
         signed_tx = self.chain.eth.account.sign_transaction(
-            tx, get_key(".env", "PRIVATE_KEY")
+            tx, get_key(".tensorlink.env", "PRIVATE_KEY")
         )
         return self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
 

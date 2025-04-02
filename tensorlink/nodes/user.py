@@ -192,7 +192,13 @@ class User(TorchNode):
                 distribution = job_data["distribution"]
 
                 for mod_id, mod_info in distribution.items():
-                    for worker, worker_info in mod_info["workers"]:
+                    if mod_id not in self.modules:
+                        self.modules[mod_id] = mod_info.copy()
+                        self.modules[mod_id]["workers"] = []
+
+                    for worker in mod_info["workers"]:
+                        worker_id, worker_info = worker
+                        # for worker, worker_info in _:
                         # Connect to workers for each model
                         connected = self.connect_worker(
                             worker_info["id"],
@@ -204,7 +210,11 @@ class User(TorchNode):
                         if connected:
                             self.modules[mod_id]["workers"].append(worker_info["id"])
 
-                self.requests[node.node_id].remove(job_id)
+                # Update DHT with new worker assignments
+                self.store_value(job_id, job_data)
+                if node.node_id in self.requests:
+                    if job_id in self.requests[node.node_id]:
+                        self.requests[node.node_id].remove(job_id)
             else:
                 self.debug_print(
                     f"User -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
@@ -255,49 +265,48 @@ class User(TorchNode):
         #
         # self.debug_print("request_job: Job requested on Smart Contract!")
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
-
         validator_ids = [random.choice(self.validators)]
-        distribution = {
-            k: v for k, v in distribution.items() if v["type"] == "offloaded"
-        }
+        if len(distribution) != 1:
+            distribution = {
+                k: v for k, v in distribution.items() if v["type"] == "offloaded"
+            }
 
-        # Update required network capacity TODO must account for batch size
-        capacity = (
-            sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
-        )
-
-        for mod_id, mod_info in distribution.items():
-            if mod_info["type"] == "offloaded":
-                self.modules[mod_id] = mod_info
-
-        # Connect to seed validators
-        for validator_id in validator_ids:
-            # Try and grab roles connection info from dht
-            node_info = self.query_dht(validator_id)
-
-            # Delete space for roles info if not found and move on to the next validator
-            if node_info is None:
-                self._delete_item(validator_id)
-                self.debug_print(
-                    "User -> Could not connect to validator for job initialization, try again.",
-                    colour="bright_yellow",
-                    level=logging.WARNING,
-                )
-                return False
-
-            # Connect to the validator's roles and exchange information
-            connected = self.connect_node(
-                validator_id, node_info["host"], node_info["port"]
+            # Update required network capacity TODO must account for batch size
+            capacity = (
+                sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
             )
 
-            if not connected:
-                self._delete_item(validator_id)
-                self.debug_print(
-                    "User -> Could not connect to validator for job initialization, try again.",
-                    colour="bright_yellow",
-                    level=logging.WARNING,
-                )
-                return False
+            for mod_id, mod_info in distribution.items():
+                if mod_info["type"] == "offloaded":
+                    self.modules[mod_id] = mod_info
+
+            job_request = {
+                "author": self.rsa_key_hash,
+                "active": True,
+                "hosted": False,
+                "capacity": capacity,
+                "payment": 0,
+                "n_pipelines": n_pipelines,
+                "dp_factor": dp_factor,
+                "distribution": distribution,
+                "n_workers": n_pipelines * len(distribution),
+                "seed_validators": validator_ids,
+            }
+        else:
+            job_request = {
+                "author": self.rsa_key_hash,
+                "active": True,
+                "hosted": False,
+                "training": training,
+                "payment": 0,
+                "capacity": 0,
+                "n_pipelines": 1,
+                "dp_factor": 1,
+                "distribution": {},
+                "n_workers": 0,
+                "model_name": distribution.get("model_name"),
+                "seed_validators": validator_ids,
+            }
 
         # Get validator connections
         validators = [
@@ -305,20 +314,6 @@ class User(TorchNode):
             for val_hash in validator_ids
             if val_hash in self.validators
         ]
-
-        # Create job request
-        job_request = {
-            "author": self.rsa_key_hash,
-            "active": True,
-            "hosted": False,
-            "capacity": capacity,
-            "payment": 0,
-            "n_pipelines": n_pipelines,
-            "dp_factor": dp_factor,
-            "distribution": distribution,
-            "n_workers": n_pipelines * len(distribution),
-            "seed_validators": validator_ids,
-        }
 
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
@@ -338,6 +333,11 @@ class User(TorchNode):
 
         for t in job_req_threads:
             t.join()
+
+        # Get updated job info
+        job_request = self.query_dht(job_hash)
+        distribution = job_request["distribution"]
+        print("DIS", distribution)
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
         dist_model_config = {}

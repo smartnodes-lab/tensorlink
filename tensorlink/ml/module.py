@@ -1,4 +1,4 @@
-from typing import Generator, OrderedDict, Optional, Type, Dict, Any
+from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
 from collections import defaultdict
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -11,13 +11,28 @@ import pickle
 import queue
 import random
 import time
+import base64
 import json
 import gc
+import io
 import os
 
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
 from tensorlink.ml.graphing import ModelParser
-from tensorlink.ml.utils import *
+from tensorlink.ml.utils import (
+    get_gpu_memory,
+    get_batch_size,
+    chunk,
+    handle_output,
+    combine_micro_batches,
+    split_into_micro_batches,
+    replace_output_with_custom_grad,
+    access_module,
+    detach_tensor,
+    bytes_to_tensor,
+    tensor_to_bytes,
+    enable_grad,
+)
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 MAX_WAIT_TIME = 300
@@ -96,7 +111,7 @@ class DistributedModel(nn.Module):
 
     def __init__(
         self,
-        model: nn.Module,
+        model: Union[nn.Module, str],
         n_pipelines: int = 1,
         optimizer_type: Optional[Type[optim.Optimizer]] = None,
         scheduler_type: Optional[Type[optim.lr_scheduler._LRScheduler]] = None,
@@ -122,10 +137,14 @@ class DistributedModel(nn.Module):
         """
         super().__init__()
 
-        self.name = str(model).split("(")[0]
+        if isinstance(model, nn.Module):
+            self.name = str(model).split("(")[0]
+            self.model = model.to(dtype=dtype)
+        else:
+            self.name = model
+            self.model = model
 
         # Store model and training resources
-        self.model = model.to(dtype=dtype)
         self.user_memory = get_gpu_memory()
 
         self.worker_info: Dict[str, Any] = {}
@@ -142,8 +161,8 @@ class DistributedModel(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # Optimizer and scheduler placeholders
-        self.optimizer = None
-        self.scheduler = None
+        self.optimizer = optimizer_type
+        self.scheduler = scheduler_type
         self.training = training
 
         # Trusted execution mode
@@ -163,7 +182,7 @@ class DistributedModel(nn.Module):
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
 
         # Initialize model distribution
-        self._initialize_distribution(optimizer_type)  # , scheduler_type)
+        self._initialize_distribution()
 
     def forward(self, *args, **kwargs):
         """
@@ -512,11 +531,14 @@ class DistributedModel(nn.Module):
             config = self.parse_model(self.model, self.max_module_size)
 
         self.distributed_graph = config
-
         for mod_info in config.values():
             mod_id = mod_info["mod_id"]
-            worker_id = mod_info["workers"][0]
-            self.wrap_module(mod_id, worker_id)
+            module_hash = mod_info["id_hash"]
+            worker_id, worker_info = mod_info["workers"][0]
+            if isinstance(self.model, str):
+                self.wrap_hf_model(module_hash, worker_id)
+            else:
+                self.wrap_module(mod_id, worker_id)
 
         if len(config) == 1:
             module, module_name = access_module(self.model, [-1])
@@ -558,10 +580,28 @@ class DistributedModel(nn.Module):
                 pickle.dump(child_module, f)
 
         elif isinstance(child_module, PreTrainedModel):
+            metadata_bytes = json.dumps(
+                {
+                    "module_config": child_module.config.to_dict(),
+                    "module_class": child_module.__class__.__name__,
+                }
+            ).encode("utf-8")
+
             state_dict = child_module.state_dict()
-            state_dict["module_config"] = child_module.config.to_dict()
-            state_dict["module_class"] = child_module.__class__.__name__
-            torch.save(state_dict, file_name)  # Save the module to disk
+            sorted_state_dict = {k: state_dict[k] for k in sorted(state_dict.keys())}
+            state_dict_buffer = io.BytesIO()
+            torch.save(sorted_state_dict, state_dict_buffer)
+            state_dict_bytes = state_dict_buffer.getvalue()
+
+            buffer = io.BytesIO()
+            buffer.write(len(metadata_bytes).to_bytes(4, "big"))
+            buffer.write(metadata_bytes)
+            buffer.write(state_dict_bytes)
+            content = buffer.getvalue()
+
+            with open(file_name, "wb") as f:
+                f.write(content)
+                os.fsync(f.fileno())
 
         else:
             try:
@@ -621,6 +661,17 @@ class DistributedModel(nn.Module):
         else:
             setattr(self, "model", offloaded_module)
 
+    def wrap_hf_model(self, module_hash, worker_id):
+        file_name = f"{module_hash}_{worker_id}.pt"
+        module_info = str(PreTrainedModel)
+        offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
+        with open(file_name, "wb") as f:
+            f.close()
+
+        # Spawn a worker thread for the offloaded module
+        offloaded_module.spawn_worker(file_name)
+        setattr(self, "model", offloaded_module)
+
     def send_request(self, request_type, args):
         """
         Sends a request to the roles and waits for the response.
@@ -644,39 +695,47 @@ class DistributedModel(nn.Module):
         """Create a UserNode instance if one wasn't provided."""
         from tensorlink import UserNode
 
-        node = UserNode(upnp=True, off_chain_test=False, local_test=False)
+        node = UserNode(
+            upnp=True, off_chain_test=False, local_test=False, print_level=10
+        )
         # Allow time for node to initialize
         time.sleep(3)
         return node
 
-    def _initialize_distribution(self, optimizer_type=None):
+    def _initialize_distribution(self):
         """Initialize the distributed model."""
         # Parse the model
         model_parser = ModelParser(self.user_memory)
 
-        if optimizer_type is None and self.training:
+        if self.optimizer is None and self.training:
             optimizer_type = torch.optim.Adam
+        else:
+            optimizer_type = self.optimizer
 
-        distribution = model_parser.create_distributed_config(
-            self.model, training=self.training, trusted=False, handle_layers=False
-        )
+        # Create the distribution on our end if we have the model loaded
+        if isinstance(self.model, nn.Module):
+            distribution = model_parser.create_distributed_config(
+                self.model, training=self.training, trusted=False, handle_layers=False
+            )
 
-        # Configure modules for distribution
-        for module_id, module in distribution.items():
-            if module["type"] == "offloaded":
-                if self.training:
+            # Configure modules for distribution
+            for module_id, module in distribution.items():
+                if module["type"] == "offloaded":
                     if optimizer_type is None:
                         optimizer_type = torch.optim.Adam
                     module["optimizer"] = (
                         f"{optimizer_type.__module__}.{optimizer_type.__name__}"
                     )
-                module["training"] = self.training
+                    module["training"] = self.training
+
+        else:
+            distribution = {"model_name": self.model}
 
         # Request job from network
         distributed_config = self.node.send_request(
             "request_job",
             (self.n_pipelines, 1, distribution, self.training),
-            timeout=10,
+            timeout=200,
         )
 
         if not distributed_config:
@@ -705,7 +764,11 @@ class OffloadedModule(nn.Module):
 
         self.entire_model = False
         self.module_name = module_name.split("(")[0]
-        self.module_info = module_name.split("(")[1][:-1]
+        try:
+            self.module_info = module_name.split("(")[1][:-1]
+        except:
+            self.module_info = self.module_name
+
         self.parent_model = parent_model
         self.worker_id = worker_id
         self.module_id = module_id

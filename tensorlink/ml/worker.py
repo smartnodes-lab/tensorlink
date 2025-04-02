@@ -5,6 +5,8 @@ import pickle
 import queue
 import threading
 import time
+import io
+import base64
 from collections import deque
 
 import torch
@@ -36,6 +38,7 @@ from tensorlink.ml.utils import (
     detach_tensor,
     attach_tensor,
     handle_output,
+    enable_grad,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -244,7 +247,9 @@ class DistributedWorker:
         except IOError as e:
             print(f"Error saving snapshot: {e}")
 
-    def load_module(self, file_name, module_id, node_id, module_name, optimizer_name):
+    def load_module(
+        self, file_name, module_id, node_id, module_name, optimizer_name, training
+    ):
 
         # Load the module in a separate thread with direct de-serialization
         if self.trusted:
@@ -257,55 +262,46 @@ class DistributedWorker:
             try:
                 # Get model information from Hugging Face api
                 api.model_info(repo_id=module_name)
-                state_dict = torch.load(file_name, weights_only=True)
-                config = state_dict.pop("module_config")
-                module_class = state_dict.pop("module_class")
 
-                architectures = config.get("architectures", [])
+                if os.stat(file_name).st_size == 0:
+                    module = AutoModel.from_pretrained(module_name)
+                else:
+                    with open(file_name, "rb") as f:
+                        metadata_size = int.from_bytes(f.read(4), "big")
+                        metadata_bytes = f.read(metadata_size)
+                        metadata = json.loads(metadata_bytes.decode("utf-8"))
 
-                config = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path=module_name, **config
-                )
+                        state_dict_bytes = f.read()
+                        state_dict_buffer = io.BytesIO(state_dict_bytes)
+                        received_state_dict = torch.load(
+                            state_dict_buffer, weights_only=True
+                        )
 
-                if not architectures:
-                    raise ValueError(
-                        "No architecture information found in saved config"
-                    )
+                    # Load the expected model
+                    module = AutoModel.from_pretrained(module_name)
+                    model_state_dict = module.state_dict()
 
-                # Find the appropriate model class
-                model_class_name = architectures[0]
-                model_class = None
-                for task_type, auto_class in MODEL_TYPE_MAPPING.items():
-                    if task_type in model_class_name:
-                        model_class = auto_class
-                        break
+                    # Map received keys to expected keys
+                    new_state_dict = {}
+                    for expected_key, received_key in zip(
+                        model_state_dict.keys(), received_state_dict.keys()
+                    ):
+                        new_state_dict[expected_key] = received_state_dict[received_key]
 
-                # Default to base model if no specific task type is found
-                if model_class is None:
-                    model_class = AutoModel
-
-                try:
-                    if module_class != model_class_name:
-                        model_class = getattr(__import__("transformers"), module_class)
-                finally:
-                    if hasattr(model_class, "from_config"):
-                        module = model_class.from_config(config).to(self.device)
-                    else:
-                        module = model_class(config).to(self.device)
-
-                try:
-                    module.load_state_dict(state_dict).to(self.device)
-                except Exception as e:
-                    raise e
+                    # Load remapped state dict
+                    module.load_state_dict(
+                        new_state_dict, strict=False
+                    )  # strict=False allows minor mismatches
 
             except Exception as e:
                 # TODO route error to validator for reporting
-                return
+                raise e
 
         else:
             module = torch.jit.load(file_name)
 
         os.remove(file_name)
+        print("Cleaning Model...")
 
         # Initialize queues and states
         module.forward_queue = queue.Queue()
@@ -315,7 +311,10 @@ class DistributedWorker:
         module.n_batch = 0
 
         self.modules[module_id] = module
-        self.optimizers[module_id] = get_optimizer_from_name(optimizer_name)
+        if training:
+            print("Creating Optimizer")
+            self.optimizers[module_id] = get_optimizer_from_name(optimizer_name)
+
         self.send_request("module_loaded", module_id)
 
     def check_node(self):
@@ -327,9 +326,21 @@ class DistributedWorker:
                 args = self.send_request("check_module", None)
 
                 if isinstance(args, tuple):
-                    file_name, module_id, node_id, module_name, optimizer_name = args
+                    (
+                        file_name,
+                        module_id,
+                        node_id,
+                        module_name,
+                        optimizer_name,
+                        training,
+                    ) = args
                     self.load_module(
-                        file_name, module_id, node_id, module_name, optimizer_name
+                        file_name,
+                        module_id,
+                        node_id,
+                        module_name,
+                        optimizer_name,
+                        training,
                     )
 
                 # Check for job completion/deletion requests

@@ -107,7 +107,7 @@ class Connection(threading.Thread):
                     writing_thread = threading.Thread(
                         target=self._write_to_file,
                         args=(
-                            f"tmp/streamed_data_{self.host}_{self.port}",
+                            f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}",
                             buffer,
                         ),
                     )
