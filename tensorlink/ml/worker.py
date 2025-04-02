@@ -263,56 +263,35 @@ class DistributedWorker:
                 # Get model information from Hugging Face api
                 api.model_info(repo_id=module_name)
 
-                with open(file_name, "rb") as f:
-                    metadata_size = int.from_bytes(f.read(4), "big")
-                    metadata_bytes = f.read(metadata_size)
-                    metadata = json.loads(metadata_bytes.decode("utf-8"))
+                if os.stat(file_name).st_size == 0:
+                    module = AutoModel.from_pretrained(module_name)
+                else:
+                    with open(file_name, "rb") as f:
+                        metadata_size = int.from_bytes(f.read(4), "big")
+                        metadata_bytes = f.read(metadata_size)
+                        metadata = json.loads(metadata_bytes.decode("utf-8"))
 
-                    state_dict_bytes = f.read()  # Read the rest of the file
-                    state_dict_buffer = io.BytesIO(state_dict_bytes)
-                    state_dict = torch.load(
-                        state_dict_buffer, weights_only=True
-                    )  # Load from buffer
+                        state_dict_bytes = f.read()
+                        state_dict_buffer = io.BytesIO(state_dict_bytes)
+                        received_state_dict = torch.load(
+                            state_dict_buffer, weights_only=True
+                        )
 
-                config = metadata.get("module_config")
-                module_class = metadata.get("module_class")
-                architectures = config.get("architectures", [])
+                    # Load the expected model
+                    module = AutoModel.from_pretrained(module_name)
+                    model_state_dict = module.state_dict()
 
-                config = AutoConfig.from_pretrained(
-                    pretrained_model_name_or_path=module_name, **config
-                )
+                    # Map received keys to expected keys
+                    new_state_dict = {}
+                    for expected_key, received_key in zip(
+                        model_state_dict.keys(), received_state_dict.keys()
+                    ):
+                        new_state_dict[expected_key] = received_state_dict[received_key]
 
-                if not architectures:
-                    raise ValueError(
-                        "No architecture information found in saved config"
-                    )
-
-                # Find the appropriate model clas
-                # Find the appropriate model class
-                model_class_name = architectures[0]
-                model_class = None
-                for task_type, auto_class in MODEL_TYPE_MAPPING.items():
-                    if task_type in model_class_name:
-                        model_class = auto_class
-                        break
-
-                # Default to base model if no specific task type is found
-                if model_class is None:
-                    model_class = AutoModel
-
-                try:
-                    if module_class != model_class_name:
-                        model_class = getattr(__import__("transformers"), module_class)
-                finally:
-                    if hasattr(model_class, "from_config"):
-                        module = model_class.from_config(config).to(self.device)
-                    else:
-                        module = model_class(config).to(self.device)
-
-                try:
-                    module.load_state_dict(state_dict).to(self.device)
-                except Exception as e:
-                    raise e
+                    # Load remapped state dict
+                    module.load_state_dict(
+                        new_state_dict, strict=False
+                    )  # strict=False allows minor mismatches
 
             except Exception as e:
                 # TODO route error to validator for reporting

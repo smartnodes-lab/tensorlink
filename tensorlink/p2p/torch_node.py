@@ -225,8 +225,11 @@ class TorchNode(SmartNode):
         request_to_remove = []
 
         if node.node_id in self.requests:
+            print(self.requests[node.node_id])
             for req in self.requests[node.node_id]:
-                if module_id in req:
+                if module_id in req or (
+                    isinstance(req, dict) and module_id == req["id"]
+                ):
                     module_name = req[len(module_id) :]
                     request_to_remove.append(req)
 

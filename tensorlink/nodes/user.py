@@ -192,7 +192,13 @@ class User(TorchNode):
                 distribution = job_data["distribution"]
 
                 for mod_id, mod_info in distribution.items():
-                    for worker, worker_info in mod_info["workers"]:
+                    if mod_id not in self.modules:
+                        self.modules[mod_id] = mod_info.copy()
+                        self.modules[mod_id]["workers"] = []
+
+                    for worker in mod_info["workers"]:
+                        worker_id, worker_info = worker
+                        # for worker, worker_info in _:
                         # Connect to workers for each model
                         connected = self.connect_worker(
                             worker_info["id"],
@@ -260,7 +266,7 @@ class User(TorchNode):
         # self.debug_print("request_job: Job requested on Smart Contract!")
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
         validator_ids = [random.choice(self.validators)]
-        if not (len(distribution) == 1 and distribution.get("model_name", None)):
+        if len(distribution) != 1:
             distribution = {
                 k: v for k, v in distribution.items() if v["type"] == "offloaded"
             }
@@ -291,6 +297,7 @@ class User(TorchNode):
                 "author": self.rsa_key_hash,
                 "active": True,
                 "hosted": False,
+                "training": training,
                 "payment": 0,
                 "capacity": 0,
                 "n_pipelines": 1,
@@ -326,6 +333,11 @@ class User(TorchNode):
 
         for t in job_req_threads:
             t.join()
+
+        # Get updated job info
+        job_request = self.query_dht(job_hash)
+        distribution = job_request["distribution"]
+        print("DIS", distribution)
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
         dist_model_config = {}

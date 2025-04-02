@@ -88,22 +88,25 @@ class DistributedValidator:
                 if job_data.get("vram", 0) < 8e9:
                     model_name = job_data.get("model_name")
 
-                    if model_name in self.models:
-                        distribution = job_data["distribution"] = self.models[
-                            model_name
-                        ].get("distribution", {})
-
-                    else:
-                        # Load HF model, create and save distribution.
-                        model, tokenizer = get_hf_model(model_name, tokenizer=True)
-                        parser = ModelParser()
-                        distribution = parser.create_distributed_config(
-                            model, training=False, trusted=False
-                        )
-                        self.models[model_name] = {"distribution": distribution}
-                        save_models(self.models)
+                    # TODO Load saved distributions without loading model
+                    # if model_name in self.models:
+                    #     distribution = job_data["distribution"] = self.models[
+                    #         model_name
+                    #     ].get("distribution", {})
+                    #
+                    # else:
+                    # Load HF model, create and save distribution.
+                    model, tokenizer = get_hf_model(model_name, tokenizer=True)
+                    parser = ModelParser()
+                    distribution = parser.create_distributed_config(
+                        model, training=job_data.get("training", False), trusted=False
+                    )
+                    self.models[model_name] = {"distribution": distribution}
+                    save_models(self.models)
 
                     job_data["distribution"] = distribution
+                    job_data["vram"] = sum([v["size"] for v in distribution.values()])
+                    job_data["ram"] = sum([v["size"] for v in distribution.values()])
 
                     if job_data["hosted"]:
                         self.send_request("send_hosted_job_request", job_data)

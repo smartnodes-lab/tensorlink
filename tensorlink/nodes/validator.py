@@ -518,6 +518,7 @@ class Validator(TorchNode):
         worker_connection_info = {}
 
         # Assign workers for each module, ensuring unique workers for the same module across pipelines
+        print(modules)
         for module_id, module in modules.items():
             worker_assignment = (
                 []
@@ -538,8 +539,8 @@ class Validator(TorchNode):
                             module["size"],
                             worker_id,
                             module["name"],
-                            module["optimizer"],
-                            module["training"],
+                            job_data.get("optimizer", None),
+                            job_data.get("training", False),
                         ):
                             worker_assignment.append(
                                 worker_id
@@ -569,6 +570,7 @@ class Validator(TorchNode):
                 self.decline_job(requesting_node)
                 return
 
+        print("Sending Job Data to User:", job_data)
         # Send the updated job data with worker info to the user
         self.send_to_node(
             requesting_node,

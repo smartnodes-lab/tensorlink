@@ -531,11 +531,14 @@ class DistributedModel(nn.Module):
             config = self.parse_model(self.model, self.max_module_size)
 
         self.distributed_graph = config
-
         for mod_info in config.values():
             mod_id = mod_info["mod_id"]
-            worker_id = mod_info["workers"][0]
-            self.wrap_module(mod_id, worker_id)
+            module_hash = mod_info["id_hash"]
+            worker_id, worker_info = mod_info["workers"][0]
+            if isinstance(self.model, str):
+                self.wrap_hf_model(module_hash, worker_id)
+            else:
+                self.wrap_module(mod_id, worker_id)
 
         if len(config) == 1:
             module, module_name = access_module(self.model, [-1])
@@ -583,8 +586,11 @@ class DistributedModel(nn.Module):
                     "module_class": child_module.__class__.__name__,
                 }
             ).encode("utf-8")
+
+            state_dict = child_module.state_dict()
+            sorted_state_dict = {k: state_dict[k] for k in sorted(state_dict.keys())}
             state_dict_buffer = io.BytesIO()
-            torch.save(child_module.state_dict(), state_dict_buffer)
+            torch.save(sorted_state_dict, state_dict_buffer)
             state_dict_bytes = state_dict_buffer.getvalue()
 
             buffer = io.BytesIO()
@@ -655,6 +661,17 @@ class DistributedModel(nn.Module):
         else:
             setattr(self, "model", offloaded_module)
 
+    def wrap_hf_model(self, module_hash, worker_id):
+        file_name = f"{module_hash}_{worker_id}.pt"
+        module_info = str(PreTrainedModel)
+        offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
+        with open(file_name, "wb") as f:
+            f.close()
+
+        # Spawn a worker thread for the offloaded module
+        offloaded_module.spawn_worker(file_name)
+        setattr(self, "model", offloaded_module)
+
     def send_request(self, request_type, args):
         """
         Sends a request to the roles and waits for the response.
@@ -718,7 +735,7 @@ class DistributedModel(nn.Module):
         distributed_config = self.node.send_request(
             "request_job",
             (self.n_pipelines, 1, distribution, self.training),
-            timeout=60,
+            timeout=200,
         )
 
         if not distributed_config:
@@ -747,7 +764,11 @@ class OffloadedModule(nn.Module):
 
         self.entire_model = False
         self.module_name = module_name.split("(")[0]
-        self.module_info = module_name.split("(")[1][:-1]
+        try:
+            self.module_info = module_name.split("(")[1][:-1]
+        except:
+            self.module_info = self.module_name
+
         self.parent_model = parent_model
         self.worker_id = worker_id
         self.module_id = module_id
