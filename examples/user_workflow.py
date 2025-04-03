@@ -31,19 +31,19 @@ DP_FACTOR = 1
 
 if __name__ == "__main__":
     # Get distributed model directly from HuggingFace without loading
-    # distributed_model = DistributedModel(
-    #     "bert-base-uncased",
-    #     training=False,
-    #     n_pipelines=PIPELINES,
-    # )
+    distributed_model = DistributedModel(
+        'bert-base-uncased',  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        training=False,
+        n_pipelines=PIPELINES,
+    )
 
     # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
-    model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    distributed_model = DistributedModel(
-        model=model, optimizer_type=torch.optim.Adam, training=False
-    )
-    del model
+    # model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    # distributed_model = DistributedModel(
+    #     model=model, optimizer_type=torch.optim.Adam, training=False
+    # )
+    # del model
 
     # Initialize distributed optimizer
     # distributed_optimizer = distributed_model.create_optimizer(

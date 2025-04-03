@@ -851,26 +851,19 @@ def get_optimizer_from_name(optimizer_name):
 
 
 def tensor_to_bytes(tensor):
+    """Convert a PyTorch tensor to a JSON-serializable format."""
     module_name = tensor.__class__.__module__
     class_name = tensor.__class__.__name__
 
     if isinstance(tensor, torch.Tensor):
-        buffer = io.BytesIO()
-        torch.save(tensor, buffer)
-        tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
-        serialized_data = tensor_bytes
+        serialized_data = tensor.tolist()  # Convert tensor to list (JSON-safe)
     elif isinstance(tensor, dict):
-        serialized_data = {}
-        for k, v in tensor.items():
-            if isinstance(v, torch.Tensor):
-                buffer = io.BytesIO()
-                torch.save(v, buffer)
-                tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
-                serialized_data[k] = tensor_bytes
-            else:
-                serialized_data[k] = v
+        serialized_data = {
+            k: v.tolist() if isinstance(v, torch.Tensor) else v
+            for k, v in tensor.items()
+        }
     else:
-        raise "Invalid tensor structure"
+        raise ValueError("Invalid tensor structure")
 
     return {"module": module_name, "class": class_name, "data": serialized_data}
 
