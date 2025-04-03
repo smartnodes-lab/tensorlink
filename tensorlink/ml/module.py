@@ -554,6 +554,35 @@ class DistributedModel(nn.Module):
 
         return 0, 0
 
+    def generate(self, *args, **kwargs):
+        if isinstance(self.model, OffloadedModule):
+            detached_args = handle_output(args).clone().detach()
+            args_bytes = json.dumps(tensor_to_bytes(detached_args)).encode()
+            kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+            forward_bytes = args_bytes + b"|" + kwargs_bytes
+
+            size, shm_name = store_in_shared_memory(forward_bytes, encoded=True)
+
+            self.send_request("generate", (self.worker_id, size, shm_name))
+
+            # Wait for response, change to appending waiting thread to list in master
+            waiting = True
+            start_time = time.time()
+            while waiting:
+                time.sleep(0.1)
+                args = self.parent_model.send_request("check_forward", key)
+
+                if args is not None:
+                    waiting = False
+                    size, name = args
+                    output_bytes = get_from_shared_memory(size, name)
+
+                if time.time() - start_time >= MAX_WAIT_TIME:
+                    # Logic here to request another worker take his place
+                    waiting = False
+
+            output = enable_grad(bytes_to_tensor(output_bytes))
+
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
         if module_id == [-1]:  # Handling the case of the full model

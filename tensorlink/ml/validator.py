@@ -4,6 +4,7 @@ from tensorlink.ml.utils import estimate_hf_model_memory, get_hf_model
 import threading
 import json
 import time
+import gc
 
 
 MODELS_PATH = "logs/models.json"
@@ -96,13 +97,9 @@ class DistributedValidator:
                         self.models[model_name] = {"distribution": distribution}
                         save_models(self.models)
 
-                        job_data["distribution"] = distribution
-                        job_data["vram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
-                        job_data["ram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
+                        del model
+                        del tokenizer
+                        gc.collect()  # Force garbage collection
 
                     # Process the job with the distribution (whether loaded or cached)
                     if job_data["hosted"]:
