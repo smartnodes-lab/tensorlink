@@ -556,33 +556,7 @@ class DistributedModel(nn.Module):
 
     def generate(self, *args, **kwargs):
         if isinstance(self.model, OffloadedModule):
-            args_bytes = json.dumps(tensor_to_bytes(args)).encode()
-            kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
-            request_bytes = (
-                self.model.module_id.encode() + args_bytes + b"::" + kwargs_bytes
-            )
-            size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
-            self.send_request("generate", (self.model.worker_id, size, shm_name))
-
-            # Wait for response, change to appending waiting thread to list in master
-            waiting = True
-            start_time = time.time()
-            while waiting:
-                time.sleep(0.1)
-                args = self.parent_model.send_request(
-                    "check_generate",
-                )
-
-                if args is not None:
-                    waiting = False
-                    size, name = args
-                    output_bytes = get_from_shared_memory(size, name)
-
-                if time.time() - start_time >= MAX_WAIT_TIME:
-                    # Logic here to request another worker take his place
-                    waiting = False
-
-            output = enable_grad(bytes_to_tensor(output_bytes))
+            self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -850,6 +824,33 @@ class OffloadedModule(nn.Module):
         else:
             # No available workers found, handle the situation accordingly
             pass
+
+    def generate(self, *args, **kwargs):
+        args_bytes = json.dumps(tensor_to_bytes(args)).encode()
+        kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+        request_bytes = self.module_id.encode() + args_bytes + b"::" + kwargs_bytes
+        size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
+        self.parent_model.send_request("generate", (self.worker_id, size, shm_name))
+
+        # Wait for response, change to appending waiting thread to list in master
+        waiting = True
+        start_time = time.time()
+        while waiting:
+            time.sleep(0.1)
+            args = self.parent_model.send_request(
+                "check_forward", self.module_id + "generate"
+            )
+
+            if args is not None:
+                waiting = False
+                size, name = args
+                output_bytes = get_from_shared_memory(size, name)
+
+            if time.time() - start_time >= MAX_WAIT_TIME:
+                # Logic here to request another worker take his place
+                waiting = False
+
+        output = enable_grad(bytes_to_tensor(output_bytes))
 
     def forward(self, *args, **kwargs):
         start_time = time.time()

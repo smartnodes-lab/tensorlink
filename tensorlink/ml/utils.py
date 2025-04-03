@@ -886,7 +886,7 @@ def tensor_to_bytes(tensor):
         }
     elif isinstance(tensor, tuple):
         if len(tensor) > 0:
-            return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+            return tensor[0].tolist() if isinstance(tensor[0], torch.Tensor) else tensor
         return tensor
     else:
         raise ValueError("Invalid tensor structure")

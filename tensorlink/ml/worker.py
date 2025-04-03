@@ -194,45 +194,45 @@ class DistributedWorker:
         module = self.modules.get(module_id)
         query_bytes = get_from_shared_memory(size, name, encoded=True)
         args, kwargs = query_bytes.split(b"::")
-        args = json.loads(args)
-        kwargs = json.loads(kwargs)
 
-        # Move inputs (if any) to the appropriate device
-        inp = attach_tensor(args, self.device)
-        kwargs = attach_tensor(kwargs, self.device)
+        # Convert args to tensor and move to device
+        input_ids = torch.tensor(json.loads(args), dtype=torch.long)
+        input_ids = attach_tensor(input_ids, self.device)
 
-        # Handle generation parameters
-        generation_config = kwargs.pop('generation_config', None)
+        # Load kwargs but filter out non-generation parameters
+        all_kwargs = json.loads(kwargs)
 
-        # Setting default generation parameters if not provided
-        if generation_config is None:
-            generation_config = {
-                'max_length': 100,
-                'num_return_sequences': 1,
-                'temperature': 0.7,
-                'top_p': 0.9,
-                'do_sample': True,
-            }
+        # Extract callback_id before filtering kwargs
+        callback_id = all_kwargs.pop('callback_id', "generate")
+
+        # Filter out other known non-generation parameters
+        known_non_generation_params = ['module', 'class', 'data']
+        for param in known_non_generation_params:
+            all_kwargs.pop(param, None)
 
         # Synchronize for accurate profiling
         if self.device.type != "cpu":
             torch.cuda.synchronize()
 
-        # Generate text with the model
-        with torch.no_grad():
-            output = module.generate(inp, **generation_config)
+        try:
+            # Generate text with the model
+            with torch.no_grad():
+                output = module.generate(input_ids, **all_kwargs)
 
-        if self.device.type != "cpu":
-            torch.cuda.synchronize()
+            if self.device.type != "cpu":
+                torch.cuda.synchronize()
 
-        # Detach and store generated output
-        detached_out = detach_tensor(output)
-        output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+            # Detach and store generated output
+            detached_out = detach_tensor(output)
+            output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+        except Exception as e:
+            # Handle any exceptions during generation
+            output_bytes = json.dumps({"error": str(e)}).encode()
+
         size, name = store_in_shared_memory(output_bytes)
 
         # Send the generated output back
-        callback_id = kwargs.get('callback_id', None)
-        self.send_request("send_generation", (module.host, size, name, callback_id))
+        self.send_request("send_forward", (module.host, size, name, callback_id))
 
         # Clean memory
         if self.device.type != "cpu":
@@ -310,7 +310,7 @@ class DistributedWorker:
                 api.model_info(repo_id=module_name)
 
                 if os.stat(file_name).st_size == 0:
-                    module = AutoModel.from_pretrained(module_name)
+                    module = AutoModelForCausalLM.from_pretrained(module_name)
                 else:
                     with open(file_name, "rb") as f:
                         metadata_size = int.from_bytes(f.read(4), "big")
