@@ -324,6 +324,7 @@ class TorchNode(SmartNode):
                 "connect_node": self._handle_connect_node,
                 "info": self._handle_get_info,
                 "debug_print": self._handle_debug_print,
+                # "generate": self._send_generate
             }
 
             handler = handlers.get(req_type)
@@ -387,6 +388,14 @@ class TorchNode(SmartNode):
         node = self.nodes[worker_id]
         forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
         self.send_forward(node, forward_bytes, tag)
+        self.response_queue.put({"status": "SUCCESS", "return": None})
+
+    def _handle_send_generate(self, request):
+        worker_id, size, shm_name, tag = request["args"]
+        node = self.nodes[worker_id]
+        forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+
+        self.send_to_node(node, forward_bytes)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def _handle_send_backward(self, request):

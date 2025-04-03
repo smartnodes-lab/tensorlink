@@ -52,12 +52,15 @@ if __name__ == "__main__":
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
+    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
+    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
+    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
@@ -71,9 +74,7 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Get distributed model directly from HuggingFace without loading
-    distributed_model = DistributedModel(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0", training=False, node=user
-    )
+    distributed_model = DistributedModel("bert-base-uncased", training=False, node=user)
 
     # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
     # from transformers import BertForSequenceClassification

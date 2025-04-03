@@ -337,7 +337,6 @@ class User(TorchNode):
         # Get updated job info
         job_request = self.query_dht(job_hash)
         distribution = job_request["distribution"]
-        print("DIS", distribution)
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
         dist_model_config = {}

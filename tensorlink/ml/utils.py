@@ -684,6 +684,26 @@ def combine_micro_batches(micro_batches):
         # If outputs are tensors, concatenate them along the batch dimension
         return torch.cat(micro_batches, dim=0)
 
+    elif isinstance(micro_batches[0], dict):
+        combined_output = defaultdict(list)
+
+        for output in micro_batches:
+            for key, value in output.items():
+                combined_output[key].append(value)
+
+        final_output = {}
+        for key, value in combined_output.items():
+            if isinstance(value[0], torch.Tensor):
+                # Handle scalar tensors separately
+                if value[0].dim() == 0:
+                    final_output[key] = torch.stack(value)
+                else:
+                    final_output[key] = torch.cat(value, dim=0)
+            else:
+                final_output[key] = value  # Leave non-tensor values as-is
+
+        return final_output
+
     elif isinstance(micro_batches[0], ModelOutput):
         combined_output = defaultdict(list)
 
@@ -876,21 +896,10 @@ def bytes_to_tensor(tensor_data):
     output_class = getattr(module, tensor_data["class"])
 
     if isinstance(tensor_data["data"], dict):
-        reconstructed_data = {}
-        for k, v in tensor_data["data"].items():
-            if isinstance(v, str):
-                v = base64.b64decode(v)
-                buffer = io.BytesIO(v)
-                reconstructed_data[k] = torch.load(buffer, weights_only=True)
-            else:
-                reconstructed_data[k] = v
+        reconstructed_data = {
+            k: torch.tensor(v) if isinstance(v, list) else v
+            for k, v in tensor_data["data"].items()
+        }
+        return reconstructed_data
 
-        return output_class(**reconstructed_data)
-
-    elif isinstance(tensor_data["data"], str):
-        tensor_data["data"] = base64.b64decode(tensor_data["data"])
-        buffer = io.BytesIO(tensor_data["data"])
-        return torch.load(buffer, weights_only=True)
-
-    else:
-        raise "Invalid tensor structure"
+    return torch.tensor(tensor_data["data"])
