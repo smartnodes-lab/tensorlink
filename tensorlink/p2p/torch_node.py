@@ -90,6 +90,7 @@ class TorchNode(SmartNode):
                             in (
                                 b"LOADED",
                                 b"FORWARD",
+                                b"GENERATE",
                                 b"BACKWARD",
                                 b"OPTIMIZER-RESPONSE",
                                 b"OPTIMIZER",
@@ -218,20 +219,22 @@ class TorchNode(SmartNode):
             self._store_tensor_in_shared_memory(key, tensor)
             return True
 
-    def _handle_generate(self, data: bytes):
+    def _handle_generate(self, data: bytes, node: Connection):
         # Received a forward pass
-        eos = data.find(b"::")
-        size = int(data[7:eos])
-        formatted_size = format_size(size)
-        self.debug_print(f"TorchNode -> RECEIVED GENERATE: {formatted_size}")
+        self.debug_print("TorchNode -> RECEIVED GENERATE")
 
-        # TODO we must check that the forward received corresponds to a sent pass/specific module
-        # must also do with backwards
-        tensor = data[eos + 2 : eos + 2 + size]
-        key = tuple(json.loads(data[eos + 2 + size :]))
+        module_id = data[8:72]
 
-        # Create shared mpc block and store tensor
-        self._store_tensor_in_shared_memory(key, tensor)
+        size = len(data[72:])
+        shm = shared_memory.SharedMemory(create=True, size=size)
+        buffer = shm.buf[:size]
+        buffer[:] = data[72:]
+        key = module_id.decode()
+
+        self.modules[module_id]["forward_queue"][key] = (size, shm.name)
+        self.memory_manager[key] = shm.name
+        del buffer
+        shm.close()
         return True
 
     def _handle_module(self, data: bytes, node: Connection):
@@ -242,7 +245,6 @@ class TorchNode(SmartNode):
         request_to_remove = []
 
         if node.node_id in self.requests:
-            print(self.requests[node.node_id])
             for req in self.requests[node.node_id]:
                 if module_id in req or (
                     isinstance(req, dict) and module_id == req["id"]
@@ -341,7 +343,7 @@ class TorchNode(SmartNode):
                 "connect_node": self._handle_connect_node,
                 "info": self._handle_get_info,
                 "debug_print": self._handle_debug_print,
-                # "generate": self._send_generate
+                "generate": self._handle_send_generate,
             }
 
             handler = handlers.get(req_type)
@@ -411,7 +413,6 @@ class TorchNode(SmartNode):
         worker_id, size, shm_name = request["args"]
         node = self.nodes[worker_id]
         generate_bytes = get_from_shared_memory(size, shm_name, encoded=True)
-
         self.send_to_node(node, b"GENERATE" + generate_bytes)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 

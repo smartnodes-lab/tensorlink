@@ -86,111 +86,157 @@ class DistributedWorker:
 
                 # Handle backward pass
                 if not module.backward_queue.empty():
-                    n_batch = module.n_batch
-                    next_node = module.host
-
-                    if self.modules[module_id].training:
-                        # Critical section: lock the shared resources only when necessary
-                        with self.lock:
-                            tag, loss_relay = module.backward_queue.get()
-                            tensor_bytes = get_from_shared_memory(
-                                loss_relay[0], loss_relay[1], encoded=True
-                            )
-                            tensor = bytes_to_tensor(tensor_bytes)
-                            # Load loss and move to the device
-                            loss = attach_tensor(tensor, self.device)
-
-                            inter_tag = tuple(tag)
-                            assoc_input, assoc_output = module.intermediates.pop(
-                                inter_tag
-                            )
-
-                            assoc_input = assoc_input.to(self.device)
-                            assoc_output = assoc_output.to(self.device)
-
-                            # Backward pass with CUDA synchronization for accurate profiling
-                            if self.device.type != "cpu":
-                                torch.cuda.synchronize()
-
-                            assoc_output.backward(loss)
-
-                            if self.device.type != "cpu":
-                                torch.cuda.synchronize()
-
-                            # Detach gradients and prepare for next node
-                            if assoc_input.grad is None:
-                                dvalues = detach_tensor(
-                                    torch.zeros_like(assoc_input, dtype=torch.float32)
-                                )
-                            else:
-                                dvalues = detach_tensor(assoc_input.grad)
-
-                            # Clean up to avoid memory leaks
-                            del assoc_input, assoc_output
-
-                            # Store pass in shared memory and send to next node
-                            dvalues_bytes = json.dumps(
-                                tensor_to_bytes(dvalues)
-                            ).encode()
-                            size, name = store_in_shared_memory(
-                                dvalues_bytes, encoded=True
-                            )
-                            self.send_request(
-                                "send_backward", (next_node, size, name, tag)
-                            )
-
-                            # Clear memory, but avoid excessive cache clearing
-                            if self.device.type != "cpu":
-                                torch.cuda.empty_cache()
+                    self._handle_backward(module_id, module)
 
                 # Handle forward pass
                 if not module.forward_queue.empty():
                     with self.lock:
                         key, (size, name) = module.forward_queue.get()
 
-                        tensor_bytes = get_from_shared_memory(size, name, encoded=True)
-                        args, kwargs = tensor_bytes.split(b"|")
-                        args = bytes_to_tensor(args)
-                        kwargs = bytes_to_tensor(kwargs)
+                        if isinstance(key, str):
+                            self._handle_generate(module_id, size, name)
+                        else:
+                            self._handle_forward(module_id, key, size, name)
 
-                        # Enable gradient tracking and move to device
-                        inp = enable_grad(attach_tensor(args, self.device))
-                        kwargs = enable_grad(attach_tensor(kwargs, self.device))
+    def _handle_backward(self, module_id, module):
+        n_batch = module.n_batch
+        next_node = module.host
 
-                        # Forward pass with CUDA synchronization for accurate profiling
-                        if self.device.type != "cpu":
-                            torch.cuda.synchronize()
+        if self.modules[module_id].training:
+            # Critical section: lock the shared resources only when necessary
+            with self.lock:
+                tag, loss_relay = module.backward_queue.get()
+                tensor_bytes = get_from_shared_memory(
+                    loss_relay[0], loss_relay[1], encoded=True
+                )
+                tensor = bytes_to_tensor(tensor_bytes)
+                # Load loss and move to the device
+                loss = attach_tensor(tensor, self.device)
 
-                        out = module(inp, **kwargs)
+                inter_tag = tuple(tag)
+                assoc_input, assoc_output = module.intermediates.pop(inter_tag)
 
-                        if self.device.type != "cpu":
-                            torch.cuda.synchronize()
+                assoc_input = assoc_input.to(self.device)
+                assoc_output = assoc_output.to(self.device)
 
-                        # Store intermediate results if training
-                        if self.modules[module_id].training:
-                            module.intermediates[key] = [
-                                inp,
-                                handle_output(out).to(self.device),
-                            ]
+                # Backward pass with CUDA synchronization for accurate profiling
+                if self.device.type != "cpu":
+                    torch.cuda.synchronize()
 
-                        # Detach and store output
-                        detached_out = detach_tensor(out)
-                        output_bytes = json.dumps(
-                            tensor_to_bytes(detached_out)
-                        ).encode()
-                        size, name = store_in_shared_memory(output_bytes)
-                        self.send_request(
-                            "send_forward", (module.host, size, name, key)
-                        )
+                assoc_output.backward(loss)
 
-                        # Clean memory efficiently
-                        if self.device.type != "cpu":
-                            torch.cuda.empty_cache()
+                if self.device.type != "cpu":
+                    torch.cuda.synchronize()
 
-                        # self.store_snapshot(module_id, inp, out, key[0], key[1])
+                # Detach gradients and prepare for next node
+                if assoc_input.grad is None:
+                    dvalues = detach_tensor(
+                        torch.zeros_like(assoc_input, dtype=torch.float32)
+                    )
+                else:
+                    dvalues = detach_tensor(assoc_input.grad)
 
-                        if module.training:
-                            module.n_batch += 1
+                # Clean up to avoid memory leaks
+                del assoc_input, assoc_output
+
+                # Store pass in shared memory and send to next node
+                dvalues_bytes = json.dumps(tensor_to_bytes(dvalues)).encode()
+                size, name = store_in_shared_memory(dvalues_bytes, encoded=True)
+                self.send_request("send_backward", (next_node, size, name, tag))
+
+                # Clear memory, but avoid excessive cache clearing
+                if self.device.type != "cpu":
+                    torch.cuda.empty_cache()
+
+    def _handle_forward(self, module_id, key, size, name):
+        module = self.modules.get(module_id)
+        tensor_bytes = get_from_shared_memory(size, name, encoded=True)
+        args, kwargs = tensor_bytes.split(b"|")
+        args = bytes_to_tensor(args)
+        kwargs = bytes_to_tensor(kwargs)
+
+        # Enable gradient tracking and move to device
+        inp = enable_grad(attach_tensor(args, self.device))
+        kwargs = enable_grad(attach_tensor(kwargs, self.device))
+
+        # Forward pass with CUDA synchronization for accurate profiling
+        if self.device.type != "cpu":
+            torch.cuda.synchronize()
+
+        out = module(inp, **kwargs)
+
+        if self.device.type != "cpu":
+            torch.cuda.synchronize()
+
+        # Store intermediate results if training
+        if self.modules[module_id].training:
+            module.intermediates[key] = [
+                inp,
+                handle_output(out).to(self.device),
+            ]
+
+        # Detach and store output
+        detached_out = detach_tensor(out)
+        output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+        size, name = store_in_shared_memory(output_bytes)
+        self.send_request("send_forward", (module.host, size, name, key))
+
+        # Clean memory efficiently
+        if self.device.type != "cpu":
+            torch.cuda.empty_cache()
+
+        # self.store_snapshot(module_id, inp, out, key[0], key[1])
+
+        if module.training:
+            module.n_batch += 1
+
+    def _handle_generate(self, module_id, size, name):
+        module = self.modules.get(module_id)
+        query_bytes = get_from_shared_memory(size, name, encoded=True)
+        args, kwargs = query_bytes.split(b"::")
+        args = json.loads(args)
+        kwargs = json.loads(kwargs)
+
+        # Move inputs (if any) to the appropriate device
+        inp = attach_tensor(args, self.device)
+        kwargs = attach_tensor(kwargs, self.device)
+
+        # Handle generation parameters
+        generation_config = kwargs.pop('generation_config', None)
+
+        # Setting default generation parameters if not provided
+        if generation_config is None:
+            generation_config = {
+                'max_length': 100,
+                'num_return_sequences': 1,
+                'temperature': 0.7,
+                'top_p': 0.9,
+                'do_sample': True,
+            }
+
+        # Synchronize for accurate profiling
+        if self.device.type != "cpu":
+            torch.cuda.synchronize()
+
+        # Generate text with the model
+        with torch.no_grad():
+            output = module.generate(inp, **generation_config)
+
+        if self.device.type != "cpu":
+            torch.cuda.synchronize()
+
+        # Detach and store generated output
+        detached_out = detach_tensor(output)
+        output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+        size, name = store_in_shared_memory(output_bytes)
+
+        # Send the generated output back
+        callback_id = kwargs.get('callback_id', None)
+        self.send_request("send_generation", (module.host, size, name, callback_id))
+
+        # Clean memory
+        if self.device.type != "cpu":
+            torch.cuda.empty_cache()
 
     def send_request(self, request_type, args, timeout=None):
         request = {"type": request_type, "args": args}

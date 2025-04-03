@@ -558,16 +558,20 @@ class DistributedModel(nn.Module):
         if isinstance(self.model, OffloadedModule):
             args_bytes = json.dumps(tensor_to_bytes(args)).encode()
             kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
-            request_bytes = args_bytes + b"|" + kwargs_bytes
+            request_bytes = (
+                self.model.module_id.encode() + args_bytes + b"::" + kwargs_bytes
+            )
             size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
-            self.send_request("generate", (self.worker_id, size, shm_name))
-            tag = [n_batch, n_micro, self.module_id]
+            self.send_request("generate", (self.model.worker_id, size, shm_name))
+
             # Wait for response, change to appending waiting thread to list in master
             waiting = True
             start_time = time.time()
             while waiting:
                 time.sleep(0.1)
-                args = self.parent_model.send_request("check_generate", key)
+                args = self.parent_model.send_request(
+                    "check_generate",
+                )
 
                 if args is not None:
                     waiting = False
@@ -784,7 +788,11 @@ class OffloadedModule(nn.Module):
     """
 
     def __init__(
-        self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes
+        self,
+        parent_model: DistributedModel,
+        module_name: str,
+        worker_id,
+        module_id: str,
     ):
         super(OffloadedModule, self).__init__()
 

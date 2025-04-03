@@ -569,7 +569,6 @@ class Validator(TorchNode):
                 self.decline_job(requesting_node)
                 return
 
-        print("Sending Job Data to User:", job_data)
         # Send the updated job data with worker info to the user
         self.send_to_node(
             requesting_node,
