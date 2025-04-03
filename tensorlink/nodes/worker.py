@@ -119,21 +119,11 @@ class Worker(TorchNode):
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
-                #         dummy_input = pickle.loads(data[3:])
+                #         dummy_input = json.loads(data[3:])
                 #
                 #         proof_of_learning = self.proof_of_learning(dummy_input)
                 #
                 #         self.send_to_node(roles, proof_of_learning)
-                #
-                # elif b"TENSOR" == data[:6]:
-                #     if self.training:
-                #         tensor = pickle.loads(data[6:])
-                #
-                #         # Confirm identity/role of roles
-                #         if roles in self.inbound:
-                #             self.forward_relays.put(tensor)
-                #         elif roles in self.outbound:
-                #             self.backward_relays.put(tensor)
 
                 else:
                     ghost += 1

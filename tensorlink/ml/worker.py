@@ -346,8 +346,9 @@ class DistributedWorker:
                 # Check for job completion/deletion requests
                 elif isinstance(args, str):
                     if args in self.modules:
+                        if self.modules[args].training:
+                            del self.optimizers[args]
                         del self.modules[args]
-                        del self.optimizers[args]
                         self.send_request("debug_print", (f"Module {args} removed.",))
 
                 # Check for node termination requests

@@ -661,7 +661,9 @@ def handle_output(tensor):
     elif hasattr(tensor, "last_hidden_state"):
         return tensor.last_hidden_state
     elif isinstance(tensor, tuple):
-        return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        if len(tensor) > 0:
+            return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        return tensor
     elif isinstance(tensor, dict):
         # Look for common keys like 'logits' or 'last_hidden_state'
         for key in ["logits", "last_hidden_state"]:
@@ -683,6 +685,26 @@ def combine_micro_batches(micro_batches):
     if isinstance(micro_batches[0], torch.Tensor):
         # If outputs are tensors, concatenate them along the batch dimension
         return torch.cat(micro_batches, dim=0)
+
+    elif isinstance(micro_batches[0], dict):
+        combined_output = defaultdict(list)
+
+        for output in micro_batches:
+            for key, value in output.items():
+                combined_output[key].append(value)
+
+        final_output = {}
+        for key, value in combined_output.items():
+            if isinstance(value[0], torch.Tensor):
+                # Handle scalar tensors separately
+                if value[0].dim() == 0:
+                    final_output[key] = torch.stack(value)
+                else:
+                    final_output[key] = torch.cat(value, dim=0)
+            else:
+                final_output[key] = value  # Leave non-tensor values as-is
+
+        return final_output
 
     elif isinstance(micro_batches[0], ModelOutput):
         combined_output = defaultdict(list)
@@ -851,26 +873,23 @@ def get_optimizer_from_name(optimizer_name):
 
 
 def tensor_to_bytes(tensor):
+    """Convert a PyTorch tensor to a JSON-serializable format."""
     module_name = tensor.__class__.__module__
     class_name = tensor.__class__.__name__
 
     if isinstance(tensor, torch.Tensor):
-        buffer = io.BytesIO()
-        torch.save(tensor, buffer)
-        tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
-        serialized_data = tensor_bytes
+        serialized_data = tensor.tolist()  # Convert tensor to list (JSON-safe)
     elif isinstance(tensor, dict):
-        serialized_data = {}
-        for k, v in tensor.items():
-            if isinstance(v, torch.Tensor):
-                buffer = io.BytesIO()
-                torch.save(v, buffer)
-                tensor_bytes = base64.b64encode(buffer.getvalue()).decode()
-                serialized_data[k] = tensor_bytes
-            else:
-                serialized_data[k] = v
+        serialized_data = {
+            k: v.tolist() if isinstance(v, torch.Tensor) else v
+            for k, v in tensor.items()
+        }
+    elif isinstance(tensor, tuple):
+        if len(tensor) > 0:
+            return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        return tensor
     else:
-        raise "Invalid tensor structure"
+        raise ValueError("Invalid tensor structure")
 
     return {"module": module_name, "class": class_name, "data": serialized_data}
 
@@ -883,21 +902,10 @@ def bytes_to_tensor(tensor_data):
     output_class = getattr(module, tensor_data["class"])
 
     if isinstance(tensor_data["data"], dict):
-        reconstructed_data = {}
-        for k, v in tensor_data["data"].items():
-            if isinstance(v, str):
-                v = base64.b64decode(v)
-                buffer = io.BytesIO(v)
-                reconstructed_data[k] = torch.load(buffer, weights_only=True)
-            else:
-                reconstructed_data[k] = v
+        reconstructed_data = {
+            k: torch.tensor(v) if isinstance(v, list) else v
+            for k, v in tensor_data["data"].items()
+        }
+        return reconstructed_data
 
-        return output_class(**reconstructed_data)
-
-    elif isinstance(tensor_data["data"], str):
-        tensor_data["data"] = base64.b64decode(tensor_data["data"])
-        buffer = io.BytesIO(tensor_data["data"])
-        return torch.load(buffer, weights_only=True)
-
-    else:
-        raise "Invalid tensor structure"
+    return torch.tensor(tensor_data["data"])

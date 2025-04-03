@@ -518,7 +518,6 @@ class Validator(TorchNode):
         worker_connection_info = {}
 
         # Assign workers for each module, ensuring unique workers for the same module across pipelines
-        print(modules)
         for module_id, module in modules.items():
             worker_assignment = (
                 []

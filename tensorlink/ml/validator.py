@@ -4,6 +4,7 @@ from tensorlink.ml.utils import estimate_hf_model_memory, get_hf_model
 import threading
 import json
 import time
+import gc
 
 
 MODELS_PATH = "logs/models.json"
@@ -58,56 +59,49 @@ class DistributedValidator:
         counter = 0
 
         while not self.terminate:
-            # if counter % update_check_interval == 0:
-            # args = self.send_request("check_pol", None)
-            #
-            # # If we have any PoL checks to attend to...
-            # if args:
-            #     pass
+            # Other code...
 
-            # If we have any directly-hosted/api jobs to attend to
             job_data = self.send_request("get_jobs", None)
 
             if isinstance(job_data, dict):
-                """
-                job_data = {
-                    "author": requesters_ip,
-                    "active": False,
-                    "hosted": True,
-                    "ram": ram,
-                    "vram": vram,
-                    "time": _time,
-                    "payment": job_info.get("payment", 0),
-                    "n_pipelines": 1,
-                    "dp_factor": 1,
-                    "distribution": {},
-                    "n_workers": 0,
-                    "seed_validators": [self.rsa_key_hash]
-                }
-                """
                 if job_data.get("vram", 0) < 8e9:
                     model_name = job_data.get("model_name")
 
-                    # TODO Load saved distributions without loading model
-                    # if model_name in self.models:
-                    #     distribution = job_data["distribution"] = self.models[
-                    #         model_name
-                    #     ].get("distribution", {})
-                    #
-                    # else:
-                    # Load HF model, create and save distribution.
-                    model, tokenizer = get_hf_model(model_name, tokenizer=True)
-                    parser = ModelParser()
-                    distribution = parser.create_distributed_config(
-                        model, training=job_data.get("training", False), trusted=False
-                    )
-                    self.models[model_name] = {"distribution": distribution}
-                    save_models(self.models)
+                    # Check if we already have the distribution saved
+                    if (
+                        model_name in self.models
+                        and "distribution" in self.models[model_name]
+                    ):
+                        # Use the saved distribution
+                        distribution = self.models[model_name]["distribution"]
+                        job_data["distribution"] = distribution
 
-                    job_data["distribution"] = distribution
-                    job_data["vram"] = sum([v["size"] for v in distribution.values()])
-                    job_data["ram"] = sum([v["size"] for v in distribution.values()])
+                        # Update RAM and VRAM estimates from saved data
+                        job_data["vram"] = sum(
+                            [v["size"] for v in distribution.values()]
+                        )
+                        job_data["ram"] = sum(
+                            [v["size"] for v in distribution.values()]
+                        )
+                    else:
+                        # Load HF model, create and save distribution
+                        model, tokenizer = get_hf_model(model_name, tokenizer=True)
+                        parser = ModelParser()
+                        distribution = parser.create_distributed_config(
+                            model,
+                            training=job_data.get("training", False),
+                            trusted=False,
+                        )
 
+                        # Save the distribution
+                        self.models[model_name] = {"distribution": distribution}
+                        save_models(self.models)
+
+                        del model
+                        del tokenizer
+                        gc.collect()  # Force garbage collection
+
+                    # Process the job with the distribution (whether loaded or cached)
                     if job_data["hosted"]:
                         self.send_request("send_hosted_job_request", job_data)
                     else:
