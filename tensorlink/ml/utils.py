@@ -661,7 +661,9 @@ def handle_output(tensor):
     elif hasattr(tensor, "last_hidden_state"):
         return tensor.last_hidden_state
     elif isinstance(tensor, tuple):
-        return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        if len(tensor) > 0:
+            return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        return tensor
     elif isinstance(tensor, dict):
         # Look for common keys like 'logits' or 'last_hidden_state'
         for key in ["logits", "last_hidden_state"]:
@@ -882,6 +884,10 @@ def tensor_to_bytes(tensor):
             k: v.tolist() if isinstance(v, torch.Tensor) else v
             for k, v in tensor.items()
         }
+    elif isinstance(tensor, tuple):
+        if len(tensor) > 0:
+            return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        return tensor
     else:
         raise ValueError("Invalid tensor structure")
 

@@ -5,10 +5,10 @@ from tensorlink.p2p.smart_node import SmartNode
 
 from multiprocessing import shared_memory
 import logging
-import pickle
 import queue
 import threading
 import time
+import json
 
 
 def format_size(size_bytes):
@@ -71,6 +71,7 @@ class TorchNode(SmartNode):
                     b"LOADED": self._handle_module_loaded,
                     b"FORWARD": self._handle_forward,
                     b"BACKWARD": self._handle_backward,
+                    b"GENERATE": self._handle_generate,
                     b"OPTIMIZER-RESPONSE": self._handle_optimizer_response,
                     b"OPTIMIZER": self._handle_optimizer_request,
                     b"PARAMS-REQ": self._handle_parameters_request,
@@ -143,7 +144,7 @@ class TorchNode(SmartNode):
             node.ghosts += 1
             return False
         else:
-            module_id, optimizer_fn, optimizer_kwargs = pickle.loads(data[9:])
+            module_id, optimizer_fn, optimizer_kwargs = json.loads(data[9:])
             self.state_updates[module_id].append((optimizer_fn, optimizer_kwargs))
             return True
 
@@ -152,7 +153,7 @@ class TorchNode(SmartNode):
             node.ghosts += 1
             return False
         else:
-            module_id, response_type = pickle.loads(data[18:])
+            module_id, response_type = json.dumps(data[18:]).encode()
 
             if response_type == "loaded":
                 self.debug_print(
@@ -190,7 +191,7 @@ class TorchNode(SmartNode):
             # TODO we must check that the forward received corresponds to a sent pass/specific module
             # must also do with backwards
             tensor = data[eos + 2 : eos + 2 + size]
-            key = tuple(pickle.loads(data[eos + 2 + size :]))
+            key = tuple(json.loads(data[eos + 2 + size :]))
 
             # Create shared mpc block and store tensor
             self._store_tensor_in_shared_memory(key, tensor, backward=True)
@@ -211,11 +212,27 @@ class TorchNode(SmartNode):
             # TODO we must check that the forward received corresponds to a sent pass/specific module
             # must also do with backwards
             tensor = data[eos + 2 : eos + 2 + size]
-            key = tuple(pickle.loads(data[eos + 2 + size :]))
+            key = tuple(json.loads(data[eos + 2 + size :]))
 
             # Create shared mpc block and store tensor
             self._store_tensor_in_shared_memory(key, tensor)
             return True
+
+    def _handle_generate(self, data: bytes):
+        # Received a forward pass
+        eos = data.find(b"::")
+        size = int(data[7:eos])
+        formatted_size = format_size(size)
+        self.debug_print(f"TorchNode -> RECEIVED GENERATE: {formatted_size}")
+
+        # TODO we must check that the forward received corresponds to a sent pass/specific module
+        # must also do with backwards
+        tensor = data[eos + 2 : eos + 2 + size]
+        key = tuple(json.loads(data[eos + 2 + size :]))
+
+        # Create shared mpc block and store tensor
+        self._store_tensor_in_shared_memory(key, tensor)
+        return True
 
     def _handle_module(self, data: bytes, node: Connection):
         module_id = data[6:70].decode()
@@ -377,7 +394,7 @@ class TorchNode(SmartNode):
 
         self.send_to_node(
             node,
-            b"OPTIMIZER-RESPONSE" + pickle.dumps((module_id, response_type)),
+            b"OPTIMIZER-RESPONSE" + json.dumps((module_id, response_type)).encode(),
         )
 
         self.response_queue.put({"status": "SUCCESS", "return": None})
@@ -391,11 +408,11 @@ class TorchNode(SmartNode):
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def _handle_send_generate(self, request):
-        worker_id, size, shm_name, tag = request["args"]
+        worker_id, size, shm_name = request["args"]
         node = self.nodes[worker_id]
-        forward_bytes = get_from_shared_memory(size, shm_name, encoded=True)
+        generate_bytes = get_from_shared_memory(size, shm_name, encoded=True)
 
-        self.send_to_node(node, forward_bytes)
+        self.send_to_node(node, b"GENERATE" + generate_bytes)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def _handle_send_backward(self, request):
@@ -528,7 +545,7 @@ class TorchNode(SmartNode):
     def _handle_send_optimizer_request(self, request):
         worker_id, module_id, optimizer_fn, optimizer_kwargs = request["args"]
         node = self.nodes[worker_id]
-        data = pickle.dumps((module_id, optimizer_fn, optimizer_kwargs))
+        data = json.dumps((module_id, optimizer_fn, optimizer_kwargs)).encode()
         self.send_to_node(node, b"OPTIMIZER" + data)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
@@ -635,8 +652,8 @@ class TorchNode(SmartNode):
     def send_forward(self, node: Connection, forward_bytes, context):
         """Send forward pass to node, must contain args (module args) and context (module + epoch id)"""
         size = str(len(forward_bytes)).encode() + b"::"
-        pickled_data = b"FORWARD" + size + forward_bytes + pickle.dumps(context)
-        self.send_to_node(node, pickled_data)
+        json_data = b"FORWARD" + size + forward_bytes + json.dumps(context).encode()
+        self.send_to_node(node, json_data)
 
     def _store_tensor_in_shared_memory(self, key, tensor: bytes, backward=False):
         id_hash = key[2]
@@ -655,7 +672,7 @@ class TorchNode(SmartNode):
 
     def store_parameters_in_shared_memory(self, key, parameters):
         module_id = key[1:]
-        parameters = pickle.dumps(parameters)
+        parameters = json.dumps(parameters).encode()
         size = len(parameters)
 
         shm = shared_memory.SharedMemory(create=True, size=size)
@@ -668,8 +685,8 @@ class TorchNode(SmartNode):
     def send_backward(self, node: Connection, backward_bytes, context):
         """Send backward pass to node, must contain args (module args) and context (module + epoch id)"""
         size = str(len(backward_bytes)).encode() + b"::"
-        pickled_data = b"BACKWARD" + size + backward_bytes + pickle.dumps(context)
-        self.send_to_node(node, pickled_data)
+        json_data = b"BACKWARD" + size + backward_bytes + json.dumps(context).encode()
+        self.send_to_node(node, json_data)
 
     def send_parameters_req(self, node: Connection, module_id: str):
         """Request parameters from a specific worker"""
