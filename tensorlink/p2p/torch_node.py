@@ -490,6 +490,7 @@ class TorchNode(SmartNode):
                 min_iter, min_micro = -1, -1
                 if module_id in module["forward_queue"].keys():
                     return_val = (module_id, module["forward_queue"][module_id])
+                    del module["forward_queue"][module_id]
                 else:
                     for n_iter, n_micro, module_id in module["forward_queue"].keys():
                         if n_iter <= min_iter or min_iter == -1:
