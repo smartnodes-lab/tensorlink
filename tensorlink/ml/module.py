@@ -838,7 +838,7 @@ class OffloadedModule(nn.Module):
         while waiting:
             time.sleep(0.1)
             args = self.parent_model.send_request(
-                "check_forward", self.module_id + "generate"
+                "check_forward", (self.module_id + "generate",)
             )
 
             if args is not None:

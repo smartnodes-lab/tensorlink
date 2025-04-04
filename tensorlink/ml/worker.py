@@ -325,9 +325,6 @@ class DistributedWorker:
         # Load kwargs but filter out non-generation parameters
         all_kwargs = json.loads(kwargs)
 
-        # Extract callback_id before filtering kwargs
-        callback_id = all_kwargs.pop('callback_id', "generate")
-
         # Filter out other known non-generation parameters
         known_non_generation_params = ['module', 'class', 'data']
         for param in known_non_generation_params:
@@ -371,7 +368,7 @@ class DistributedWorker:
         size, name = store_in_shared_memory(output_bytes)
 
         # Send the generated output back
-        self.send_request("send_forward", (module.host, size, name, callback_id))
+        self.send_request("send_generate", (module.host, size, name))
 
         # Clean memory
         if self.device.type == "cuda":
