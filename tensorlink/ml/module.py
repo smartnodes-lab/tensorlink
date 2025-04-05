@@ -556,7 +556,7 @@ class DistributedModel(nn.Module):
 
     def generate(self, *args, **kwargs):
         if isinstance(self.model, OffloadedModule):
-            self.model.generate(*args, **kwargs)
+            return self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -837,9 +837,7 @@ class OffloadedModule(nn.Module):
         start_time = time.time()
         while waiting:
             time.sleep(0.1)
-            args = self.parent_model.send_request(
-                "check_forward", (self.module_id + "generate",)
-            )
+            args = self.parent_model.send_request("check_generate", self.module_id)
 
             if args is not None:
                 waiting = False
@@ -851,6 +849,7 @@ class OffloadedModule(nn.Module):
                 waiting = False
 
         output = enable_grad(bytes_to_tensor(output_bytes))
+        return output
 
     def forward(self, *args, **kwargs):
         start_time = time.time()

@@ -1,10 +1,10 @@
 import atexit
 import logging
-import multiprocessing
 import signal
 import sys
 import threading
 import time
+import torch.multiprocessing as mp
 
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.validator import DistributedValidator
@@ -36,7 +36,7 @@ def show_spinner(stop_event, message="Processing"):
     sys.stdout.flush()
 
 
-multiprocessing.set_start_method("spawn", force=True)
+mp.set_start_method("spawn", force=True)
 
 
 class BaseNode:
@@ -49,9 +49,9 @@ class BaseNode:
         print_level=logging.WARNING,
         trusted=False,
     ):
-        self.node_requests = multiprocessing.Queue()
-        self.node_responses = multiprocessing.Queue()
-        self.mpc_lock = multiprocessing.Lock()
+        self.node_requests = mp.Queue()
+        self.node_responses = mp.Queue()
+        self.mpc_lock = mp.Lock()
 
         self.init_kwargs = {
             "print_level": print_level,
@@ -66,7 +66,7 @@ class BaseNode:
         self.node_process = None
         self.node_instance = None
 
-        self._stop_event = multiprocessing.Event()
+        self._stop_event = mp.Event()
         self._setup_signal_handlers()
         self._initialized = True
         self.start()
@@ -88,7 +88,7 @@ class BaseNode:
             signal.signal(sig, handler)
 
     def start(self):
-        self.node_process = multiprocessing.Process(target=self.run_role, daemon=True)
+        self.node_process = mp.Process(target=self.run_role, daemon=True)
         self.node_process.start()
 
     def cleanup(self):

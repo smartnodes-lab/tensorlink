@@ -28,8 +28,11 @@ def store_in_shared_memory(_object, encoded=False):
 
     size = len(object_bytes)
     shm = shared_memory.SharedMemory(create=True, size=size)
-    buffer = shm.buf[:size]
-    buffer[:] = object_bytes
-    del buffer
+
+    # Use memoryview and copy
+    view = memoryview(shm.buf)
+    view[:size] = object_bytes
+    view.release()  # Explicitly release the memoryview
+
     shm.close()
     return size, shm.name

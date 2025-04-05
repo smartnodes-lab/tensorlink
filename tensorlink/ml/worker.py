@@ -245,10 +245,8 @@ class DistributedWorker:
         if self.device.type == "cuda":
             with torch.cuda.stream(self.memory_stream):
                 # Enable gradient tracking and move to device with non-blocking transfers
-                inp = enable_grad(attach_tensor(args, self.device, non_blocking=True))
-                kwargs = enable_grad(
-                    attach_tensor(kwargs, self.device, non_blocking=True)
-                )
+                inp = enable_grad(attach_tensor(args, self.device))
+                kwargs = enable_grad(attach_tensor(kwargs, self.device))
             self.memory_stream.synchronize()
         else:
             # CPU path
@@ -368,7 +366,7 @@ class DistributedWorker:
         size, name = store_in_shared_memory(output_bytes)
 
         # Send the generated output back
-        self.send_request("send_generate", (module.host, size, name))
+        self.send_request("send_forward", (module.host, size, name, "generate"))
 
         # Clean memory
         if self.device.type == "cuda":
@@ -472,7 +470,7 @@ class DistributedWorker:
                         if free_memory > 8 * 1e9:  # 8GB threshold
                             module = AutoModelForCausalLM.from_pretrained(
                                 module_name,
-                                device_map="auto",
+                                # device_map="auto",
                                 torch_dtype=(
                                     torch.float16 if self.use_amp else torch.float32
                                 ),
@@ -481,7 +479,7 @@ class DistributedWorker:
                             # Use CPU offloading for large models
                             module = AutoModelForCausalLM.from_pretrained(
                                 module_name,
-                                device_map="auto",
+                                # device_map="auto",
                                 offload_folder="tmp/offload",
                                 torch_dtype=(
                                     torch.float16 if self.use_amp else torch.float32
