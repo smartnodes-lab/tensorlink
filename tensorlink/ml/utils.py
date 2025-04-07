@@ -358,7 +358,6 @@ def get_hf_model(model_name: str, tokenizer: bool = False):
 
         if tokenizer:
             tokenizer = AutoTokenizer.from_pretrained(model_name)
-
         else:
             tokenizer = None
 

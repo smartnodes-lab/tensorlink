@@ -12,7 +12,11 @@ LOCAL = False
 
 if __name__ == "__main__":
     node = WorkerNode(
-        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
+        upnp=UPNP,
+        off_chain_test=OFFCHAIN,
+        local_test=LOCAL,
+        print_level=logging.DEBUG,
+        utilization=False,
     )
 
     while True:

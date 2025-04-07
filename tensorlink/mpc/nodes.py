@@ -48,6 +48,7 @@ class BaseNode:
         local_test=False,
         print_level=logging.WARNING,
         trusted=False,
+        utilization=True,
     ):
         self.node_requests = mp.Queue()
         self.node_responses = mp.Queue()
@@ -62,6 +63,7 @@ class BaseNode:
         }
         self.trusted = trusted
         self.upnp_enabled = upnp
+        self.utilization = utilization
 
         self.node_process = None
         self.node_instance = None
@@ -168,9 +170,12 @@ class WorkerNode(BaseNode):
         distributed_worker = DistributedWorker(
             self.node_requests, self.node_responses, self.mpc_lock, trusted=self.trusted
         )
-        t = threading.Thread(target=distributed_worker.run, daemon=True)
-        t.start()
-        time.sleep(3)
+        if self.utilization:
+            t = threading.Thread(target=distributed_worker.run, daemon=True)
+            t.start()
+            time.sleep(3)
+        else:
+            distributed_worker.run()
 
 
 class ValidatorNode(BaseNode):
@@ -199,9 +204,12 @@ class ValidatorNode(BaseNode):
         distributed_validator = DistributedValidator(
             self.node_requests, self.node_responses, self.mpc_lock
         )
-        t = threading.Thread(target=distributed_validator.run, daemon=True)
-        t.start()
-        time.sleep(3)
+        if self.utilization:
+            t = threading.Thread(target=distributed_validator.run, daemon=True)
+            t.start()
+            time.sleep(3)
+        else:
+            distributed_validator.run()
 
 
 class UserNode(BaseNode):
