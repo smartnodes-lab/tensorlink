@@ -328,20 +328,22 @@ def estimate_hf_model_memory(
     api = HfApi()
 
     try:
+        training_multiplier = 4 if training else 1
         model_info = api.model_info(repo_id=model_name)
+        total_ram = model_info.usedStorage * training_multiplier
+        total_vram = total_ram
 
         # Extract model size (if available)
-        num_params = model_info.safetensors.get("parameters", {}).get("F16", 0) // 2
-        dtype_size = {"fp32": 4, "fp16": 2, "int8": 1}.get(precision, 4)
-        param_memory = num_params * dtype_size
-        activation_memory = batch_size * seq_length * dtype_size * 4
-        total_vram = param_memory + activation_memory
-
-        if training:
-            optimizer_memory = param_memory * 2
-            total_vram += optimizer_memory
-
-        total_ram = 1.2 * num_params * dtype_size
+        # num_params = model_info.safetensors.get("parameters", {}).get("F16", 0) // 2
+        # dtype_size = {"fp32": 4, "fp16": 2, "int8": 1}.get(precision, 4)
+        # param_memory = num_params * dtype_size
+        # activation_memory = batch_size * seq_length * dtype_size * 4
+        # total_vram = param_memory + activation_memory
+        #
+        # if training:
+        #     optimizer_memory = param_memory * 2
+        #     total_vram += optimizer_memory
+        # total_ram = 1.2 * num_params * dtype_size
 
         return total_vram, total_ram
 

@@ -3,17 +3,24 @@ import random
 
 import torch.nn as nn
 from transformers import PreTrainedModel
+from typing import Union
 
-from tensorlink.ml.utils import estimate_memory
+from tensorlink.ml.utils import estimate_memory, estimate_hf_model_memory
 
 
 # Create offloaded module data structure for config file
-def create_offloaded(module: nn.Module, module_index: list, module_size: int):
+def create_offloaded(
+    module: Union[nn.Module, str], module_index: list, module_size: int
+):
     module_id = hashlib.sha256(str(random.random()).encode()).hexdigest()
     data = {
         "type": "offloaded",
         "id_hash": module_id,
-        "module": f"{type(module)}".split(".")[-1].split(">")[0][:-1],
+        "module": (
+            f"{type(module)}".split(".")[-1].split(">")[0][:-1]
+            if not isinstance(module, str)
+            else module
+        ),
         "mod_id": module_index,
         "size": module_size,
         "workers": [],
@@ -159,7 +166,7 @@ class ModelParser:
 
     def _recurse_module(
         self,
-        module: nn.Module,
+        module: Union[nn.Module, str],
         training: bool,
         trusted: bool,
         handle_layers: bool,
@@ -170,9 +177,12 @@ class ModelParser:
         if config is None:
             config, ids = {}, []
 
-        module_size = estimate_memory(module, training, batch_size=1024)
+        if isinstance(module, str):
+            module_size, _ = estimate_hf_model_memory(module, training=training)
+        else:
+            module_size = estimate_memory(module, training, batch_size=1024)
+
         min_gpu_size = min(self.gpu_sizes, key=lambda x: x < module_size)
-        module_children = list(module.named_children())
 
         if module_size <= min_gpu_size:
             k, v = create_offloaded(module, [-1], module_size)
@@ -180,6 +190,9 @@ class ModelParser:
 
             if isinstance(module, PreTrainedModel):
                 v["name"] = module.name_or_path
+
+            elif isinstance(module, str):
+                v["name"] = module
 
             elif not trusted:
                 v["name"] = module.name_or_path

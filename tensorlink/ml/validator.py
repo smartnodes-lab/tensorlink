@@ -85,10 +85,10 @@ class DistributedValidator:
                         )
                     else:
                         # Load HF model, create and save distribution
-                        model, tokenizer = get_hf_model(model_name, tokenizer=True)
+                        # model, tokenizer = get_hf_model(model_name, tokenizer=True)
                         parser = ModelParser()
                         distribution = parser.create_distributed_config(
-                            model,
+                            model_name,  #  model,
                             training=job_data.get("training", False),
                             trusted=False,
                         )
@@ -97,8 +97,8 @@ class DistributedValidator:
                         self.models[model_name] = {"distribution": distribution}
                         save_models(self.models)
 
-                        del model
-                        del tokenizer
+                        # del model
+                        # del tokenizer
                         gc.collect()  # Force garbage collection
 
                     # Process the job with the distribution (whether loaded or cached)

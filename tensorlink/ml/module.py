@@ -1,3 +1,4 @@
+import logging
 from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
 from collections import defaultdict
 from transformers import PreTrainedModel
@@ -700,7 +701,7 @@ class DistributedModel(nn.Module):
         from tensorlink import UserNode
 
         node = UserNode(
-            upnp=True, off_chain_test=False, local_test=False, print_level=10
+            upnp=True, off_chain_test=False, local_test=False, print_level=logging.WARN
         )
         # Allow time for node to initialize
         time.sleep(3)
