@@ -498,6 +498,7 @@ class Validator(TorchNode):
             self.debug_print(
                 f"Validator -> Declining job '{job_data['id']}': Could not find enough workers."
             )
+            self.response_queue.put({"status": "SUCCESS", "return": False})
             self.decline_job(requesting_node)
             return
 
@@ -543,6 +544,7 @@ class Validator(TorchNode):
                     self.debug_print(
                         f"Validator -> Declining job '{job_data['id']}': Could not find enough workers for distribution"
                     )
+                    self.response_queue.put({"status": "SUCCESS", "return": False})
                     self.decline_job(requesting_node)
                     return
 
@@ -563,6 +565,7 @@ class Validator(TorchNode):
                     f"Validator -> Declining job '{job_data['id']}': Pipeline initialization error! \n"
                     f"\tExpected: {n_pipelines:}, Received: {len(module_info['workers'])} ({job_data['distribution']})"
                 )
+                self.response_queue.put({"status": "SUCCESS", "return": False})
                 self.decline_job(requesting_node)
                 return
 
@@ -571,6 +574,8 @@ class Validator(TorchNode):
             requesting_node,
             b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode(),
         )
+
+        self.response_queue.put({"status": "SUCCESS", "return": True})
 
         self.jobs.append(job_id)
 
