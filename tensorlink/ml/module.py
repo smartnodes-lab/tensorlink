@@ -701,7 +701,7 @@ class DistributedModel(nn.Module):
         from tensorlink import UserNode
 
         node = UserNode(
-            upnp=True, off_chain_test=False, local_test=False, print_level=logging.WARN
+            upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG
         )
         # Allow time for node to initialize
         time.sleep(3)

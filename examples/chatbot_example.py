@@ -10,7 +10,7 @@ DP_FACTOR = 1
 
 if __name__ == "__main__":
     # Load tokenizer
-    model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"  # Change as needed
+    model_name = "microsoft/Phi-4-mini-instruct"  # Change as needed
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Get distributed model
@@ -33,7 +33,8 @@ if __name__ == "__main__":
         with torch.no_grad():
             outputs = distributed_model.generate(
                 inputs,
-                max_length=64,
+                max_length=256,
+                max_new_tokens=256,
                 num_return_sequences=1,
                 temperature=0.7,
                 pad_token_id=tokenizer.eos_token_id,

@@ -100,11 +100,13 @@ class User(TorchNode):
             ghost = 0
 
             if not handled:
-                # We have received a job accept request from a validator handle
+                # We have received a job accept response from a validator handle
                 if b"ACCEPT-JOB" == data[:10]:
                     # Start a new thread to handle the job acceptance logic
                     threading.Thread(
-                        target=self.handle_accept_job, args=(data, node), daemon=True
+                        target=self.finalize_job_creation,
+                        args=(data, node),
+                        daemon=True,
                     ).start()
                 elif b"DECLINE-JOB" == data[:11]:
                     if node.node_id in self.jobs[-1]["seed_validators"]:
@@ -172,7 +174,7 @@ class User(TorchNode):
     def request_peers(self):
         pass
 
-    def handle_accept_job(self, data: bytes, node: Connection):
+    def finalize_job_creation(self, data: bytes, node: Connection):
         """
         Handle the job acceptance logic when a validator accepts a job.
         Runs in a separate thread.
@@ -208,7 +210,14 @@ class User(TorchNode):
                         )
 
                         if connected:
+                            self.debug_print(
+                                f"User -> Module: {mod_id} has connected to Worker: {worker_info}"
+                            )
                             self.modules[mod_id]["workers"].append(worker_info["id"])
+                        else:
+                            self.debug_print(
+                                f"User -> Error connecting Module: {mod_id} to Worker: {worker_info}"
+                            )
 
                 # Update DHT with new worker assignments
                 self.store_value(job_id, job_data)
@@ -267,6 +276,7 @@ class User(TorchNode):
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
         validator_ids = [random.choice(self.validators)]
         if len(distribution) != 1:
+            # The case where we have a custom model with distributed config
             distribution = {
                 k: v for k, v in distribution.items() if v["type"] == "offloaded"
             }
@@ -293,6 +303,7 @@ class User(TorchNode):
                 "seed_validators": validator_ids,
             }
         else:
+            # The case where we have a huggingface model name for inference
             job_request = {
                 "author": self.rsa_key_hash,
                 "active": True,
@@ -321,6 +332,8 @@ class User(TorchNode):
         self.store_value(job_hash, job_request)
         self.jobs.append(job_hash)
 
+        self.debug_print(f"Creating job request: {job_request}")
+
         # Send job request to multiple validators (seed validators)
         job_req_threads = []
         for validator in validators[:1]:
@@ -336,6 +349,7 @@ class User(TorchNode):
 
         # Get updated job info
         job_request = self.query_dht(job_hash)
+        self.debug_print(f"Received response from validator: {job_request}")
         distribution = job_request["distribution"]
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
@@ -374,6 +388,7 @@ class User(TorchNode):
         """Send a request to a validator to oversee our job"""
         if validator.node_id not in job_info["seed_validators"]:
             raise "Validator not a seed validator"
+
         message = b"JOB-REQ" + json.dumps(job_info).encode()
         self._store_request(validator.node_id, job_info["id"])
         self.send_to_node(validator, message)
@@ -381,7 +396,7 @@ class User(TorchNode):
 
         # Wait for validator request and accept timeouts
         while job_info["id"] in self.requests[validator.node_id]:
-            if time.time() - start_time > 100:
+            if time.time() - start_time > 120:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print(
                     "User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB",

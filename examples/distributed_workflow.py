@@ -44,7 +44,7 @@ BATCH_SIZE = 16
 PIPELINES = 1
 DP_FACTOR = 1
 TRAINING = False  # Set true to request train job and get a distributed optimizer
-model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+model_name = "Qwen/Qwen2.5-7B-Instruct"
 
 
 if __name__ == "__main__":

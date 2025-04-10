@@ -140,7 +140,7 @@ class DistributedWorker:
 
                 # Small sleep to prevent CPU hogging
                 if not (has_backward or has_forward):
-                    time.sleep(0.001)  # Minimal sleep when idle
+                    time.sleep(0.02)  # Minimal sleep when idle
 
     def _handle_backward(self, module_id, module):
         """Optimized backward pass with mixed precision support"""
@@ -596,7 +596,7 @@ class DistributedWorker:
         while not self.terminate:
             # Adaptive polling frequency based on activity
             active_modules = len(self.modules) > 0
-            sleep_time = 0.05 if active_modules else 0.2
+            sleep_time = 0.05 if active_modules else 1
 
             if counter % update_check_interval == 0:
                 args = self.send_request("check_module", None)
