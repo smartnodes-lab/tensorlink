@@ -282,7 +282,11 @@ class TorchNode(SmartNode):
                 self._remove_request(node.node_id, req)
 
             if module_name is not None:
-                self.debug_print(f"TorchNode -> Received Module: {module_id}")
+                self.debug_print(
+                    f"TorchNode -> Loading distributed module: {module_id}",
+                    colour="bright_cyan",
+                    level=logging.INFO,
+                )
 
                 self.modules[module_id] = {
                     "mem_info": module_id,
@@ -294,12 +298,6 @@ class TorchNode(SmartNode):
                     "training": training,
                 }
                 self.state_updates[module_id] = []
-
-                self.debug_print(
-                    "TorchNode -> Loaded distributed module!",
-                    colour="bright_cyan",
-                    level=logging.INFO,
-                )
                 return True
 
             else:

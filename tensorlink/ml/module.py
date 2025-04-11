@@ -310,7 +310,7 @@ class DistributedModel(nn.Module):
                             (detach_tensor(loss), None)
                         )
                     else:
-                        loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
+                        loss_bytes = tensor_to_bytes(loss)
                         size, shm_name = store_in_shared_memory(
                             loss_bytes, encoded=True
                         )
@@ -701,7 +701,7 @@ class DistributedModel(nn.Module):
         from tensorlink import UserNode
 
         node = UserNode(
-            upnp=True, off_chain_test=False, local_test=False, print_level=logging.DEBUG
+            upnp=True, off_chain_test=False, local_test=False, print_level=logging.INFO
         )
         # Allow time for node to initialize
         time.sleep(3)
@@ -827,8 +827,8 @@ class OffloadedModule(nn.Module):
             pass
 
     def generate(self, *args, **kwargs):
-        args_bytes = json.dumps(tensor_to_bytes(args)).encode()
-        kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+        args_bytes = tensor_to_bytes(args)
+        kwargs_bytes = tensor_to_bytes(kwargs)
         request_bytes = self.module_id.encode() + args_bytes + b"::" + kwargs_bytes
         size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
         self.parent_model.send_request("generate", (self.worker_id, size, shm_name))
@@ -867,8 +867,8 @@ class OffloadedModule(nn.Module):
             )
 
         detached_args = handle_output(args).clone().detach()
-        args_bytes = json.dumps(tensor_to_bytes(detached_args)).encode()
-        kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+        args_bytes = tensor_to_bytes(detached_args)
+        kwargs_bytes = tensor_to_bytes(kwargs)
         forward_bytes = args_bytes + b"|" + kwargs_bytes
 
         size, shm_name = store_in_shared_memory(forward_bytes, encoded=True)

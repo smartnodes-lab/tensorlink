@@ -683,7 +683,7 @@ class Validator(TorchNode):
             self._store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
 
-        time.sleep(1)
+        time.sleep(2)
 
         if send_to is not None:
             node = self.nodes[send_to]

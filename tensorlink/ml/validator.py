@@ -69,52 +69,52 @@ class DistributedValidator:
                     model_name = job_data.get("model_name")
 
                     # Check if we already have the distribution saved
-                    if (
-                        model_name in self.models
-                        and "distribution" in self.models[model_name]
-                    ):
-                        # Use the saved distribution
-                        distribution = self.models[model_name]["distribution"]
+                    # if (
+                    #     model_name in self.models
+                    #     and "distribution" in self.models[model_name]
+                    # ):
+                    #     # Use the saved distribution
+                    #     distribution = self.models[model_name]["distribution"]
+                    #
+                    #     # Update RAM and VRAM estimates from saved data
+                    #     job_data["vram"] = sum(
+                    #         [v["size"] for v in distribution.values()]
+                    #     )
+                    #     job_data["ram"] = sum(
+                    #         [v["size"] for v in distribution.values()]
+                    #     )
+                    #
+                    #     self.send_request(
+                    #         "debug_print",
+                    #         (
+                    #             f"DistributedValidator -> Retrieved cached HF model: {job_data}",
+                    #             "bright_blue",
+                    #             logging.INFO,
+                    #         ),
+                    #     )
+                    # else:
 
-                        # Update RAM and VRAM estimates from saved data
-                        job_data["vram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
-                        job_data["ram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
+                    # Load HF model, create and save distribution
+                    # model, tokenizer = get_hf_model(model_name, tokenizer=True)
+                    parser = ModelParser()
+                    distribution = parser.create_distributed_config(
+                        model_name,  # model,
+                        training=job_data.get("training", False),
+                        trusted=False,
+                    )
+                    job_data["distribution"] = distribution
 
-                        self.send_request(
-                            "debug_print",
-                            (
-                                f"DistributedValidator -> Retrieved cached HF model: {job_data}",
-                                "bright_blue",
-                                logging.INFO,
-                            ),
-                        )
-                    else:
-                        # Load HF model, create and save distribution
-                        # model, tokenizer = get_hf_model(model_name, tokenizer=True)
-                        parser = ModelParser()
-                        distribution = parser.create_distributed_config(
-                            model_name,  # model,
-                            training=job_data.get("training", False),
-                            trusted=False,
-                        )
-                        job_data["distribution"] = distribution
+                    # Save the distribution
+                    self.models[model_name] = {"distribution": distribution}
 
-                        # Save the distribution
-                        self.models[model_name] = {"distribution": distribution}
-                        save_models(self.models)
-
-                        self.send_request(
-                            "debug_print",
-                            (
-                                f"DistributedValidator -> Retrieved HF model: {job_data}",
-                                "bright_blue",
-                                logging.DEBUG,
-                            ),
-                        )
+                    self.send_request(
+                        "debug_print",
+                        (
+                            f"DistributedValidator -> Retrieved HF model: {job_data}",
+                            "bright_blue",
+                            logging.DEBUG,
+                        ),
+                    )
 
                     # del model
                     # del tokenizer

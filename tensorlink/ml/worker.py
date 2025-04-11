@@ -221,7 +221,7 @@ class DistributedWorker:
                 del assoc_input, assoc_output
 
                 # Store pass in shared memory and send to next node
-                dvalues_bytes = json.dumps(tensor_to_bytes(dvalues)).encode()
+                dvalues_bytes = tensor_to_bytes(dvalues)
                 size, name = store_in_shared_memory(dvalues_bytes, encoded=True)
                 self.send_request("send_backward", (next_node, size, name, tag))
 
@@ -286,11 +286,11 @@ class DistributedWorker:
         # Use memory stream for data serialization and transfers
         if self.device.type == "cuda":
             with torch.cuda.stream(self.memory_stream):
-                output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+                output_bytes = tensor_to_bytes(detached_out)
                 size, name = store_in_shared_memory(output_bytes)
             self.memory_stream.synchronize()
         else:
-            output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+            output_bytes = tensor_to_bytes(detached_out)
             size, name = store_in_shared_memory(output_bytes)
 
         self.send_request("send_forward", (module.host, size, name, key))
@@ -310,7 +310,7 @@ class DistributedWorker:
         args, kwargs = query_bytes.split(b"::")
 
         # Convert args to tensor and move to device
-        input_ids = torch.tensor(json.loads(args), dtype=torch.long)
+        input_ids = bytes_to_tensor(args)
 
         # Use pinned memory for faster host->device transfer
         if self.device.type == "cuda":
@@ -321,8 +321,7 @@ class DistributedWorker:
             input_ids = attach_tensor(input_ids, self.device)
 
         # Load kwargs but filter out non-generation parameters
-        all_kwargs = json.loads(kwargs)
-
+        all_kwargs = bytes_to_tensor(kwargs)
         # Filter out other known non-generation parameters
         known_non_generation_params = ['module', 'class', 'data']
         for param in known_non_generation_params:
@@ -343,22 +342,33 @@ class DistributedWorker:
             torch.cuda.synchronize()
 
         try:
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Generating with input arguments: {all_kwargs}",
+                    "bright_blue",
+                    logging.DEBUG,
+                ),
+            )
             # Generate text with the model
             with torch.no_grad():
+                if isinstance(input_ids, list):
+                    input_ids = input_ids[-1]
+
                 # Use CUDA stream for generation
                 if self.device.type == "cuda":
                     with torch.cuda.stream(self.compute_stream):
                         output = module.generate(input_ids, **all_kwargs)
                     self.compute_stream.synchronize()
                 else:
-                    output = module.generate(input_ids, **all_kwargs)
+                    output = module.generate(**all_kwargs)
 
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
 
             # Detach and store generated output
             detached_out = detach_tensor(output)
-            output_bytes = json.dumps(tensor_to_bytes(detached_out)).encode()
+            output_bytes = tensor_to_bytes(detached_out)
         except Exception as e:
             # Handle any exceptions during generation
             output_bytes = json.dumps({"error": str(e)}).encode()

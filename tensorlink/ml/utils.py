@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from huggingface_hub import HfApi
 from transformers.utils import ModelOutput
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
 
 class MemoryType(Enum):
@@ -874,39 +874,71 @@ def get_optimizer_from_name(optimizer_name):
 
 
 def tensor_to_bytes(tensor):
-    """Convert a PyTorch tensor to a JSON-serializable format."""
-    module_name = tensor.__class__.__module__
-    class_name = tensor.__class__.__name__
+    """Serialize tensor or tensor-like structures into bytes, including dtype."""
 
-    if isinstance(tensor, torch.Tensor):
-        serialized_data = tensor.tolist()  # Convert tensor to list (JSON-safe)
-    elif isinstance(tensor, dict):
-        serialized_data = {
-            k: v.tolist() if isinstance(v, torch.Tensor) else v
-            for k, v in tensor.items()
-        }
-    elif isinstance(tensor, tuple):
-        if len(tensor) > 0:
-            return tensor[0].tolist() if isinstance(tensor[0], torch.Tensor) else tensor
-        return tensor
-    else:
-        raise ValueError("Invalid tensor structure")
+    def _serialize(obj):
+        if isinstance(obj, (int, float, str, bool, type(None))):
+            return obj
 
-    return {"module": module_name, "class": class_name, "data": serialized_data}
+        elif isinstance(obj, torch.Tensor):
+            return {
+                "__serialized__": True,
+                "module": obj.__class__.__module__,
+                "class": obj.__class__.__name__,
+                "dtype": str(obj.dtype),  # Save dtype as string
+                "data": obj.tolist(),
+            }
+
+        elif isinstance(obj, BatchEncoding):
+            return {
+                "__serialized__": True,
+                "module": obj.__class__.__module__,
+                "class": obj.__class__.__name__,
+                "data": {k: _serialize(v) for k, v in obj.items()},
+            }
+
+        elif isinstance(obj, dict):
+            return {k: _serialize(v) for k, v in obj.items()}
+
+        elif isinstance(obj, (list, tuple)):
+            _type = list if isinstance(obj, list) else tuple
+            return _type([_serialize(v) for v in obj])
+
+        raise ValueError(f"Unsupported type for serialization: {type(obj)}")
+
+    return json.dumps(_serialize(tensor)).encode("utf-8")
 
 
 def bytes_to_tensor(tensor_data):
+    """Deserialize bytes or JSON-like dicts/lists into tensors."""
     if isinstance(tensor_data, bytes):
         tensor_data = json.loads(tensor_data)
 
-    module = importlib.import_module(tensor_data["module"])
-    output_class = getattr(module, tensor_data["class"])
+    def _deserialize(obj):
+        if isinstance(obj, (int, float, str, bool, type(None))):
+            return obj
 
-    if isinstance(tensor_data["data"], dict):
-        reconstructed_data = {
-            k: torch.tensor(v) if isinstance(v, list) else v
-            for k, v in tensor_data["data"].items()
-        }
-        return reconstructed_data
+        if isinstance(obj, list):
+            return [_deserialize(v) for v in obj]
 
-    return torch.tensor(tensor_data["data"])
+        if isinstance(obj, dict):
+            if obj.get("__serialized__"):
+                cls_name = obj["class"]
+                data = obj["data"]
+
+                if cls_name == "Tensor":
+                    dtype_str = obj["dtype"]
+                    if "." in dtype_str:
+                        dtype_str = dtype_str.split(".")[
+                            -1
+                        ]  # Remove 'torch.' if present
+                    return torch.tensor(data, dtype=getattr(torch, dtype_str))
+
+                if cls_name == "BatchEncoding":
+                    return BatchEncoding({k: _deserialize(v) for k, v in data.items()})
+
+            return {k: _deserialize(v) for k, v in obj.items()}
+
+        raise ValueError(f"Unsupported object type during deserialization: {type(obj)}")
+
+    return _deserialize(tensor_data)

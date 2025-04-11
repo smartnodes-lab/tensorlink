@@ -44,7 +44,13 @@ BATCH_SIZE = 16
 PIPELINES = 1
 DP_FACTOR = 1
 TRAINING = False  # Set true to request train job and get a distributed optimizer
-model_name = "Qwen/Qwen2.5-7B-Instruct"
+
+# Chatbot parameters
+model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+MAX_HISTORY_TURNS = 6
+MAX_TOKENS = 2048
+MAX_NEW_TOKENS = 256
+TEMPERATURE = 0.7
 
 
 if __name__ == "__main__":
@@ -100,18 +106,21 @@ if __name__ == "__main__":
     # Run a dummy training loop to showcase functionality
     for _ in range(5):
         # Tokenize input
-        input_text = "Hello"  #  + tokenizer.eos_token
-        inputs = tokenizer.encode(input_text, return_tensors="pt")
-        # Concatenate chat history here...
+        input_text = "You: Hello Bot."
+        inputs = tokenizer(
+            input_text, return_tensors="pt", padding=True, truncation=True
+        )
 
         # Generate response
         with torch.no_grad():
+            # Then during generation:
             outputs = distributed_model.generate(
                 inputs,
-                max_length=128,
-                num_return_sequences=1,
-                temperature=0.7,
-                pad_token_id=tokenizer.eos_token_id,
+                max_new_tokens=MAX_NEW_TOKENS,
+                temperature=TEMPERATURE,
+                pad_token_id=tokenizer.eos_token_id,  # still valid, optional if eos_token_id is used
+                eos_token_id=tokenizer.eos_token_id,  # explicitly recommended
+                do_sample=True,  # temperature only has effect if sampling is on
             )
 
         # Decode and print response
