@@ -2,6 +2,8 @@
 
 VENV_PATH="venv"
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Error handling function
 handle_error() {
     echo "Error: $1"

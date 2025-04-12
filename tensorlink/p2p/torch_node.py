@@ -481,6 +481,8 @@ class TorchNode(SmartNode):
                 return_val = module_id
                 del module["termination"]
                 module["terminated"] = True
+                self.available_gpu_memory += module[""]
+                del self.modules[module_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -752,7 +754,7 @@ class TorchNode(SmartNode):
     def _listen_requests(self):
         while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
-            time.sleep(0.01)
+            time.sleep(0.02)
 
     def get_module_hash_from_id(self, mod_id: bytes):
         for mod_hash in self.modules:

@@ -117,6 +117,7 @@ def main():
         off_chain_test=local,
         print_level=logging.INFO,
         trusted=trusted,
+        utilization=False,
     )
 
     try:

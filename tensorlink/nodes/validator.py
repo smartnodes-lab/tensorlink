@@ -165,7 +165,7 @@ class Validator(TorchNode):
 
     def _handle_worker_stats_response(self, data: bytes, node: Connection):
         self.debug_print(
-            f"Validator -> Received stats from worker: {node.node_id}",
+            f"Validator -> Received stats from worker: {node.node_id}: {json.loads(data[14:])}",
             colour="bright_blue",
         )
 
