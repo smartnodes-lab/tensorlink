@@ -18,7 +18,7 @@ class JobRequest(BaseModel):
 class GenerationRequest(BaseModel):
     message: str
     max_length: int = 256
-    temperature: float = 0.7
+    temperature: float = 0.4
     do_sample: bool = True
     history: Optional[List[dict]] = None
 
@@ -138,7 +138,7 @@ def create_endpoint(smart_node):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/load_model")
-    async def load_model(request: ModelRequest):
+    async def load_model(request: JobRequest):
         """Load model and tokenizer"""
         global model, tokenizer
 

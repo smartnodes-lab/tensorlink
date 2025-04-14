@@ -237,7 +237,7 @@ class Worker(TorchNode):
         node_cleaner.start()
 
         while not self.terminate_flag.is_set():
-            time.sleep(1)
+            time.sleep(2)
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass

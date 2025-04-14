@@ -2,6 +2,7 @@ from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.utils import estimate_hf_model_memory, get_hf_model
 
 import threading
+import logging
 import json
 import time
 import gc
@@ -64,42 +65,60 @@ class DistributedValidator:
             job_data = self.send_request("get_jobs", None)
 
             if isinstance(job_data, dict):
-                if job_data.get("vram", 0) < 8e9:
+                if job_data.get("vram", 0) < 16e9:
                     model_name = job_data.get("model_name")
 
                     # Check if we already have the distribution saved
-                    if (
-                        model_name in self.models
-                        and "distribution" in self.models[model_name]
-                    ):
-                        # Use the saved distribution
-                        distribution = self.models[model_name]["distribution"]
-                        job_data["distribution"] = distribution
+                    # if (
+                    #     model_name in self.models
+                    #     and "distribution" in self.models[model_name]
+                    # ):
+                    #     # Use the saved distribution
+                    #     distribution = self.models[model_name]["distribution"]
+                    #
+                    #     # Update RAM and VRAM estimates from saved data
+                    #     job_data["vram"] = sum(
+                    #         [v["size"] for v in distribution.values()]
+                    #     )
+                    #     job_data["ram"] = sum(
+                    #         [v["size"] for v in distribution.values()]
+                    #     )
+                    #
+                    #     self.send_request(
+                    #         "debug_print",
+                    #         (
+                    #             f"DistributedValidator -> Retrieved cached HF model: {job_data}",
+                    #             "bright_blue",
+                    #             logging.INFO,
+                    #         ),
+                    #     )
+                    # else:
 
-                        # Update RAM and VRAM estimates from saved data
-                        job_data["vram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
-                        job_data["ram"] = sum(
-                            [v["size"] for v in distribution.values()]
-                        )
-                    else:
-                        # Load HF model, create and save distribution
-                        model, tokenizer = get_hf_model(model_name, tokenizer=True)
-                        parser = ModelParser()
-                        distribution = parser.create_distributed_config(
-                            model,
-                            training=job_data.get("training", False),
-                            trusted=False,
-                        )
+                    # Load HF model, create and save distribution
+                    # model, tokenizer = get_hf_model(model_name, tokenizer=True)
+                    parser = ModelParser()
+                    distribution = parser.create_distributed_config(
+                        model_name,  # model,
+                        training=job_data.get("training", False),
+                        trusted=False,
+                    )
+                    job_data["distribution"] = distribution
 
-                        # Save the distribution
-                        self.models[model_name] = {"distribution": distribution}
-                        save_models(self.models)
+                    # Save the distribution
+                    self.models[model_name] = {"distribution": distribution}
 
-                        del model
-                        del tokenizer
-                        gc.collect()  # Force garbage collection
+                    self.send_request(
+                        "debug_print",
+                        (
+                            f"DistributedValidator -> Retrieved HF model: {job_data}",
+                            "bright_blue",
+                            logging.DEBUG,
+                        ),
+                    )
+
+                    # del model
+                    # del tokenizer
+                    gc.collect()  # Force garbage collection
 
                     # Process the job with the distribution (whether loaded or cached)
                     if job_data["hosted"]:

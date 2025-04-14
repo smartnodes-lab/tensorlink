@@ -32,7 +32,7 @@ DP_FACTOR = 1
 if __name__ == "__main__":
     # Get distributed model directly from HuggingFace without loading
     distributed_model = DistributedModel(
-        'bert-base-uncased',  # "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        "bert-base-uncased",
         training=False,
         n_pipelines=PIPELINES,
     )

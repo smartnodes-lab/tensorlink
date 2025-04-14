@@ -165,7 +165,7 @@ class Validator(TorchNode):
 
     def _handle_worker_stats_response(self, data: bytes, node: Connection):
         self.debug_print(
-            f"Validator -> Received stats from worker: {node.node_id}",
+            f"Validator -> Received stats from worker: {node.node_id}: {json.loads(data[14:])}",
             colour="bright_blue",
         )
 
@@ -304,6 +304,7 @@ class Validator(TorchNode):
     def create_hf_job(self, job_info: dict, requesters_ip: str):
         # Rate limitation checks
         if self.rate_limiter.is_blocked(requesters_ip):
+            self.debug_print(f"Job declined! Reason: UserIPBlocked ({requesters_ip})")
             return False
 
         self.rate_limiter.record_attempt(requesters_ip)
@@ -349,15 +350,15 @@ class Validator(TorchNode):
         self._store_request(self.rsa_key_hash, request_value)
 
     def _handle_job_req(self, data: bytes, node: Connection):
+        job_req = json.loads(data[7:])
+        # Get author of job listed on SC and confirm job and roles id TODO to be implemented post-alpha
+        node_info = self.query_dht(node.node_id)
+
         self.debug_print(
-            f"Validator -> User: {node.node_id} requested job.",
+            f"Validator -> User: {node.node_id} requested job -> JobRequest({job_req})",
             colour="bright_blue",
             level=logging.INFO,
         )
-        job_req = json.loads(data[7:])
-
-        # Get author of job listed on SC and confirm job and roles id TODO to be implemented post-alpha
-        node_info = self.query_dht(node.node_id)
 
         if (
             node.role != "U" or not node_info or node_info["reputation"] < 50
@@ -400,34 +401,6 @@ class Validator(TorchNode):
         else:
             node.ghosts += 1
 
-    # def validate(self, job_id: bytes, module_id: ):
-    #     """
-    #     Perform validation by comparing computations with worker roles.
-    #     params:
-    #         job_id: job hash
-    #         module_id:
-    #         epoch:
-    #         input: input of module at specific
-    #         output:
-    #     """
-    #     # Perform computations using the provided data
-    #     # Compare results with computations from worker roles
-    #     # Store validation results in self.validation_results
-    #
-    #     job_info = self.query_routing_table(job_id)
-    #
-    #     if job_info:
-    #         # Confirm job is listed
-    #         author = job_info["author"]
-    #         listed_author = self.contract.functions.getJobAuthor(author).call()
-    #
-    #         if author != listed_author:
-    #             self.debug_print(f"Invalid/incorrect job")
-    #
-    #         # Get worker roles ids of specific module in workflow
-    #         self.
-    #     pass
-
     def check_job_availability(self, job_data: dict):
         """Asserts that the specified user does not have an active job, and that
         the job capacity can be handled by the network."""
@@ -455,6 +428,12 @@ class Validator(TorchNode):
         total_memory = sum(self.worker_memories.values())
 
         if total_memory < capacity:
+            self.debug_print(
+                f"Validator -> Not enough network capacity for Job:\n"
+                f"\tID: {job_data['id']}\n"
+                f"\tREQUIRED-MEMORY: {capacity}.\n"
+                f"\tNETWORK-MEMORY: {total_memory}\n"
+            )
             return False
 
         # Sort workers by memory in ascending order
@@ -489,6 +468,14 @@ class Validator(TorchNode):
                         )
                         for w_id, mem in sorted_workers
                     ]
+                else:
+                    self.debug_print(
+                        f"Validator -> No worker found with enough memory for Job:\n"
+                        f"\tID: {job_data['id']}\n"
+                        f"\tMODULE: {module_id}\n"
+                        f"\tREQUIRED-MEMORY: {module_memory}.\n"
+                    )
+                    return False
 
         return assigned_workers
 
@@ -508,6 +495,10 @@ class Validator(TorchNode):
 
         # If no workers available, decline job
         if not assigned_workers:
+            self.debug_print(
+                f"Validator -> Declining job '{job_data['id']}': Could not find enough workers."
+            )
+            self.response_queue.put({"status": "SUCCESS", "return": False})
             self.decline_job(requesting_node)
             return
 
@@ -550,6 +541,10 @@ class Validator(TorchNode):
 
                 # If no suitable worker found for this pipeline, decline job
                 if not worker_found:
+                    self.debug_print(
+                        f"Validator -> Declining job '{job_data['id']}': Could not find enough workers for distribution"
+                    )
+                    self.response_queue.put({"status": "SUCCESS", "return": False})
                     self.decline_job(requesting_node)
                     return
 
@@ -566,15 +561,21 @@ class Validator(TorchNode):
         # Check if all modules have the required number of pipelines assigned
         for module, module_info in job_data["distribution"].items():
             if len(module_info["workers"]) != n_pipelines:
+                self.debug_print(
+                    f"Validator -> Declining job '{job_data['id']}': Pipeline initialization error! \n"
+                    f"\tExpected: {n_pipelines:}, Received: {len(module_info['workers'])} ({job_data['distribution']})"
+                )
+                self.response_queue.put({"status": "SUCCESS", "return": False})
                 self.decline_job(requesting_node)
                 return
 
-        print("Sending Job Data to User:", job_data)
         # Send the updated job data with worker info to the user
         self.send_to_node(
             requesting_node,
             b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode(),
         )
+
+        self.response_queue.put({"status": "SUCCESS", "return": True})
 
         self.jobs.append(job_id)
 
@@ -622,18 +623,30 @@ class Validator(TorchNode):
         )
         data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
+        self.debug_print(
+            f"Validator -> Attempting to recruit worker: '{worker_id}' for job: '{job_id}'"
+        )
 
         # Check worker's available memory
         worker_stats = node.stats
         if worker_stats["gpu_memory"] < module_size:
+            self.debug_print(
+                f"Validator -> Worker: '{worker_id}' not enough GPU memory"
+            )
             return False
 
+        # Send a job request to the worker
         self._store_request(node.node_id, job_id + module_id)
         self.send_to_node(node, data)
 
+        # Await 3 seconds for the job request
+        timeout = 3
         start_time = time.time()
         while module_id in self.requests[node.node_id]:
-            if time.time() - start_time > 3:
+            if time.time() - start_time > timeout:
+                self.debug_print(
+                    f"Validator -> Worker: '{worker_id}' timed out during recruitment request."
+                )
                 self.requests[node.node_id].remove(module_id)
                 return False
 
@@ -641,7 +654,9 @@ class Validator(TorchNode):
         node.stats["gpu_memory"] -= module_size
         job = self.query_dht(job_id)
         job["distribution"][module_id]["workers"] = node.node_id
-
+        self.debug_print(
+            f"Validator -> Worker: '{worker_id}' recruited for job '{job_id}'"
+        )
         return True
 
     def get_workers(self):
@@ -668,7 +683,7 @@ class Validator(TorchNode):
             self._store_request(connection.node_id, b"STATS")
             # TODO disconnect workers who do not respond/have not recently responded to request
 
-        time.sleep(1)
+        time.sleep(2)
 
         if send_to is not None:
             node = self.nodes[send_to]
@@ -812,15 +827,15 @@ class Validator(TorchNode):
         node_cleaner.start()
 
         if self.off_chain_test is False:
-            self.proposal_listener = threading.Thread(
-                target=self.contract_manager.proposal_validator, daemon=True
-            )
-            self.proposal_listener.start()
-
             self.execution_listener = threading.Thread(
                 target=self.contract_manager.proposal_creator, daemon=True
             )
             self.execution_listener.start()
+            time.sleep(15)
+            self.proposal_listener = threading.Thread(
+                target=self.contract_manager.proposal_validator, daemon=True
+            )
+            self.proposal_listener.start()
 
         counter = 0
         # Loop for active job and network moderation

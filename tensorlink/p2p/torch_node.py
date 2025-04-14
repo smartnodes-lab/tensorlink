@@ -90,6 +90,7 @@ class TorchNode(SmartNode):
                             in (
                                 b"LOADED",
                                 b"FORWARD",
+                                b"GENERATE",
                                 b"BACKWARD",
                                 b"OPTIMIZER-RESPONSE",
                                 b"OPTIMIZER",
@@ -212,26 +213,49 @@ class TorchNode(SmartNode):
             # TODO we must check that the forward received corresponds to a sent pass/specific module
             # must also do with backwards
             tensor = data[eos + 2 : eos + 2 + size]
-            key = tuple(json.loads(data[eos + 2 + size :]))
+            key = json.loads(data[eos + 2 + size :])
 
-            # Create shared mpc block and store tensor
-            self._store_tensor_in_shared_memory(key, tensor)
+            if not isinstance(key, str):
+                key = tuple(key)
+
+                # Create shared mpc block and store tensor
+                self._store_tensor_in_shared_memory(key, tensor)
+            else:
+                module_id = None
+                for module in self.modules:
+                    if node.node_id in self.modules[module]["workers"]:
+                        module_id = module
+                        break
+
+                shm = shared_memory.SharedMemory(create=True, size=size)
+                buffer = shm.buf[:size]
+                buffer[:] = tensor
+
+                self.modules[module_id]["forward_queue"][key] = (size, shm.name)
+                self.memory_manager[key] = shm.name
+                del buffer
+                shm.close()
             return True
 
-    def _handle_generate(self, data: bytes):
+    def _handle_generate(self, data: bytes, node: Connection):
         # Received a forward pass
-        eos = data.find(b"::")
-        size = int(data[7:eos])
-        formatted_size = format_size(size)
-        self.debug_print(f"TorchNode -> RECEIVED GENERATE: {formatted_size}")
+        self.debug_print("TorchNode -> RECEIVED GENERATE")
 
-        # TODO we must check that the forward received corresponds to a sent pass/specific module
-        # must also do with backwards
-        tensor = data[eos + 2 : eos + 2 + size]
-        key = tuple(json.loads(data[eos + 2 + size :]))
+        # if self.role == "U":
+        #
+        # else:
+        module_id = data[8:72]
 
-        # Create shared mpc block and store tensor
-        self._store_tensor_in_shared_memory(key, tensor)
+        size = len(data[72:])
+        shm = shared_memory.SharedMemory(create=True, size=size)
+        buffer = shm.buf[:size]
+        buffer[:] = data[72:]
+        key = module_id.decode()
+
+        self.modules[key]["forward_queue"][key] = (size, shm.name)
+        self.memory_manager[key] = shm.name
+        del buffer
+        shm.close()
         return True
 
     def _handle_module(self, data: bytes, node: Connection):
@@ -242,7 +266,6 @@ class TorchNode(SmartNode):
         request_to_remove = []
 
         if node.node_id in self.requests:
-            print(self.requests[node.node_id])
             for req in self.requests[node.node_id]:
                 if module_id in req or (
                     isinstance(req, dict) and module_id == req["id"]
@@ -259,7 +282,11 @@ class TorchNode(SmartNode):
                 self._remove_request(node.node_id, req)
 
             if module_name is not None:
-                self.debug_print(f"TorchNode -> Received Module: {module_id}")
+                self.debug_print(
+                    f"TorchNode -> Loading distributed module: {module_id}",
+                    colour="bright_cyan",
+                    level=logging.INFO,
+                )
 
                 self.modules[module_id] = {
                     "mem_info": module_id,
@@ -271,12 +298,6 @@ class TorchNode(SmartNode):
                     "training": training,
                 }
                 self.state_updates[module_id] = []
-
-                self.debug_print(
-                    "TorchNode -> Loaded distributed module!",
-                    colour="bright_cyan",
-                    level=logging.INFO,
-                )
                 return True
 
             else:
@@ -326,6 +347,7 @@ class TorchNode(SmartNode):
                 "check_module": self._handle_check_module,
                 "check_module_request": self._handle_check_module_request,
                 "check_forward": self._handle_check_forward,
+                "check_generate": self._handle_check_generate,
                 "check_backward": self._handle_check_backward,
                 "send_optimizer_request": self._handle_send_optimizer_request,
                 "check_state_update": self._handle_check_state_update,
@@ -341,7 +363,7 @@ class TorchNode(SmartNode):
                 "connect_node": self._handle_connect_node,
                 "info": self._handle_get_info,
                 "debug_print": self._handle_debug_print,
-                # "generate": self._send_generate
+                "generate": self._handle_send_generate,
             }
 
             handler = handlers.get(req_type)
@@ -408,10 +430,9 @@ class TorchNode(SmartNode):
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def _handle_send_generate(self, request):
-        worker_id, size, shm_name = request["args"]
-        node = self.nodes[worker_id]
+        node_id, size, shm_name = request["args"]
+        node = self.nodes[node_id]
         generate_bytes = get_from_shared_memory(size, shm_name, encoded=True)
-
         self.send_to_node(node, b"GENERATE" + generate_bytes)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
@@ -460,6 +481,8 @@ class TorchNode(SmartNode):
                 return_val = module_id
                 del module["termination"]
                 module["terminated"] = True
+                self.available_gpu_memory += module[""]
+                del self.modules[module_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -477,6 +500,17 @@ class TorchNode(SmartNode):
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
+    def _handle_check_generate(self, request):
+        return_val = None
+
+        module_id = request["args"]
+        if module_id in self.modules:
+            if "generate" in self.modules[module_id]["forward_queue"]:
+                return_val = self.modules[module_id]["forward_queue"]["generate"]
+                del self.modules[module_id]["forward_queue"]["generate"]
+
+        self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
     def _handle_check_forward(self, request):
         # Check if forward pass has been received and is loaded in shared mpc
         return_val = None
@@ -486,18 +520,23 @@ class TorchNode(SmartNode):
 
             if module_id in self.modules:
                 module = self.modules[module_id]
-                min_iter, min_micro = -1, -1
-                for n_iter, n_micro, module_id in module["forward_queue"].keys():
-                    if n_iter <= min_iter or min_iter == -1:
-                        min_iter = n_iter
-                    if n_micro <= min_micro or min_micro == -1:
-                        min_micro = n_micro
+                if module_id in module["forward_queue"].keys():
+                    return_val = (module_id, module["forward_queue"][module_id])
+                    del module["forward_queue"][module_id]
 
-                key = (min_iter, min_micro, module_id)
+                else:
+                    min_iter, min_micro = -1, -1
+                    for n_iter, n_micro, module_id in module["forward_queue"].keys():
+                        if n_iter <= min_iter or min_iter == -1:
+                            min_iter = n_iter
+                        if n_micro <= min_micro or min_micro == -1:
+                            min_micro = n_micro
 
-                if key in module["forward_queue"]:
-                    return_val = (key, module["forward_queue"][key])
-                    del module["forward_queue"][key]
+                    key = (min_iter, min_micro, module_id)
+
+                    if key in module["forward_queue"]:
+                        return_val = (key, module["forward_queue"][key])
+                        del module["forward_queue"][key]
 
         else:
             n_iter, n_micro, module_id = request["args"]
@@ -715,7 +754,7 @@ class TorchNode(SmartNode):
     def _listen_requests(self):
         while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
-            time.sleep(0.01)
+            time.sleep(0.02)
 
     def get_module_hash_from_id(self, mod_id: bytes):
         for mod_hash in self.modules:

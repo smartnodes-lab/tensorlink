@@ -45,6 +45,13 @@ PIPELINES = 1
 DP_FACTOR = 1
 TRAINING = False  # Set true to request train job and get a distributed optimizer
 
+# Chatbot parameters
+model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+MAX_HISTORY_TURNS = 6
+MAX_TOKENS = 2048
+MAX_NEW_TOKENS = 256
+TEMPERATURE = 0.7
+
 
 if __name__ == "__main__":
     # Launches a node of each type in their own process (Not necessary if just accessing a DistributedModel
@@ -74,7 +81,11 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Get distributed model directly from HuggingFace without loading
-    distributed_model = DistributedModel("bert-base-uncased", training=False, node=user)
+    distributed_model = DistributedModel(model_name, training=False, node=user)
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
     # from transformers import BertForSequenceClassification
@@ -94,17 +105,27 @@ if __name__ == "__main__":
 
     # Run a dummy training loop to showcase functionality
     for _ in range(5):
-        x = torch.zeros((1, 1), dtype=torch.long)
-        outputs = distributed_model(x)
+        # Tokenize input
+        input_text = "You: Hello Bot."
+        inputs = tokenizer(
+            input_text, return_tensors="pt", padding=True, truncation=True
+        )
 
-        if TRAINING:
-            outputs = outputs.logits
-            loss = mse_loss(outputs, outputs)
-            loss.backward()  # Graph is connected directly to distributed workers allowing for .backwards() call
+        # Generate response
+        with torch.no_grad():
+            # Then during generation:
+            outputs = distributed_model.generate(
+                inputs,
+                max_new_tokens=MAX_NEW_TOKENS,
+                temperature=TEMPERATURE,
+                pad_token_id=tokenizer.eos_token_id,  # still valid, optional if eos_token_id is used
+                eos_token_id=tokenizer.eos_token_id,  # explicitly recommended
+                do_sample=True,  # temperature only has effect if sampling is on
+            )
 
-            # Distributed optimizer calls relay to worker nodes
-            distributed_optimizer.step()
-            distributed_optimizer.zero_grad()
+        # Decode and print response
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        print(f"Bot: {response}\n")
 
     # Gracefully shut down nodes
     user.cleanup()

@@ -1,3 +1,4 @@
+import logging
 from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
 from collections import defaultdict
 from transformers import PreTrainedModel
@@ -309,7 +310,7 @@ class DistributedModel(nn.Module):
                             (detach_tensor(loss), None)
                         )
                     else:
-                        loss_bytes = json.dumps(tensor_to_bytes(loss)).encode()
+                        loss_bytes = tensor_to_bytes(loss)
                         size, shm_name = store_in_shared_memory(
                             loss_bytes, encoded=True
                         )
@@ -556,29 +557,7 @@ class DistributedModel(nn.Module):
 
     def generate(self, *args, **kwargs):
         if isinstance(self.model, OffloadedModule):
-            args_bytes = json.dumps(tensor_to_bytes(args)).encode()
-            kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
-            request_bytes = args_bytes + b"|" + kwargs_bytes
-            size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
-            self.send_request("generate", (self.worker_id, size, shm_name))
-            tag = [n_batch, n_micro, self.module_id]
-            # Wait for response, change to appending waiting thread to list in master
-            waiting = True
-            start_time = time.time()
-            while waiting:
-                time.sleep(0.1)
-                args = self.parent_model.send_request("check_generate", key)
-
-                if args is not None:
-                    waiting = False
-                    size, name = args
-                    output_bytes = get_from_shared_memory(size, name)
-
-                if time.time() - start_time >= MAX_WAIT_TIME:
-                    # Logic here to request another worker take his place
-                    waiting = False
-
-            output = enable_grad(bytes_to_tensor(output_bytes))
+            return self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -722,7 +701,7 @@ class DistributedModel(nn.Module):
         from tensorlink import UserNode
 
         node = UserNode(
-            upnp=True, off_chain_test=False, local_test=False, print_level=10
+            upnp=True, off_chain_test=False, local_test=False, print_level=logging.INFO
         )
         # Allow time for node to initialize
         time.sleep(3)
@@ -784,7 +763,11 @@ class OffloadedModule(nn.Module):
     """
 
     def __init__(
-        self, parent_model: DistributedModel, module_name, worker_id, module_id: bytes
+        self,
+        parent_model: DistributedModel,
+        module_name: str,
+        worker_id,
+        module_id: str,
     ):
         super(OffloadedModule, self).__init__()
 
@@ -843,6 +826,32 @@ class OffloadedModule(nn.Module):
             # No available workers found, handle the situation accordingly
             pass
 
+    def generate(self, *args, **kwargs):
+        args_bytes = tensor_to_bytes(args)
+        kwargs_bytes = tensor_to_bytes(kwargs)
+        request_bytes = self.module_id.encode() + args_bytes + b"::" + kwargs_bytes
+        size, shm_name = store_in_shared_memory(request_bytes, encoded=True)
+        self.parent_model.send_request("generate", (self.worker_id, size, shm_name))
+
+        # Wait for response, change to appending waiting thread to list in master
+        waiting = True
+        start_time = time.time()
+        while waiting:
+            time.sleep(0.1)
+            args = self.parent_model.send_request("check_generate", self.module_id)
+
+            if args is not None:
+                waiting = False
+                size, name = args
+                output_bytes = get_from_shared_memory(size, name)
+
+            if time.time() - start_time >= MAX_WAIT_TIME:
+                # Logic here to request another worker take his place
+                waiting = False
+
+        output = enable_grad(bytes_to_tensor(output_bytes))
+        return output
+
     def forward(self, *args, **kwargs):
         start_time = time.time()
         n_batch = self.parent_model.model.n_batch
@@ -858,8 +867,8 @@ class OffloadedModule(nn.Module):
             )
 
         detached_args = handle_output(args).clone().detach()
-        args_bytes = json.dumps(tensor_to_bytes(detached_args)).encode()
-        kwargs_bytes = json.dumps(tensor_to_bytes(kwargs)).encode()
+        args_bytes = tensor_to_bytes(detached_args)
+        kwargs_bytes = tensor_to_bytes(kwargs)
         forward_bytes = args_bytes + b"|" + kwargs_bytes
 
         size, shm_name = store_in_shared_memory(forward_bytes, encoded=True)
