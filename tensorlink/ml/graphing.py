@@ -177,77 +177,88 @@ class ModelParser:
         if config is None:
             config, ids = {}, []
 
+        # Estimate memory usage
         if isinstance(module, str):
             module_size, _ = estimate_hf_model_memory(module, training=training)
+            module_name = module
         else:
             module_size = estimate_memory(module, training, batch_size=1024)
+            module_name = getattr(module, 'name_or_path', str(type(module)))
 
-        min_gpu_size = min(self.gpu_sizes, key=lambda x: x < module_size)
-
-        if module_size <= min_gpu_size:
-            k, v = create_offloaded(module, [-1], module_size)
-            v["name"] = None
-
-            if isinstance(module, PreTrainedModel):
-                v["name"] = module.name_or_path
-
-            elif isinstance(module, str):
-                v["name"] = module
-
-            elif not trusted:
-                v["name"] = module.name_or_path
-
-            config[k] = v
-
-        else:
+        # Select the smallest GPU size that is still > module_size
+        try:
+            min_gpu_size = min([s for s in self.gpu_sizes if s >= module_size])
+        except ValueError:
+            print("❌ Model too large to fit in any available GPU.")
+            print(f"📦 Module: {module_name}")
+            print(f"🧠 Estimated Size: {module_size:.2f} GB")
+            print(f"🖥️ Available GPU Sizes: {[f'{s:.2f} GB' for s in self.gpu_sizes]}")
             raise RuntimeError(
-                "Public jobs are currently limited to HuggingFace models in this release. Support for all model "
-                "types will be included in a future update."
+                "🚫 This model is too large to fit on any of the available GPUs.\n"
+                "Currently, public jobs only support HuggingFace models with memory usage within device limits.\n"
+                "Model: {}\n"
+                "Estimated Size: {:.2f} GB\n"
+                "Smallest Available GPU: {:.2f} GB\n".format(
+                    module_name, module_size, min(self.gpu_sizes)
+                )
             )
 
-            # if input_obfuscation is True and not handled_layer and module_size <= self.user_memory:
-            #     k, v = create_loaded(module, ids)
-            #
-            # # Offload model if under 24 Gb and data obfuscation is not required
-            # elif input_obfuscation is False and module_size <= min_gpu_size:
-            #     k, v = create_offloaded(module, [-1], module_size)
-            #     config[k] = v
-            #
-            # # Break down module further
-            # else:
-            #     for i in range(len(module_children)):
-            #         submodule_name, submodule = module_children[i]
-            #         submodule_memory = estimate_memory(submodule)
-            #         submodule_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
-            #
-            #         # Update current submodule ID
-            #         new_ids = ids + [i]
-            #
-            #         # Handle on worker if we do not need to load on user device
-            #         if (
-            #             submodule_memory <= self.max_module_size
-            #             and data_obfuscation is False
-            #         ):
-            #             k, v = create_offloaded(submodule, new_ids, submodule_memory)
-            #             config[k] = v
-            #
-            #         # Handle module on user device if able
-            #         elif self.user_memory >= submodule_memory and data_obfuscation:
-            #             self.user_memory -= submodule_memory
-            #             k, v = create_loaded(submodule, new_ids, submodule_memory)
-            #             config[k] = v
-            #             data_obfuscation = Falsei8
-            #
-            #         # Else we break down the model even further
-            #         else:
-            #             sub_config = self.create_distributed_config(
-            #                 submodule,
-            #                 config=config.copy(),
-            #                 ids=new_ids,
-            #                 data_obfuscation=data_obfuscation,
-            #             )
-            #             k, v = create_loaded(submodule, new_ids, submodule_memory)
-            #             v["subconfig"] = sub_config
-            #             config[k] = v
+        # Assign module to config
+        k, v = create_offloaded(module, [-1], module_size)
+        v["name"] = None
+
+        if isinstance(module, PreTrainedModel):
+            v["name"] = module.name_or_path
+        elif isinstance(module, str):
+            v["name"] = module
+        elif not trusted:
+            v["name"] = module.name_or_path
+
+        config[k] = v
+
+        # if input_obfuscation is True and not handled_layer and module_size <= self.user_memory:
+        #     k, v = create_loaded(module, ids)
+        #
+        # # Offload model if under 24 Gb and data obfuscation is not required
+        # elif input_obfuscation is False and module_size <= min_gpu_size:
+        #     k, v = create_offloaded(module, [-1], module_size)
+        #     config[k] = v
+        #
+        # # Break down module further
+        # else:
+        #     for i in range(len(module_children)):
+        #         submodule_name, submodule = module_children[i]
+        #         submodule_memory = estimate_memory(submodule)
+        #         submodule_type = f"{type(submodule)}".split(".")[-1].split(">")[0][:-1]
+        #
+        #         # Update current submodule ID
+        #         new_ids = ids + [i]
+        #
+        #         # Handle on worker if we do not need to load on user device
+        #         if (
+        #             submodule_memory <= self.max_module_size
+        #             and data_obfuscation is False
+        #         ):
+        #             k, v = create_offloaded(submodule, new_ids, submodule_memory)
+        #             config[k] = v
+        #
+        #         # Handle module on user device if able
+        #         elif self.user_memory >= submodule_memory and data_obfuscation:
+        #             self.user_memory -= submodule_memory
+        #             k, v = create_loaded(submodule, new_ids, submodule_memory)
+        #             config[k] = v
+        #             data_obfuscation = Falsei8
+        #
+        #         # Else we break down the model even further
+        #         else:
+        #             sub_config = self.create_distributed_config(
+        #                 submodule,
+        #                 config=config.copy(),
+        #                 ids=new_ids,
+        #                 data_obfuscation=data_obfuscation,
+        #             )
+        #             k, v = create_loaded(submodule, new_ids, submodule_memory)
+        #             v["subconfig"] = sub_config
+        #             config[k] = v
 
         return config

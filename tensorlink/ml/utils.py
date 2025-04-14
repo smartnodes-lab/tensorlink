@@ -873,6 +873,26 @@ def get_optimizer_from_name(optimizer_name):
     return optimizer_class
 
 
+def get_optimizer_class(optimizer_name):
+    """Find and return the optimizer class from its fully qualified name."""
+    optimizer_class = None
+
+    module, name = optimizer_name.rsplit(".", 1)
+
+    # Check in torch.optim
+    if "torch.optim" in module:
+        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
+
+    # Check in transformers.optimization
+    elif "transformers.optimization" in module:
+        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
+
+    if optimizer_class is None:
+        raise ValueError(f"Optimizer class '{optimizer_name}' not found.")
+
+    return optimizer_class
+
+
 def tensor_to_bytes(tensor):
     """Serialize tensor or tensor-like structures into bytes, including dtype."""
 
@@ -889,7 +909,7 @@ def tensor_to_bytes(tensor):
                 "data": obj.tolist(),
             }
 
-        elif isinstance(obj, BatchEncoding):
+        elif hasattr(obj, "__class__") and obj.__class__.__name__ == "BatchEncoding":
             return {
                 "__serialized__": True,
                 "module": obj.__class__.__module__,
@@ -897,20 +917,106 @@ def tensor_to_bytes(tensor):
                 "data": {k: _serialize(v) for k, v in obj.items()},
             }
 
+        # Handle tokenizers (like Qwen2TokenizerFast)
+        elif (
+            hasattr(obj, "vocab_size")
+            and hasattr(obj, "special_tokens")
+            and hasattr(obj, "get_vocab")
+        ):
+            # Extract essential tokenizer metadata
+            tokenizer_data = {
+                "name_or_path": getattr(obj, "name_or_path", None),
+                "vocab_size": getattr(obj, "vocab_size", None),
+                "model_max_length": getattr(obj, "model_max_length", None),
+                "is_fast": getattr(obj, "is_fast", None),
+                "padding_side": getattr(obj, "padding_side", None),
+                "truncation_side": getattr(obj, "truncation_side", None),
+                "special_tokens": {
+                    k: _serialize(v)
+                    for k, v in getattr(obj, "special_tokens", {}).items()
+                },
+                "added_tokens": [],  # We'll store essential info about added tokens
+                "class_name": obj.__class__.__name__,
+                "module_name": obj.__class__.__module__,
+            }
+
+            # Capture essential added token info
+            if hasattr(obj, "added_tokens_decoder") and getattr(
+                obj, "added_tokens_decoder", None
+            ):
+                for token_id, token in obj.added_tokens_decoder.items():
+                    if hasattr(token, "content"):
+                        tokenizer_data["added_tokens"].append(
+                            {
+                                "id": token_id,
+                                "content": token.content,
+                                "special": getattr(token, "special", False),
+                            }
+                        )
+
+            return {
+                "__serialized__": True,
+                "module": "tokenizers",
+                "class": "Tokenizer",
+                "is_tokenizer": True,
+                "data": tokenizer_data,
+            }
+
+        # Handle stopping criteria objects that may contain tokenizers
+        elif hasattr(obj, "__class__") and "StoppingCriteria" in obj.__class__.__name__:
+            serialized_data = {
+                "__serialized__": True,
+                "module": obj.__class__.__module__,
+                "class": obj.__class__.__name__,
+                "is_stopping_criteria": True,
+                "data": {},
+            }
+
+            # Serialize all attributes that can be serialized
+            for attr_name in dir(obj):
+                # Skip private attributes and methods
+                if attr_name.startswith("_") or callable(getattr(obj, attr_name)):
+                    continue
+
+                try:
+                    attr_value = getattr(obj, attr_name)
+                    serialized_data["data"][attr_name] = _serialize(attr_value)
+                except (ValueError, TypeError):
+                    # If we can't serialize an attribute, log it but continue
+                    serialized_data["data"][
+                        attr_name
+                    ] = f"UNSERIALIZABLE_OBJECT_{type(attr_value).__name__}"
+
+            return serialized_data
+
         elif isinstance(obj, dict):
             return {k: _serialize(v) for k, v in obj.items()}
 
         elif isinstance(obj, (list, tuple)):
-            _type = list if isinstance(obj, list) else tuple
-            return _type([_serialize(v) for v in obj])
+            obj_type = list if isinstance(obj, list) else tuple
+            return obj_type([_serialize(v) for v in obj])
 
-        raise ValueError(f"Unsupported type for serialization: {type(obj)}")
+        # Handle other objects by trying to extract their __dict__
+        elif hasattr(obj, "__dict__"):
+            try:
+                return {
+                    "__serialized__": True,
+                    "module": obj.__class__.__module__,
+                    "class": obj.__class__.__name__,
+                    "is_object": True,
+                    "data": _serialize(obj.__dict__),
+                }
+            except (ValueError, TypeError):
+                pass
+
+        # Return a placeholder for unsupported types
+        return f"UNSERIALIZABLE_OBJECT_{type(obj).__name__}"
 
     return json.dumps(_serialize(tensor)).encode("utf-8")
 
 
 def bytes_to_tensor(tensor_data):
-    """Deserialize bytes or JSON-like dicts/lists into tensors."""
+    """Deserialize bytes or JSON-like dicts/lists into tensors, tokenizers, and other objects."""
     if isinstance(tensor_data, bytes):
         tensor_data = json.loads(tensor_data)
 
@@ -918,15 +1024,22 @@ def bytes_to_tensor(tensor_data):
         if isinstance(obj, (int, float, str, bool, type(None))):
             return obj
 
+        # Handle strings that represent unserializable objects
+        if isinstance(obj, str) and obj.startswith("UNSERIALIZABLE_OBJECT_"):
+            # Return None or a placeholder for unserializable objects
+            return None
+
         if isinstance(obj, list):
             return [_deserialize(v) for v in obj]
 
         if isinstance(obj, dict):
             if obj.get("__serialized__"):
-                cls_name = obj["class"]
-                data = obj["data"]
+                module_name = obj.get("module")
+                cls_name = obj.get("class")
+                data = obj.get("data")
 
-                if cls_name == "Tensor":
+                # Handle tensors
+                if cls_name == "Tensor" or cls_name.endswith("Tensor"):
                     dtype_str = obj["dtype"]
                     if "." in dtype_str:
                         dtype_str = dtype_str.split(".")[
@@ -934,11 +1047,113 @@ def bytes_to_tensor(tensor_data):
                         ]  # Remove 'torch.' if present
                     return torch.tensor(data, dtype=getattr(torch, dtype_str))
 
-                if cls_name == "BatchEncoding":
+                # Handle BatchEncoding objects
+                elif cls_name == "BatchEncoding":
+                    from transformers import BatchEncoding
+
                     return BatchEncoding({k: _deserialize(v) for k, v in data.items()})
 
+                # Handle tokenizers
+                elif obj.get("is_tokenizer"):
+                    try:
+                        # Import the appropriate tokenizer class
+                        module_parts = data["module_name"].split(".")
+                        tokenizer_module = __import__(module_parts[0])
+                        for part in module_parts[1:]:
+                            tokenizer_module = getattr(tokenizer_module, part)
+
+                        tokenizer_class = getattr(tokenizer_module, data["class_name"])
+
+                        # Create a tokenizer instance from pretrained
+                        tokenizer = tokenizer_class.from_pretrained(
+                            data["name_or_path"]
+                        )
+
+                        # Configure the tokenizer with saved settings if needed
+                        for key, value in data.items():
+                            if key not in [
+                                "class_name",
+                                "module_name",
+                                "added_tokens",
+                            ] and hasattr(tokenizer, key):
+                                setattr(tokenizer, key, value)
+
+                        return tokenizer
+                    except (ImportError, AttributeError) as e:
+                        # Fall back to a dictionary representation if reconstruction fails
+                        return {k: _deserialize(v) for k, v in data.items()}
+
+                # Handle stopping criteria objects
+                elif obj.get("is_stopping_criteria"):
+                    try:
+                        # Try to import the stopping criteria class
+                        module_parts = module_name.split(".")
+                        criteria_module = __import__(module_parts[0])
+                        for part in module_parts[1:]:
+                            criteria_module = getattr(criteria_module, part)
+
+                        criteria_class = getattr(criteria_module, cls_name)
+
+                        # Get the constructor signature
+                        import inspect
+
+                        sig = inspect.signature(criteria_class.__init__)
+                        param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
+
+                        # Prepare constructor arguments
+                        kwargs = {}
+                        for param in param_names:
+                            if param in data:
+                                kwargs[param] = _deserialize(data[param])
+
+                        # Create an instance
+                        criteria_instance = criteria_class(**kwargs)
+
+                        # Set additional attributes that weren't in the constructor
+                        for attr_name, attr_value in data.items():
+                            if (
+                                attr_name not in param_names
+                                and not attr_name.startswith("_")
+                            ):
+                                try:
+                                    setattr(
+                                        criteria_instance,
+                                        attr_name,
+                                        _deserialize(attr_value),
+                                    )
+                                except (AttributeError, TypeError):
+                                    pass
+
+                        return criteria_instance
+                    except (ImportError, AttributeError, TypeError) as e:
+                        # Fall back to a dictionary if reconstruction fails
+                        return {k: _deserialize(v) for k, v in data.items()}
+
+                # Handle generic objects with __dict__
+                elif obj.get("is_object"):
+                    try:
+                        # Try to import and instantiate the class
+                        module_parts = module_name.split(".")
+                        target_module = __import__(module_parts[0])
+                        for part in module_parts[1:]:
+                            target_module = getattr(target_module, part)
+
+                        obj_class = getattr(target_module, cls_name)
+                        obj_instance = object.__new__(obj_class)
+
+                        # Reconstruct the object's attributes
+                        obj_dict = _deserialize(data)
+                        for key, value in obj_dict.items():
+                            setattr(obj_instance, key, value)
+
+                        return obj_instance
+                    except (ImportError, AttributeError) as e:
+                        # Fall back to a dictionary if reconstruction fails
+                        return {k: _deserialize(v) for k, v in data.items()}
+
+            # Handle regular dictionaries
             return {k: _deserialize(v) for k, v in obj.items()}
 
-        raise ValueError(f"Unsupported object type during deserialization: {type(obj)}")
+        return obj
 
     return _deserialize(tensor_data)
