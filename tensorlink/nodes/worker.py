@@ -11,6 +11,11 @@ import json
 import logging
 import threading
 import time
+import os
+
+
+STATE_FILE = "logs/dht_state.json"
+LATEST_STATE_FILE = "logs/latest_state.json"
 
 
 class Worker(TorchNode):
@@ -233,11 +238,18 @@ class Worker(TorchNode):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         super().run()
+
         node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
         node_cleaner.start()
 
+        counter = 0
         while not self.terminate_flag.is_set():
-            time.sleep(2)
+            if counter % 120 == 0:
+                self.clean_node()
+                self.clean_port_mappings()
+
+            time.sleep(1)
+            counter += 1
 
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
@@ -276,13 +288,126 @@ class Worker(TorchNode):
     def activate(self):
         self.training = True
 
+    def save_dht_state(self, latest_only=False):
+        """
+        Serialize and save the DHT state to a file.
+
+        Args:
+            latest_only (bool): If True, save only to the latest state file.
+                               If False, save to both archive and latest files.
+        """
+        try:
+            # Prepare current state data
+            current_data = {
+                "workers": {},
+                "validators": {},
+                "users": {},
+                "jobs": {},
+                "timestamp": time.time(),
+            }
+
+            # Collect current state
+            for worker_id in self.workers:
+                worker = self.query_dht(worker_id)
+                current_data["workers"][worker_id] = worker
+
+            for validator_id in self.validators:
+                validator = self.query_dht(validator_id)
+                current_data["validators"][validator_id] = validator
+
+            for user_id in self.users:
+                user = self.query_dht(user_id)
+                current_data["users"][user_id] = user
+
+            for job_id in self.jobs:
+                job = self.query_dht(job_id)
+                current_data["jobs"][job_id] = job
+
+            # Save to the latest state file (overwriting previous version)
+            with open(LATEST_STATE_FILE, "w") as f:
+                json.dump(current_data, f, indent=4)
+
+            # If not latest_only, also save to the archive/permanent state file
+            if not latest_only:
+                # Load existing archive data if available
+                existing_data = {
+                    "workers": {},
+                    "validators": {},
+                    "users": {},
+                    "jobs": {},
+                }
+
+                if os.path.exists(STATE_FILE):
+                    try:
+                        with open(STATE_FILE, "r") as f:
+                            existing_data = json.load(f)
+                    except json.JSONDecodeError:
+                        self.debug_print(
+                            "SmartNode -> Existing state file read error.",
+                            level=logging.WARNING,
+                            colour="red",
+                        )
+
+                # Update the archive with current data
+                for category in ["workers", "validators", "users", "jobs"]:
+                    existing_data[category].update(current_data[category])
+
+                # Save updated archive data
+                with open(STATE_FILE, "w") as f:
+                    json.dump(existing_data, f, indent=4)
+
+            self.debug_print(
+                "SmartNode -> DHT state saved successfully to "
+                + f"{'both files' if not latest_only else 'latest file only'}.",
+                level=logging.INFO,
+                colour="green",
+            )
+
+        except Exception as e:
+            self.debug_print(
+                f"SmartNode -> Error saving DHT state: {e}",
+                colour="bright_red",
+                level=logging.WARNING,
+            )
+
+    def load_dht_state(self):
+        """Load the DHT state from a file."""
+        if os.path.exists(LATEST_STATE_FILE):
+            try:
+                with open(LATEST_STATE_FILE, "r") as f:
+                    state = json.load(f)
+
+                # Restructure state: list only hash and corresponding data
+                structured_state = {}
+                for category, items in state.items():
+                    if category != "timestamp":
+                        structured_state[category] = {
+                            hash_key: data for hash_key, data in items.items()
+                        }
+                        self.routing_table.update(items)
+
+                self.debug_print(
+                    "SmartNode -> DHT state loaded successfully.", level=logging.INFO
+                )
+
+            except Exception as e:
+                self.debug_print(
+                    f"SmartNode -> Error loading DHT state: {e}",
+                    colour="bright_red",
+                    level=logging.INFO,
+                )
+        else:
+            self.debug_print(
+                "SmartNode -> No DHT state file found.", level=logging.INFO
+            )
+
     def clean_node(self):
         """Periodically clean up node storage"""
 
         def clean_nodes(nodes):
             nodes_to_remove = []
             for node_id in nodes:
-                # Remove any ghost user_ids in self.users
+                # Remove any ghost ids in the list
                 if node_id not in self.nodes:
                     nodes_to_remove.append(node_id)
 
@@ -294,16 +419,19 @@ class Worker(TorchNode):
             for node in nodes_to_remove:
                 nodes.remove(node)
 
-        while not self.terminate_flag.is_set():
-            time.sleep(300)
+        for job_id in self.jobs:
+            job_data = self.query_dht(job_id)
 
-            for job_id in self.jobs:
-                job_data = self.query_dht(job_id)
+            if job_data["active"] is False:
+                self.jobs.remove(job_id)
+                self._delete_item(job_id)
 
-                if job_data["active"] is False:
-                    self.jobs.remove(job_id)
-                    self._delete_item(job_id)
+        clean_nodes(self.workers)
+        clean_nodes(self.validators)
+        clean_nodes(self.users)
 
-            clean_nodes(self.workers)
-            clean_nodes(self.validators)
-            clean_nodes(self.users)
+        self.print_status()
+
+    def print_status(self):
+        self.print_base_status()
+        print("==========================================\n")

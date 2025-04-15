@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import json
+import psutil
 
 
 def format_size(size_bytes):
@@ -776,3 +777,15 @@ class TorchNode(SmartNode):
             "Shutting down distributed ML processes...", level=logging.DEBUG
         )
         self._mpc_comms.join()
+
+    def print_base_status(self):
+        print(
+            f"\n===== Node Status Report ({'Worker' if self.role == 'W' else 'Validator'}) ====="
+        )
+        print(f" Node ID: {self.rsa_key_hash} ({self.host}:{self.port})")
+        print(f" Connections: {len(self.nodes)}")
+        print(f"    Workers: {self.workers}")
+        print(f"    Validators: {self.validators}")
+        print(f"    Users: {self.users}")
+        print(f" GPU Memory: {self.available_gpu_memory:.2f} GB available")
+        print(f" RAM Available: {psutil.virtual_memory().available / 1e9:.2f} GB")

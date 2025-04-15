@@ -842,7 +842,7 @@ class Validator(TorchNode):
         while not self.terminate_flag.is_set():
             if counter % 300 == 0:
                 self.save_dht_state()
-            if counter % 60 == 0:
+            if counter % 120 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
 
@@ -1003,3 +1003,12 @@ class Validator(TorchNode):
         clean_nodes(self.workers)
         clean_nodes(self.validators)
         clean_nodes(self.users)
+
+        self.print_status()
+
+    def print_status(self):
+        self.print_base_status()
+        print(f"Tracked Workers: {len(self.all_workers)}")
+        print(f"Jobs Pending: {len(self.jobs_to_complete)}")
+        print(f"Current Proposal #: {self.current_proposal}")
+        print("==========================================\n")
