@@ -2,7 +2,7 @@
   <img src="docs/images/dark_logo.png" alt="Logo" width="420" style="vertical-align:middle; margin-right: 8px;">
 </p>
 
-<h2 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h2>
+<h3 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h3>
 
 <p align="center">
   <i>Plug-and-play models and APIs for distributed neural network inference and training with PyTorch.</i>
