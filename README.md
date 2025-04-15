@@ -1,7 +1,10 @@
 <p align="center">
-  <img src="docs/images/dark_logo.svg" alt="Distributed model architecture." width="450"/>
+  <img src="docs/images/logo_small_dark.svg" alt="Logo" width="42" style="vertical-align:middle; margin-right: 8px;">
+  <span style="font-size: 42px; vertical-align:middle; font-weight: 400;">Tensorlink</span>
 </p>
+
 <h2 align="center">Distributed AI Inference & Training for Everyone</h2>
+
 <p align="center">
   <i>Plug-and-play models and APIs for distributed neural network inference and training with PyTorch.</i>
 </p>
