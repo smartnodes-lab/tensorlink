@@ -855,6 +855,8 @@ class Validator(TorchNode):
             if counter % 60 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
+            if counter % 180 == 0:
+                self.print_status()
 
             time.sleep(1)
             counter += 1
@@ -1013,3 +1015,8 @@ class Validator(TorchNode):
         clean_nodes(self.workers)
         clean_nodes(self.validators)
         clean_nodes(self.users)
+
+    def print_status(self):
+        self.print_base_status()
+        print(f" Current Proposal: {self.current_proposal}")
+        print("=============================================\n")

@@ -787,5 +787,5 @@ class TorchNode(SmartNode):
         print(f"    Workers: {self.workers}")
         print(f"    Validators: {self.validators}")
         print(f"    Users: {self.users}")
-        print(f" GPU Memory: {self.available_gpu_memory:.2f} GB available")
+        print(f" VRAM Available: {self.available_gpu_memory / 1e9:.2f} GB")
         print(f" RAM Available: {psutil.virtual_memory().available / 1e9:.2f} GB")

@@ -9,7 +9,6 @@ import psutil
 import hashlib
 import json
 import logging
-import threading
 import time
 import os
 
@@ -239,12 +238,9 @@ class Worker(TorchNode):
         # Get proposees from SC and send our state to them
         super().run()
 
-        node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
-        node_cleaner.start()
-
         counter = 0
         while not self.terminate_flag.is_set():
-            if counter % 120 == 0:
+            if counter % 180 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
 
