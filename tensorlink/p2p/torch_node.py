@@ -478,11 +478,12 @@ class TorchNode(SmartNode):
                     module["training"],
                 )
                 del module["mem_info"]
+
             elif "termination" in module:
                 return_val = module_id
                 del module["termination"]
                 module["terminated"] = True
-                self.available_gpu_memory += module[""]
+                self.available_gpu_memory += module["vram"]
                 del self.modules[module_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})

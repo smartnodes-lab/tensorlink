@@ -681,43 +681,53 @@ class DistributedWorker:
                     module.forward_queue.put(forward_task)
                 time.sleep(sleep_time)
 
-                if module.get("training", False):
+                if hasattr(module, "training"):
                     # Check if module is in training mode
                     is_training = self.send_request("check_train", module_id)
                     if isinstance(is_training, bool):
                         module.training = is_training
                     time.sleep(sleep_time)
 
-                    # Handle backward queue
-                    backward_task = self.send_request("check_backward", module_id)
-                    if backward_task:
-                        module.backward_queue.put(backward_task)
-                    time.sleep(sleep_time)
+                    if module.training:
+                        # Handle backward queue
+                        backward_task = self.send_request("check_backward", module_id)
+                        if backward_task:
+                            module.backward_queue.put(backward_task)
+                        time.sleep(sleep_time)
 
-                    state_update = self.send_request("check_state_update", module_id)
-                    time.sleep(sleep_time)
+                        state_update = self.send_request(
+                            "check_state_update", module_id
+                        )
+                        time.sleep(sleep_time)
 
-                    if state_update:
-                        with self.lock:
-                            if state_update[0] == "init":
-                                optimizer_kwargs = state_update[1]
+                        if state_update:
+                            with self.lock:
+                                if state_update[0] == "init":
+                                    optimizer_kwargs = state_update[1]
 
-                                # Configure optimizer with mixed precision support
-                                if (
-                                    self.use_amp
-                                    and 'fused' not in optimizer_name.lower()
-                                ):
-                                    # Use fused implementation when available for better performance
-                                    if optimizer_name.lower() == 'adam':
-                                        try:
-                                            from torch.optim.adam import Adam
+                                    # Configure optimizer with mixed precision support
+                                    if (
+                                        self.use_amp
+                                        and 'fused' not in optimizer_name.lower()
+                                    ):
+                                        # Use fused implementation when available for better performance
+                                        if optimizer_name.lower() == 'adam':
+                                            try:
+                                                from torch.optim.adam import Adam
 
-                                            self.optimizers[module_id] = Adam(
-                                                module.parameters(),
-                                                **optimizer_kwargs,
-                                                fused=True,
-                                            )
-                                        except:
+                                                self.optimizers[module_id] = Adam(
+                                                    module.parameters(),
+                                                    **optimizer_kwargs,
+                                                    fused=True,
+                                                )
+                                            except:
+                                                self.optimizers[
+                                                    module_id
+                                                ] = self.optimizers[module_id](
+                                                    module.parameters(),
+                                                    **optimizer_kwargs,
+                                                )
+                                        else:
                                             self.optimizers[
                                                 module_id
                                             ] = self.optimizers[module_id](
@@ -728,73 +738,69 @@ class DistributedWorker:
                                         self.optimizers[module_id] = self.optimizers[
                                             module_id
                                         ](module.parameters(), **optimizer_kwargs)
-                                else:
-                                    self.optimizers[module_id] = self.optimizers[
-                                        module_id
-                                    ](module.parameters(), **optimizer_kwargs)
 
-                                self.send_request(
-                                    "debug_print",
-                                    (
-                                        f"DistributedWorker -> Initialized optimizer: {optimizer_name} on {self.device.type}",
-                                        "bright_blue",
-                                        logging.INFO,
-                                    ),
-                                )
-
-                                self.send_request(
-                                    "optimizer_response", (module_id, "loaded")
-                                )
-                                time.sleep(sleep_time)
-
-                            elif state_update[0] == "step":
-                                closure = state_update[1]
-                                # Step optimizer with mixed precision support if using CUDA
-                                if self.use_amp:
-                                    # Update with scaler for mixed precision
-                                    self.scaler.step(
-                                        self.optimizers[module_id], closure
+                                    self.send_request(
+                                        "debug_print",
+                                        (
+                                            f"DistributedWorker -> Initialized optimizer: {optimizer_name} on {self.device.type}",
+                                            "bright_blue",
+                                            logging.INFO,
+                                        ),
                                     )
-                                    self.scaler.update()
-                                else:
-                                    self.optimizers[module_id].step(closure)
 
-                                self.send_request(
-                                    "debug_print",
-                                    (
-                                        "DistributedWorker -> Optimizer stepped.",
-                                        "bright_blue",
-                                        logging.INFO,
-                                    ),
-                                )
+                                    self.send_request(
+                                        "optimizer_response", (module_id, "loaded")
+                                    )
+                                    time.sleep(sleep_time)
 
-                                self.send_request(
-                                    "optimizer_response", (module_id, "stepped")
-                                )
-                                time.sleep(sleep_time)
+                                elif state_update[0] == "step":
+                                    closure = state_update[1]
+                                    # Step optimizer with mixed precision support if using CUDA
+                                    if self.use_amp:
+                                        # Update with scaler for mixed precision
+                                        self.scaler.step(
+                                            self.optimizers[module_id], closure
+                                        )
+                                        self.scaler.update()
+                                    else:
+                                        self.optimizers[module_id].step(closure)
 
-                            elif state_update[0] == "zero_grad":
-                                # Zero gradients with optimized memory usage
-                                if self.device.type == "cuda":
-                                    # More efficient for CUDA
-                                    for param in module.parameters():
-                                        if param.grad is not None:
-                                            param.grad = None
-                                else:
-                                    self.optimizers[module_id].zero_grad()
+                                    self.send_request(
+                                        "debug_print",
+                                        (
+                                            "DistributedWorker -> Optimizer stepped.",
+                                            "bright_blue",
+                                            logging.INFO,
+                                        ),
+                                    )
 
-                                self.send_request(
-                                    "debug_print",
-                                    (
-                                        "DistributedWorker -> Optimizer zeroed.",
-                                        "bright_blue",
-                                        logging.INFO,
-                                    ),
-                                )
-                                self.send_request(
-                                    "optimizer_response", (module_id, "zeroed")
-                                )
-                                time.sleep(sleep_time)
+                                    self.send_request(
+                                        "optimizer_response", (module_id, "stepped")
+                                    )
+                                    time.sleep(sleep_time)
+
+                                elif state_update[0] == "zero_grad":
+                                    # Zero gradients with optimized memory usage
+                                    if self.device.type == "cuda":
+                                        # More efficient for CUDA
+                                        for param in module.parameters():
+                                            if param.grad is not None:
+                                                param.grad = None
+                                    else:
+                                        self.optimizers[module_id].zero_grad()
+
+                                    self.send_request(
+                                        "debug_print",
+                                        (
+                                            "DistributedWorker -> Optimizer zeroed.",
+                                            "bright_blue",
+                                            logging.INFO,
+                                        ),
+                                    )
+                                    self.send_request(
+                                        "optimizer_response", (module_id, "zeroed")
+                                    )
+                                    time.sleep(sleep_time)
 
         self.check_counter += 1
         time.sleep(sleep_time * 2)
