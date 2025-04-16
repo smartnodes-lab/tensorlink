@@ -3,8 +3,7 @@ from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.ml.utils import estimate_hf_model_memory
-
-# from tensorlink.api.node import
+from tensorlink.api.node import create_endpoint
 
 from collections import Counter
 from dotenv import get_key
@@ -64,6 +63,7 @@ class Validator(TorchNode):
         self.contract_manager = None
         self.proposal_listener = None
         self.execution_listener = None
+        self.endpoint = None
 
         if off_chain_test is False:
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
@@ -95,6 +95,12 @@ class Validator(TorchNode):
                 )
                 self.terminate_flag.set()
 
+        # Start up the API for handling public jobs
+        self.endpoint = create_endpoint(self, 375053)
+        if not local_test:
+            self.add_port_mapping(375053, 375053)
+
+        # Finally, load up previous saved state if any
         self.load_dht_state()
 
     def handle_data(self, data, node: Connection):
@@ -223,8 +229,7 @@ class Validator(TorchNode):
 
             handlers = {
                 "get_jobs": self._handle_get_jobs,
-                # "send_hosted_job_request": self._handle_send_job,
-                "send_hf_job_request": self.create_base_job,
+                "send_job_request": self.create_base_job,
             }
 
             handler = handlers.get(req_type)
@@ -405,24 +410,26 @@ class Validator(TorchNode):
         """Asserts that the specified user does not have an active job, and that
         the job capacity can be handled by the network."""
         # job_id = job_data["id"]
-        user_id = job_data["author"]
-        capacity = job_data["capacity"]
-        distribution = job_data["distribution"]
+        user_id = job_data.get("author")
+        capacity = job_data.get("capacity")
+        distribution = job_data.get("distribution")
 
         # Request updated worker statistics
         self.request_worker_stats()
 
-        user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
+        if user_id:
+            # Check that user doesnt have an active job already
+            user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
 
-        # Check for active job
-        if user_info:
-            current_user_job_id = user_info.get("job")
+            # Check for active job
+            if user_info:
+                current_user_job_id = user_info.get("job")
 
-            if current_user_job_id:
-                current_user_job = self.query_dht(current_user_job_id)
+                if current_user_job_id:
+                    current_user_job = self.query_dht(current_user_job_id)
 
-                if current_user_job and current_user_job["active"]:
-                    return False
+                    if current_user_job and current_user_job["active"]:
+                        return False
 
         # Check network can handle the requested job
         total_memory = sum(self.worker_memories.values())
@@ -480,15 +487,15 @@ class Validator(TorchNode):
         return assigned_workers
 
     def create_base_job(self, job_data: dict):
-        modules = job_data["distribution"].copy()
-        job_id = job_data["id"]
-        author = job_data["author"]
-        n_pipelines = job_data["n_pipelines"]
+        modules = job_data.get("distribution").copy()
+        job_id = job_data.get("id")
+        author = job_data.get("author")
+        n_pipelines = job_data.get("n_pipelines")
 
         if job_data.get("hosted", False):
-            pass
-
-        requesting_node = self.nodes[author]
+            requesting_node = None
+        else:
+            requesting_node = self.nodes[author]
 
         # Check network availability for job request
         assigned_workers = self.check_job_availability(job_data)
@@ -610,6 +617,9 @@ class Validator(TorchNode):
         training: bool = False,
         is_api_job: bool = False,
     ) -> bool:
+        if user_id is None:
+            user_id = self.rsa_key_hash
+
         data = json.dumps(
             [
                 user_id,

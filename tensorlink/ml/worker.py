@@ -78,6 +78,8 @@ class DistributedWorker:
         self.lock = threading.Lock()
         self.trusted = trusted
 
+        self.check_counter = 0
+
         # CUDA optimization: Check device and optimize CUDA settings
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.setup_cuda_environment()
@@ -140,7 +142,7 @@ class DistributedWorker:
 
                 # Small sleep to prevent CPU hogging
                 if not (has_backward or has_forward):
-                    time.sleep(0.02)  # Minimal sleep when idle
+                    time.sleep(0.01)  # Minimal sleep when idle
 
     def _handle_backward(self, module_id, module):
         """Optimized backward pass with mixed precision support"""
@@ -312,14 +314,6 @@ class DistributedWorker:
         # Convert args to tensor and move to device
         input_ids = bytes_to_tensor(args)
 
-        # Use pinned memory for faster host->device transfer
-        if self.device.type == "cuda":
-            # Pin memory for faster transfers
-            input_ids = input_ids.pin_memory()
-            input_ids = input_ids.to(self.device, non_blocking=True)
-        else:
-            input_ids = attach_tensor(input_ids, self.device)
-
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
         # Filter out other known non-generation parameters
@@ -355,6 +349,14 @@ class DistributedWorker:
                 if isinstance(input_ids, list):
                     input_ids = input_ids[-1]
 
+                # Use pinned memory for faster host->device transfer
+                if self.device.type == "cuda":
+                    # Pin memory for faster transfers
+                    input_ids = input_ids.pin_memory()
+                    input_ids = input_ids.to(self.device, non_blocking=True)
+                else:
+                    input_ids = attach_tensor(input_ids, self.device)
+
                 # Use CUDA stream for generation
                 if self.device.type == "cuda":
                     with torch.cuda.stream(self.compute_stream):
@@ -383,8 +385,9 @@ class DistributedWorker:
             torch.cuda.empty_cache()
 
     def send_request(self, request_type, args, timeout=None):
-        """Send request to coordinator node with timeout handling"""
         request = {"type": request_type, "args": args}
+        response = None
+
         try:
             self.mpc_lock.acquire(timeout=timeout)
             self.node_requests.put(request)
@@ -396,7 +399,6 @@ class DistributedWorker:
             self.terminate = True
 
         except Exception as e:
-            # print(f"Error sending request: {e}")
             response = {"return": str(e)}
 
         finally:
@@ -601,91 +603,100 @@ class DistributedWorker:
     def check_node(self):
         """Check for node updates with efficient polling"""
         update_check_interval = 50
-        counter = 0
 
-        while not self.terminate:
-            # Adaptive polling frequency based on activity
-            active_modules = len(self.modules) > 0
-            sleep_time = 0.05 if active_modules else 1
+        # Adaptive polling frequency based on activity
+        active_modules = len(self.modules) > 0
+        sleep_time = 0.01 if active_modules else 1
 
-            if counter % update_check_interval == 0:
-                args = self.send_request("check_module", None)
+        if self.check_counter % update_check_interval == 0:
+            args = self.send_request("check_module", None)
 
-                if isinstance(args, tuple):
-                    (
-                        file_name,
-                        module_id,
-                        node_id,
-                        module_name,
-                        optimizer_name,
-                        training,
-                    ) = args
-                    self.load_module(
-                        file_name,
-                        module_id,
-                        node_id,
-                        module_name,
-                        optimizer_name,
-                        training,
+            if isinstance(args, tuple):
+                (
+                    file_name,
+                    module_id,
+                    node_id,
+                    module_name,
+                    optimizer_name,
+                    training,
+                ) = args
+                self.load_module(
+                    file_name,
+                    module_id,
+                    node_id,
+                    module_name,
+                    optimizer_name,
+                    training,
+                )
+
+            # Check for job completion/deletion requests
+            elif isinstance(args, str):
+                if args in self.modules:
+                    if self.modules[args].training:
+                        del self.optimizers[args]
+                    del self.modules[args]
+                    self.send_request("debug_print", (f"Module {args} removed.",))
+
+            # Check for node termination requests
+            self.check_for_termination()
+
+        time.sleep(sleep_time)
+
+        # Process training, forward, and backward queues
+        if self.modules:
+            for module_id in list(
+                self.modules.keys()
+            ):  # Use list to avoid modification during iteration
+                module = self.modules[module_id]
+
+                # Check for parameters requests
+                params_req = self.send_request("check_parameters_request", module_id)
+                time.sleep(sleep_time)
+
+                if params_req:
+                    self.send_request(
+                        "debug_print", ("DistributedWorker -> Sending parameters.",)
                     )
+                    time.sleep(sleep_time)
 
-                # Check for job completion/deletion requests
-                elif isinstance(args, str):
-                    if args in self.modules:
-                        if self.modules[args].training:
-                            del self.optimizers[args]
-                        del self.modules[args]
-                        self.send_request("debug_print", (f"Module {args} removed.",))
+                    # Save state dict to file
+                    with open(f"parameters_{module_id}", "wb") as file:
+                        # Optimize CPU transfer if needed
+                        if self.device.type == "cuda":
+                            # Temporarily move to CPU for saving
+                            cpu_state_dict = {
+                                k: v.detach().cpu()
+                                for k, v in module.state_dict().items()
+                            }
+                            torch.save(cpu_state_dict, file)
+                        else:
+                            torch.save(module.state_dict(), file)
 
-                # Check for node termination requests
-                self.check_for_termination()
+                    self.send_request("send_parameters", (module.host, module_id))
+                    time.sleep(sleep_time)
 
-            # Process training, forward, and backward queues
-            if self.modules:
-                for module_id in list(
-                    self.modules.keys()
-                ):  # Use list to avoid modification during iteration
-                    module = self.modules[module_id]
+                # Handle forward queue
+                forward_task = self.send_request("check_forward", module_id)
+                if forward_task:
+                    module.forward_queue.put(forward_task)
+                time.sleep(sleep_time)
 
+                if module.get("training", False):
                     # Check if module is in training mode
                     is_training = self.send_request("check_train", module_id)
                     if isinstance(is_training, bool):
                         module.training = is_training
-
-                    # Check for parameters requests
-                    params_req = self.send_request(
-                        "check_parameters_request", module_id
-                    )
-                    if params_req:
-                        self.send_request(
-                            "debug_print", ("DistributedWorker -> Sending parameters.",)
-                        )
-                        # Save state dict to file
-                        with open(f"parameters_{module_id}", "wb") as file:
-                            # Optimize CPU transfer if needed
-                            if self.device.type == "cuda":
-                                # Temporarily move to CPU for saving
-                                cpu_state_dict = {
-                                    k: v.detach().cpu()
-                                    for k, v in module.state_dict().items()
-                                }
-                                torch.save(cpu_state_dict, file)
-                            else:
-                                torch.save(module.state_dict(), file)
-
-                        self.send_request("send_parameters", (module.host, module_id))
-
-                    # Handle forward queue
-                    forward_task = self.send_request("check_forward", module_id)
-                    if forward_task:
-                        module.forward_queue.put(forward_task)
+                    time.sleep(sleep_time)
 
                     # Handle backward queue
                     backward_task = self.send_request("check_backward", module_id)
                     if backward_task:
                         module.backward_queue.put(backward_task)
+                    time.sleep(sleep_time)
 
                     state_update = self.send_request("check_state_update", module_id)
+                    time.sleep(sleep_time)
+
                     if state_update:
                         with self.lock:
                             if state_update[0] == "init":
@@ -730,9 +741,11 @@ class DistributedWorker:
                                         logging.INFO,
                                     ),
                                 )
+
                                 self.send_request(
                                     "optimizer_response", (module_id, "loaded")
                                 )
+                                time.sleep(sleep_time)
 
                             elif state_update[0] == "step":
                                 closure = state_update[1]
@@ -754,9 +767,11 @@ class DistributedWorker:
                                         logging.INFO,
                                     ),
                                 )
+
                                 self.send_request(
                                     "optimizer_response", (module_id, "stepped")
                                 )
+                                time.sleep(sleep_time)
 
                             elif state_update[0] == "zero_grad":
                                 # Zero gradients with optimized memory usage
@@ -779,9 +794,10 @@ class DistributedWorker:
                                 self.send_request(
                                     "optimizer_response", (module_id, "zeroed")
                                 )
+                                time.sleep(sleep_time)
 
-            counter += 1
-            time.sleep(sleep_time)
+        self.check_counter += 1
+        time.sleep(sleep_time * 2)
 
     def check_for_termination(self):
         """Check if worker should terminate"""
@@ -793,10 +809,14 @@ class DistributedWorker:
             )
             self.terminate = True
 
+    def _message_checker(self):
+        while not self.terminate:
+            self.check_node()
+
     def run(self):
         """Main execution method with robust thread management"""
         # Start node check thread
-        node_check_thread = threading.Thread(target=self.check_node)
+        node_check_thread = threading.Thread(target=self._message_checker)
         node_check_thread.daemon = (
             True  # Make thread daemon so it exits when main thread exits
         )

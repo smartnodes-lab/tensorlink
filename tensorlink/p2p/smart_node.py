@@ -232,7 +232,7 @@ class SmartNode(threading.Thread):
         self.print_level = logging.INFO
 
         # Connection Settings
-        self.upnp = None
+        self.upnp = upnp
         self.nodes = {}  # node hash: Connection
         self.max_attempts_per_minute = 5
         self.block_duration = 600
@@ -268,6 +268,7 @@ class SmartNode(threading.Thread):
         }
         self.off_chain_test = off_chain_test
         self.local_test = local_test
+
         if local_test:
             self.upnp = False
             self.off_chain_test = True
