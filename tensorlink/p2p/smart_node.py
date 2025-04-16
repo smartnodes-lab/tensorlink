@@ -268,9 +268,13 @@ class SmartNode(threading.Thread):
         }
         self.off_chain_test = off_chain_test
         self.local_test = local_test
+        if local_test:
+            self.upnp = False
+            self.off_chain_test = True
+
         self.public_key = None
 
-        if upnp:
+        if self.upnp:
             self._init_upnp()
 
         self._init_sock()
