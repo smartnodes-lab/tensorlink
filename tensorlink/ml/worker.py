@@ -76,6 +76,7 @@ class DistributedWorker:
         self.optimizers = {}
         self.terminate = False
         self.lock = threading.Lock()
+        self.processing_event = threading.Event()
         self.trusted = trusted
 
         self.check_counter = 0
@@ -120,6 +121,9 @@ class DistributedWorker:
         """Optimized training loop with CUDA awareness"""
         while not self.terminate:
             for module_id in list(self.modules.keys()):
+                # Signal we're processing, tell check_node to wait
+                self.processing_event.set()
+
                 module = self.modules.get(module_id).to(self.device)
 
                 # Pre-fetch next tasks when possible to overlap computation
@@ -139,6 +143,8 @@ class DistributedWorker:
                             self._handle_generate(module_id, size, name)
                         else:
                             self._handle_forward(module_id, key, size, name)
+
+                self.processing_event.clear()
 
                 # Small sleep to prevent CPU hogging
                 if not (has_backward or has_forward):
@@ -602,6 +608,10 @@ class DistributedWorker:
 
     def check_node(self):
         """Check for node updates with efficient polling"""
+        if self.processing_event.is_set():
+            time.sleep(0.05)
+            return
+
         update_check_interval = 50
 
         # Adaptive polling frequency based on activity
@@ -807,7 +817,7 @@ class DistributedWorker:
 
     def check_for_termination(self):
         """Check if worker should terminate"""
-        shutdown_signal = self.send_request("check_shutdown", None)
+        shutdown_signal = self.send_request("check_shutdown", None, timeout=1)
         if shutdown_signal:
             self.send_request(
                 "debug_print",
