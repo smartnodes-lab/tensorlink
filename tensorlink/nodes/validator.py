@@ -3,7 +3,8 @@ from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.ml.utils import estimate_hf_model_memory
-from tensorlink.api.node import create_endpoint
+
+# from tensorlink.api.node import create_endpoint
 
 from collections import Counter
 from dotenv import get_key
@@ -95,10 +96,10 @@ class Validator(TorchNode):
                 )
                 self.terminate_flag.set()
 
-        # Start up the API for handling public jobs
-        self.endpoint = create_endpoint(self, 375053)
-        if not local_test:
-            self.add_port_mapping(375053, 375053)
+        # # Start up the API for handling public jobs
+        # self.endpoint = create_endpoint(self, 375053)
+        # if not local_test:
+        #     self.add_port_mapping(375053, 375053)
 
         # Finally, load up previous saved state if any
         self.load_dht_state()

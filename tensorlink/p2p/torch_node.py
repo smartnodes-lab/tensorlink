@@ -603,7 +603,7 @@ class TorchNode(SmartNode):
 
     def _handle_check_parameters_request(self, request):
         key = "P" + request["args"]
-        return_val = None
+        return_val = False
 
         if key in self.memory_manager:
             del self.memory_manager[key]

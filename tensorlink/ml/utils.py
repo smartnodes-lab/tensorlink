@@ -589,19 +589,25 @@ def detach_tensor(tensor):
 
 
 def attach_tensor(tensor, device):
-    if isinstance(tensor, torch.Tensor):
+    if hasattr(tensor, "to"):
         return tensor.to(device)
+
+    elif isinstance(tensor, torch.Tensor):
+        return tensor.to(device)
+
     elif isinstance(tensor, ModelOutput):
         for key, value in tensor.items():
             if isinstance(value, torch.Tensor):
                 tensor[key] = tensor[key].to(device)
 
         return tensor
+
     elif isinstance(tensor, (list, tuple)):
         return type(tensor)(
             attach_tensor(t, device) if isinstance(t, torch.Tensor) else t
             for t in tensor
         )
+
     elif isinstance(tensor, dict):
         return {
             key: (

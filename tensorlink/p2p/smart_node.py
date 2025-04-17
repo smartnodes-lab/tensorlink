@@ -1037,6 +1037,9 @@ class SmartNode(threading.Thread):
                         f"SmartNode -> Selected next port: {our_port} for new connection"
                     )
 
+                    if self.local_test:
+                        host = "127.0.0.1"
+
                     # Attempt connection
                     sock.bind((self.host, our_port))
                     sock.connect((host, port))
