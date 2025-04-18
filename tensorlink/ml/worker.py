@@ -145,6 +145,7 @@ class DistributedWorker:
     def train_loop(self):
         """Optimized training loop with CUDA awareness and proper locking"""
         while not self.terminate:
+            print("Training LOOP")
             try:
                 with self.train_condition:
                     # Wait for modules or termination signal
@@ -455,15 +456,6 @@ class DistributedWorker:
             if self.device.type == "cuda":
                 torch.cuda.synchronize()
 
-            self.send_request(
-                "debug_print",
-                (
-                    f"DistributedWorker -> Generating with input arguments: {all_kwargs}",
-                    "bright_blue",
-                    logging.DEBUG,
-                ),
-            )
-
             # Generate text with the model
             with torch.no_grad():
                 if isinstance(input_ids, list):
@@ -505,7 +497,7 @@ class DistributedWorker:
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    def send_request(self, request_type, args, timeout=2.0):
+    def send_request(self, request_type, args, timeout=None):
         """Send request to node with proper locking and timeout"""
         if not hasattr(self, "hosted_models"):
             logging.debug(f"Req_type: {request_type}")
@@ -759,7 +751,7 @@ class DistributedWorker:
                                 del self.module_locks[args]
 
                             self.send_request(
-                                "debug_print", (f"Module {args} removed.",)
+                                "debug_print", (f"Module {args} removed.",), timeout=0.5
                             )
 
                 # Check for node termination requests
@@ -790,13 +782,15 @@ class DistributedWorker:
 
                         # Check for parameters requests
                         params_req = self.send_request(
-                            "check_parameters_request", module_id
+                            "check_parameters_request", module_id, timeout=0.5
                         )
 
                         if params_req:
+                            print(params_req)
                             self.send_request(
                                 "debug_print",
                                 ("DistributedWorker -> Sending parameters.",),
+                                timeout=0.2,
                             )
 
                             # Save state dict to file with safe CPU transfer
@@ -909,6 +903,7 @@ class DistributedWorker:
                             "bright_blue",
                             logging.INFO,
                         ),
+                        timeout=0.5,
                     )
 
                 self.send_request("optimizer_response", (module_id, "loaded"))
@@ -926,15 +921,6 @@ class DistributedWorker:
                     else:
                         self.optimizers[module_id].step(closure)
 
-                    self.send_request(
-                        "debug_print",
-                        (
-                            "DistributedWorker -> Optimizer stepped.",
-                            "bright_blue",
-                            logging.INFO,
-                        ),
-                    )
-
                     self.send_request("optimizer_response", (module_id, "stepped"))
 
             elif state_update[0] == "zero_grad":
@@ -948,15 +934,6 @@ class DistributedWorker:
                                 param.grad = None
                     else:
                         self.optimizers[module_id].zero_grad()
-
-                    self.send_request(
-                        "debug_print",
-                        (
-                            "DistributedWorker -> Optimizer zeroed.",
-                            "bright_blue",
-                            logging.INFO,
-                        ),
-                    )
 
                 self.send_request("optimizer_response", (module_id, "zeroed"))
 

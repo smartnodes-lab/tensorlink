@@ -46,7 +46,7 @@ DP_FACTOR = 1
 TRAINING = False  # Set true to request train job and get a distributed optimizer
 
 # Chatbot parameters
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+model_name = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 MAX_HISTORY_TURNS = 6
 MAX_TOKENS = 2048
 MAX_NEW_TOKENS = 256

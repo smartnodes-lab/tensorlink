@@ -102,11 +102,26 @@ class DistributedValidator(DistributedWorker):
         # else:
 
     def check_node(self):
-        job_data = self.send_request("get_jobs", None)
+        """Check for node updates with efficient scheduling and locking and perform job inspection"""
+        # Skip if ML operation is in progress to avoid contention
+        if self.ml_operation_in_progress.is_set():
+            return
 
-        if isinstance(job_data, dict):
-            self.inspect_model(job_data.get("model_name"), job_data)
+        # Try to acquire semaphore (non-blocking)
+        if not self.node_check_semaphore.acquire(blocking=False):
+            return
 
+        try:
+            # Get job data for inspection
+            job_data = self.send_request("get_jobs", None)
+
+            if isinstance(job_data, dict):
+                self.inspect_model(job_data.get("model_name"), job_data)
+        finally:
+            # Always release semaphore
+            self.node_check_semaphore.release()
+
+        # Call parent implementation to maintain original functionality
         super().check_node()
 
     def initialize_hosted_jobs(self):
