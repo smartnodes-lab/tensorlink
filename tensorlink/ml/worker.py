@@ -175,45 +175,63 @@ class DistributedWorker:
                             if not module:
                                 continue
 
-                        # Signal we're processing ML operations
-                        self.ml_operation_in_progress.set()
+                        # IMPORTANT: Only set flag when actually processing, not for the entire module loop
+                        ml_flag_set = False
+                        try:
+                            # Check queues with appropriate locking
+                            has_backward = False
+                            has_forward = False
 
-                        # Move module to device if needed
-                        module = module.to(self.device)
-
-                        # Check queues with appropriate locking
-                        has_backward = False
-                        has_forward = False
-
-                        with self.queue_lock:
-                            has_backward = not module.backward_queue.empty()
-                            has_forward = not module.forward_queue.empty()
-
-                        # Handle backward pass with priority
-                        if has_backward:
-                            self._handle_backward(module_id, module)
-
-                        # Handle forward pass
-                        if has_forward:
                             with self.queue_lock:
-                                if not module.forward_queue.empty():
-                                    key, (size, name) = module.forward_queue.get()
+                                has_backward = not module.backward_queue.empty()
+                                has_forward = not module.forward_queue.empty()
 
-                                    if isinstance(key, str):
-                                        self._handle_generate(module_id, size, name)
-                                    else:
-                                        self._handle_forward(module_id, key, size, name)
+                            # Only set the flag if we're actually going to do ML operations
+                            if has_backward or has_forward:
+                                # Signal we're processing ML operations
+                                self.ml_operation_in_progress.set()
+                                ml_flag_set = True
+
+                            # Move module to device if needed
+                            module = module.to(self.device)
+
+                            # Handle backward pass with priority
+                            if has_backward:
+                                self._handle_backward(module_id, module)
+
+                            # Handle forward pass
+                            if has_forward:
+                                with self.queue_lock:
+                                    if not module.forward_queue.empty():
+                                        key, (size, name) = module.forward_queue.get()
+
+                                        if isinstance(key, str):
+                                            self._handle_generate(module_id, size, name)
+                                        else:
+                                            self._handle_forward(
+                                                module_id, key, size, name
+                                            )
+                        finally:
+                            # Release ML operation flag if we set it
+                            if ml_flag_set:
+                                self.ml_operation_in_progress.clear()
                     finally:
-                        # Release locks and clear flags
-                        self.ml_operation_in_progress.clear()
+                        # Release module lock
                         module_lock.release()
 
                 # Short sleep to prevent CPU hogging when no work is available
+                # Allow more time for node checking by yielding control here
                 time.sleep(0.01)
 
             except Exception as e:
                 logging.error(f"Error in train loop: {str(e)}")
                 traceback.print_exc()
+                # Ensure flag is cleared even after exceptions
+                if (
+                    hasattr(self, 'ml_operation_in_progress')
+                    and self.ml_operation_in_progress.is_set()
+                ):
+                    self.ml_operation_in_progress.clear()
 
     def _get_module_lock(self, module_id):
         """Get or create a lock for a specific module"""
@@ -695,8 +713,13 @@ class DistributedWorker:
 
     def check_node(self):
         """Check for node updates with efficient scheduling and locking"""
-        # Skip if ML operation is in progress to avoid contention
-        if self.ml_operation_in_progress.is_set():
+        # Allow occasional checks even if ML operation is in progress
+        # to prevent deadlocks (check every N times)
+        should_check = (
+            not self.ml_operation_in_progress.is_set() or self.check_counter % 10 == 0
+        )
+
+        if not should_check:
             return
 
         # Try to acquire semaphore (non-blocking)
@@ -757,16 +780,16 @@ class DistributedWorker:
                 # Check for node termination requests
                 self.check_for_termination()
 
-            # Process training, forward, and backward queues
+            # Process training, forward, and backward queues - prioritize checking
+            # forward/generation requests even if some ML operations are happening
             if self.modules:
                 # Get a snapshot of module_ids to avoid concurrent modification issues
                 with self.global_lock:
                     module_ids = list(self.modules.keys())
 
                 for module_id in module_ids:
-                    # Skip if ML operation is in progress
-                    if self.ml_operation_in_progress.is_set():
-                        break
+                    # Relax this condition to allow some request processing even during ML operations
+                    # Only back off if we can't acquire the module lock
 
                     # Try to acquire module lock non-blocking
                     module_lock = self._get_module_lock(module_id)
@@ -809,7 +832,7 @@ class DistributedWorker:
                                 "send_parameters", (module.host, module_id)
                             )
 
-                        # Handle forward queue
+                        # Handle forward queue - high priority task, check even during ML operations
                         forward_task = self.send_request("check_forward", module_id)
                         if forward_task:
                             with self.queue_lock:
