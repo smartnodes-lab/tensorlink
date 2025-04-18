@@ -88,9 +88,12 @@ class DistributedWorker:
         # Use proper synchronization primitives
         self.processing_event = threading.Event()
         self.ml_operation_in_progress = threading.Event()
-        self.node_check_semaphore = threading.Semaphore(
-            1
-        )  # Control node checking frequency
+
+        # Add a priority system instead of a single semaphore
+        self.node_check_priority = threading.Semaphore(
+            3
+        )  # Allow multiple checks with priority levels
+        self.train_priority = threading.Semaphore(2)  # Control training thread priority
 
         # Condition variables for signaling between threads
         self.train_condition = threading.Condition()
@@ -99,6 +102,11 @@ class DistributedWorker:
 
         self.trusted = trusted
         self.check_counter = 0
+
+        # Add scheduling control variables
+        self.last_node_check_time = time.time()
+        self.node_check_interval = 0.05  # Ensure node checks happen at least every 50ms
+        self.max_train_time = 0.1  # Maximum time to spend in train loop before yielding
 
         # CUDA optimization: Check device and optimize CUDA settings
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -119,6 +127,12 @@ class DistributedWorker:
 
         # Thread pool for background tasks
         self.thread_pool = ThreadPoolExecutor(max_workers=3)
+
+        # Add a state tracking variable to coordinate between threads
+        self.thread_states = {
+            'train_loop': {'active': False, 'last_yield': time.time()},
+            'node_check': {'active': False, 'last_run': time.time()},
+        }
 
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
@@ -145,83 +159,121 @@ class DistributedWorker:
     def train_loop(self):
         """Optimized training loop with CUDA awareness and proper locking"""
         while not self.terminate:
+            loop_start_time = time.time()
             print("Training LOOP")
             try:
-                with self.train_condition:
-                    # Wait for modules or termination signal
-                    while len(self.modules) <= 0 and not self.terminate:
-                        self.train_condition.wait(timeout=0.5)
+                # Track thread state
+                self.thread_states['train_loop']['active'] = True
 
-                    if self.terminate:
-                        break
+                # Check if we should yield to the node checker
+                current_time = time.time()
+                time_since_node_check = (
+                    current_time - self.thread_states['node_check']['last_run']
+                )
 
-                # Process each module
-                module_ids = []
-                with self.global_lock:
-                    module_ids = list(self.modules.keys())
+                # Yield to node checker if it hasn't run recently
+                if time_since_node_check > self.node_check_interval:
+                    # Force yield to node checker thread
+                    time.sleep(0.01)
+                    continue
 
-                for module_id in module_ids:
-                    # Get module lock to prevent module being removed during processing
-                    module_lock = self._get_module_lock(module_id)
+                # Acquire training priority token (will block if node check needs priority)
+                self.train_priority.acquire()
 
-                    # Try to acquire module lock non-blocking
-                    if not module_lock.acquire(blocking=False):
-                        continue  # Skip if module is locked by another operation
+                try:
+                    with self.train_condition:
+                        # Wait for modules or termination signal with shorter timeout
+                        # to allow more frequent yielding to node checker
+                        while len(self.modules) <= 0 and not self.terminate:
+                            self.train_condition.wait(timeout=0.1)
 
-                    try:
-                        # Check if module still exists (might have been removed)
-                        with self.global_lock:
-                            module = self.modules.get(module_id)
-                            if not module:
-                                continue
+                        if self.terminate:
+                            break
 
-                        # IMPORTANT: Only set flag when actually processing, not for the entire module loop
-                        ml_flag_set = False
+                    # Process each module with time awareness
+                    module_ids = []
+                    with self.global_lock:
+                        module_ids = list(self.modules.keys())
+
+                    # Process each module with time constraints
+                    for module_id in module_ids:
+                        # Check if we've spent too much time and should yield to node checker
+                        if time.time() - loop_start_time > self.max_train_time:
+                            break
+
+                        # Get module lock to prevent module being removed during processing
+                        module_lock = self._get_module_lock(module_id)
+
+                        # Try to acquire module lock non-blocking
+                        if not module_lock.acquire(blocking=False):
+                            continue  # Skip if module is locked by another operation
+
                         try:
-                            # Check queues with appropriate locking
-                            has_backward = False
-                            has_forward = False
+                            # Check if module still exists (might have been removed)
+                            with self.global_lock:
+                                module = self.modules.get(module_id)
+                                if not module:
+                                    continue
 
-                            with self.queue_lock:
-                                has_backward = not module.backward_queue.empty()
-                                has_forward = not module.forward_queue.empty()
+                            # IMPORTANT: Only set flag when actually processing, not for the entire module loop
+                            ml_flag_set = False
+                            try:
+                                # Check queues with appropriate locking
+                                has_backward = False
+                                has_forward = False
 
-                            # Only set the flag if we're actually going to do ML operations
-                            if has_backward or has_forward:
-                                # Signal we're processing ML operations
-                                self.ml_operation_in_progress.set()
-                                ml_flag_set = True
-
-                            # Move module to device if needed
-                            module = module.to(self.device)
-
-                            # Handle backward pass with priority
-                            if has_backward:
-                                self._handle_backward(module_id, module)
-
-                            # Handle forward pass
-                            if has_forward:
                                 with self.queue_lock:
-                                    if not module.forward_queue.empty():
-                                        key, (size, name) = module.forward_queue.get()
+                                    has_backward = not module.backward_queue.empty()
+                                    has_forward = not module.forward_queue.empty()
 
-                                        if isinstance(key, str):
-                                            self._handle_generate(module_id, size, name)
-                                        else:
-                                            self._handle_forward(
-                                                module_id, key, size, name
+                                # Only set the flag if we're actually going to do ML operations
+                                if has_backward or has_forward:
+                                    # Signal we're processing ML operations
+                                    self.ml_operation_in_progress.set()
+                                    ml_flag_set = True
+
+                                # Move module to device if needed
+                                module = module.to(self.device)
+
+                                # Handle backward pass with priority
+                                if has_backward:
+                                    self._handle_backward(module_id, module)
+
+                                # Handle forward pass
+                                if has_forward:
+                                    with self.queue_lock:
+                                        if not module.forward_queue.empty():
+                                            key, (size, name) = (
+                                                module.forward_queue.get()
                                             )
-                        finally:
-                            # Release ML operation flag if we set it
-                            if ml_flag_set:
-                                self.ml_operation_in_progress.clear()
-                    finally:
-                        # Release module lock
-                        module_lock.release()
 
-                # Short sleep to prevent CPU hogging when no work is available
-                # Allow more time for node checking by yielding control here
-                time.sleep(0.01)
+                                            if isinstance(key, str):
+                                                self._handle_generate(
+                                                    module_id, size, name
+                                                )
+                                            else:
+                                                self._handle_forward(
+                                                    module_id, key, size, name
+                                                )
+                            finally:
+                                # Release ML operation flag if we set it
+                                if ml_flag_set:
+                                    self.ml_operation_in_progress.clear()
+                        finally:
+                            # Release module lock
+                            module_lock.release()
+
+                    # Update thread state tracking
+                    self.thread_states['train_loop']['last_yield'] = time.time()
+
+                    # Adaptive sleep: sleep longer if no work was done to reduce CPU usage
+                    if not module_ids:
+                        time.sleep(0.05)  # Longer sleep when no modules
+                    else:
+                        time.sleep(0.001)  # Very short sleep when actively working
+                finally:
+                    # Always release training priority token
+                    self.train_priority.release()
 
             except Exception as e:
                 logging.error(f"Error in train loop: {str(e)}")
@@ -232,13 +284,9 @@ class DistributedWorker:
                     and self.ml_operation_in_progress.is_set()
                 ):
                     self.ml_operation_in_progress.clear()
-
-    def _get_module_lock(self, module_id):
-        """Get or create a lock for a specific module"""
-        with self.global_lock:
-            if module_id not in self.module_locks:
-                self.module_locks[module_id] = threading.RLock()
-            return self.module_locks[module_id]
+            finally:
+                # Mark thread as inactive
+                self.thread_states['train_loop']['active'] = False
 
     def _handle_backward(self, module_id, module):
         """Optimized backward pass with mixed precision support and proper locking"""
@@ -983,6 +1031,233 @@ class DistributedWorker:
         except Exception as e:
             logging.error(f"Error checking for termination: {str(e)}")
 
+    def check_node(self):
+        """Check for node updates with efficient scheduling and locking"""
+        start_time = time.time()
+
+        try:
+            # Track that we're running node check
+            self.thread_states['node_check']['active'] = True
+            self.thread_states['node_check']['last_run'] = start_time
+
+            # Try to acquire the appropriate priority level
+            high_priority = (
+                self.check_counter % 5 == 0
+            )  # Every 5th check gets high priority
+
+            # For high priority checks, we may need to temporarily reduce training thread priority
+            if high_priority:
+                # Acquire both priority tokens to ensure this check runs with highest priority
+                self.node_check_priority.acquire(3)  # All tokens
+
+                # Acquire a train priority token to slow down train_loop
+                train_token_acquired = self.train_priority.acquire(blocking=False)
+            else:
+                # For normal priority, just get one token
+                self.node_check_priority.acquire(1)
+                train_token_acquired = False
+
+            try:
+                # Even if ML operation is in progress, we should still check with certain frequency
+                # to prevent deadlocks (adaptive checking based on urgency)
+                should_skip = (
+                    self.ml_operation_in_progress.is_set()
+                    and not high_priority
+                    and self.check_counter % 3 != 0
+                )
+
+                if should_skip:
+                    return
+
+                update_check_interval = 5
+
+                # Process updates at regular intervals
+                if self.check_counter % update_check_interval == 0:
+                    args = self.send_request("check_module", None, 2)
+
+                    if isinstance(args, tuple):
+                        (
+                            file_name,
+                            module_id,
+                            node_id,
+                            module_name,
+                            optimizer_name,
+                            training,
+                        ) = args
+
+                        # Load module in a background thread to avoid blocking node checks
+                        self.thread_pool.submit(
+                            self.load_module,
+                            file_name,
+                            module_id,
+                            node_id,
+                            module_name,
+                            optimizer_name,
+                            training,
+                        )
+
+                    # Check for job completion/deletion requests
+                    elif isinstance(args, str):
+                        # Safely remove module with proper locking
+                        with self.global_lock:
+                            if args in self.modules:
+                                if args in self.optimizers:
+                                    with self.optimizer_lock:
+                                        if args in self.optimizers:
+                                            del self.optimizers[args]
+
+                                # Remove module
+                                del self.modules[args]
+
+                                # Clean up module lock
+                                if args in self.module_locks:
+                                    del self.module_locks[args]
+
+                                self.send_request(
+                                    "debug_print",
+                                    (f"Module {args} removed.",),
+                                    timeout=0.5,
+                                )
+
+                    # Check for node termination requests
+                    self.check_for_termination()
+
+                # Process module-specific requests with improved time management
+                if self.modules:
+                    # Get a snapshot of module_ids to avoid concurrent modification issues
+                    with self.global_lock:
+                        module_ids = list(self.modules.keys())
+
+                    # Process a limited number of modules per check to ensure timely completion
+                    for module_id in module_ids[
+                        :3
+                    ]:  # Limit to 3 modules per check for responsiveness
+                        # Skip if we've been running too long
+                        if (
+                            time.time() - start_time > 0.1
+                        ):  # 100ms time budget for node checking
+                            break
+
+                        # Try to acquire module lock non-blocking
+                        module_lock = self._get_module_lock(module_id)
+                        if not module_lock.acquire(blocking=False):
+                            continue
+
+                        try:
+                            # Check if module still exists
+                            with self.global_lock:
+                                if module_id not in self.modules:
+                                    continue
+                                module = self.modules[module_id]
+
+                            # Check for parameters requests
+                            params_req = self.send_request(
+                                "check_parameters_request", module_id, timeout=0.5
+                            )
+
+                            if params_req:
+                                print(params_req)
+                                self.send_request(
+                                    "debug_print",
+                                    ("DistributedWorker -> Sending parameters.",),
+                                    timeout=0.2,
+                                )
+
+                                # Save state dict to file with safe CPU transfer
+                                with open(f"parameters_{module_id}", "wb") as file:
+                                    if self.device.type == "cuda":
+                                        # Temporarily move to CPU for saving
+                                        cpu_state_dict = {
+                                            k: v.detach().cpu()
+                                            for k, v in module.state_dict().items()
+                                        }
+                                        torch.save(cpu_state_dict, file)
+                                    else:
+                                        torch.save(module.state_dict(), file)
+
+                                self.send_request(
+                                    "send_parameters", (module.host, module_id)
+                                )
+
+                            # Handle forward queue - high priority task, check even during ML operations
+                            forward_task = self.send_request("check_forward", module_id)
+                            if forward_task:
+                                with self.queue_lock:
+                                    module.forward_queue.put(forward_task)
+
+                                # Signal we have work
+                                with self.forward_condition:
+                                    self.forward_condition.notify_all()
+
+                            # Handle training related checks
+                            if hasattr(module, "training"):
+                                # Check if module is in training mode
+                                is_training = self.send_request(
+                                    "check_train", module_id
+                                )
+                                if isinstance(is_training, bool):
+                                    module.training = is_training
+
+                                if module.training:
+                                    # Handle backward queue
+                                    backward_task = self.send_request(
+                                        "check_backward", module_id
+                                    )
+                                    if backward_task:
+                                        with self.queue_lock:
+                                            module.backward_queue.put(backward_task)
+
+                                        # Signal we have backward work
+                                        with self.backward_condition:
+                                            self.backward_condition.notify_all()
+
+                                    # Handle optimizer updates
+                                    self._process_state_update(module_id, module)
+                        finally:
+                            # Always release module lock
+                            module_lock.release()
+
+                self.check_counter += 1
+            finally:
+                # Release any acquired priority tokens
+                if high_priority:
+                    # Release all node check priority tokens
+                    for _ in range(3):
+                        self.node_check_priority.release()
+
+                    # Release train token if acquired
+                    if train_token_acquired:
+                        self.train_priority.release()
+                else:
+                    # Release the single priority token
+                    self.node_check_priority.release()
+        finally:
+            # Ensure thread state is updated even if an exception occurs
+            self.thread_states['node_check']['active'] = False
+
+    def _node_checker_thread(self):
+        """Thread function for periodically running node checks with adaptive frequency"""
+        while not self.terminate:
+            try:
+                # Run the node check
+                self.check_node()
+
+                # Adaptive sleep based on system activity
+                if len(self.modules) == 0:
+                    # No modules, we can sleep longer
+                    time.sleep(0.1)
+                elif self.thread_states['train_loop']['active']:
+                    # Train loop is active, check frequently
+                    time.sleep(0.01)
+                else:
+                    # Normal operation
+                    time.sleep(0.05)
+
+            except Exception as e:
+                logging.error(f"Error in node checker thread: {str(e)}")
+                traceback.print_exc()
+                time.sleep(0.1)  # Sleep on error to prevent tight error loops
+
     def run(self):
         """Main execution method with robust thread management and error handling"""
         # Start node check thread with error handling
@@ -1010,56 +1285,31 @@ class DistributedWorker:
 
             logging.info("DistributedWorker shutdown complete")
 
-    def _node_checker_thread(self):
-        """Thread that periodically checks for node updates with error handling"""
-        check_interval = 0.05  # Base check interval
-
-        while not self.terminate:
-            try:
-                # Adaptive check interval based on activity
-                active_modules = len(self.modules) > 0
-                sleep_time = check_interval if active_modules else 0.5
-
-                # Check for updates
-                self.check_node()
-
-                # Sleep for a short time to avoid CPU spinning
-                time.sleep(sleep_time)
-            except Exception as e:
-                logging.error(f"Error in node checker thread: {str(e)}")
-                traceback.print_exc()
-                # Sleep longer after an error to avoid fast failure loops
-                time.sleep(1.0)
+    def _get_module_lock(self, module_id):
+        """Helper method to get or create a module-specific lock"""
+        with self.global_lock:
+            if module_id not in self.module_locks:
+                self.module_locks[module_id] = threading.RLock()
+            return self.module_locks[module_id]
 
     def _cleanup(self):
-        """Perform cleanup operations before shutdown"""
-        logging.info("Performing cleanup operations...")
-
-        # Close thread pool
-        self.thread_pool.shutdown(wait=False)
-
-        # Release all locks that might be held
-        try:
-            if self.mpc_lock._is_owned():
-                self.mpc_lock.release()
-        except:
-            pass
-
-        # Clean GPU memory
-        if self.device.type == "cuda":
-            try:
-                torch.cuda.empty_cache()
-                logging.info("CUDA memory cleared")
-            except:
-                pass
-
-        # Clear module references
+        """Clean up resources before shutdown"""
+        # Clear all modules
         with self.global_lock:
             self.modules.clear()
-            self.optimizers.clear()
             self.module_locks.clear()
 
-        logging.info("Cleanup complete")
+        # Clear optimizers
+        with self.optimizer_lock:
+            self.optimizers.clear()
+
+        # Clear events and conditions
+        self.ml_operation_in_progress.clear()
+        self.processing_event.clear()
+
+        # Shutdown thread pool
+        if hasattr(self, 'thread_pool'):
+            self.thread_pool.shutdown(wait=False)
 
     def store_snapshot(self, module_id, _input, _output, epoch, micro):
         """Store model snapshot with efficient CPU transfer and error handling"""
