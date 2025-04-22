@@ -141,6 +141,7 @@ class DistributedWorker:
         except Exception as e:
             logging.error(f"Error in main loop: {str(e)}")
             traceback.print_exc()
+
         finally:
             self._cleanup()
             logging.info("DistributedWorker shutdown complete")
@@ -233,7 +234,6 @@ class DistributedWorker:
         """Handle forward pass requests"""
         forward_task = self.send_request("check_forward", module_id)
         if forward_task:
-            print(forward_task)
             if isinstance(forward_task[0], str):
                 self._handle_generate(module_id, forward_task[1][0], forward_task[1][1])
             else:

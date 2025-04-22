@@ -129,7 +129,7 @@ class TorchNode(SmartNode):
             colour="blue",
         )
         file_name = f"tmp/{module_id}_parameters"
-        key = "P" + module_id
+        key = "PREQPREQPREQ" + module_id
         self.memory_manager[key] = file_name
         return True
 
@@ -138,7 +138,7 @@ class TorchNode(SmartNode):
 
         # TODO Must ensure requesting node is indeed the master or an overseeing validator
         module_id = data[10:74].decode()
-        self.memory_manager["P" + module_id] = True
+        self.memory_manager["PREQPREQPREQ" + module_id] = True
         return True
 
     def _handle_optimizer_request(self, data: bytes, node: Connection):
@@ -348,7 +348,6 @@ class TorchNode(SmartNode):
                 "check_module": self._handle_check_module,
                 "check_module_request": self._handle_check_module_request,
                 "check_forward": self._handle_check_forward,
-                "check_generate": self._handle_check_generate,
                 "check_backward": self._handle_check_backward,
                 "send_optimizer_request": self._handle_send_optimizer_request,
                 "check_state_update": self._handle_check_state_update,
@@ -502,17 +501,6 @@ class TorchNode(SmartNode):
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
-    def _handle_check_generate(self, request):
-        return_val = None
-
-        module_id = request["args"]
-        if module_id in self.modules:
-            if "generate" in self.modules[module_id]["forward_queue"]:
-                return_val = self.modules[module_id]["forward_queue"]["generate"]
-                del self.modules[module_id]["forward_queue"]["generate"]
-
-        self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
     def _handle_check_forward(self, request):
         # Check if forward pass has been received and is loaded in shared mpc
         return_val = None
@@ -525,6 +513,9 @@ class TorchNode(SmartNode):
                 if module_id in module["forward_queue"].keys():
                     return_val = (module_id, module["forward_queue"][module_id])
                     del module["forward_queue"][module_id]
+                elif "generate" in module["forward_queue"].keys():
+                    return_val = self.modules[module_id]["forward_queue"]["generate"]
+                    del self.modules[module_id]["forward_queue"]["generate"]
 
                 else:
                     min_iter, min_micro = -1, -1
@@ -602,7 +593,7 @@ class TorchNode(SmartNode):
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     def _handle_check_parameters_request(self, request):
-        key = "P" + request["args"]
+        key = "PREQPREQPREQ" + request["args"]
         return_val = False
 
         if key in self.memory_manager:
@@ -615,7 +606,7 @@ class TorchNode(SmartNode):
 
     def _handle_check_parameters(self, request):
         module_id = request["args"]
-        key = "P" + module_id
+        key = "PREQPREQPREQ" + module_id
         if key in self.memory_manager:
             file_name = self.memory_manager[key]
             return_val = file_name
