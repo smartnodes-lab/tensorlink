@@ -2,16 +2,11 @@ import json
 import logging
 import os
 import pickle
-import queue
-import threading
-import time
 import io
-from collections import deque
-import traceback
-
+import time
 import torch
 import torch.amp as amp
-from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub import HfApi
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -69,16 +64,11 @@ class DistributedWorker:
         self.node_requests = node_requests
         self.node_responses = node_responses
         self.mpc_lock = mpc_lock
-        self.rolling_buffer = deque(maxlen=10)
         self.storage_path = "./tmp/snapshots"
 
         self.modules = {}
         self.optimizers = {}
         self.terminate = False
-
-        # Single lock for critical operations
-        self.global_lock = threading.RLock()
-
         self.trusted = trusted
 
         # CUDA optimization: Check device and optimize CUDA settings
@@ -88,16 +78,6 @@ class DistributedWorker:
         # Mixed precision setup
         self.scaler = amp.GradScaler()
         self.use_amp = self.device.type == "cuda"  # Only use AMP with CUDA
-
-        # Initialize CUDA streams for overlapping operations if using CUDA
-        if self.device.type == "cuda":
-            self.default_stream = torch.cuda.Stream()
-            self.compute_stream = torch.cuda.Stream()
-            self.memory_stream = torch.cuda.Stream()
-
-        # Operation timings to help with scheduling
-        self.last_node_check = time.time()
-        self.node_check_interval = 0.05  # Check node every 50ms
 
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
@@ -121,278 +101,56 @@ class DistributedWorker:
             logging.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
             logging.info(f"Total CUDA memory: {total_memory / 1e9:.2f} GB")
 
-    def run(self):
-        """Single main loop that handles all operations sequentially"""
+    def send_request(self, request_type, args, timeout=None):
+        """Send request to coordinator node with timeout handling"""
+        request = {"type": request_type, "args": args}
         try:
-            logging.info("Starting DistributedWorker main loop")
-            while not self.terminate:
-                # First check for node updates (higher priority)
-                self.check_node_updates()
-
-                # Process any pending work in modules
-                self.process_modules()
-
-                # Adaptive sleep based on activity level
-                if not self.modules:
-                    time.sleep(1)  # Longer sleep when idle
-                else:
-                    time.sleep(0.005)  # Short sleep when active
-
+            self.mpc_lock.acquire(timeout=timeout)
+            self.node_requests.put(request)
+            response = self.node_responses.get(
+                timeout=timeout
+            )  # Blocking call, waits for response
+        except TimeoutError as e:
+            self.terminate = True
         except Exception as e:
-            logging.error(f"Error in main loop: {str(e)}")
-            traceback.print_exc()
-
+            response = {"return": str(e)}
         finally:
-            self._cleanup()
-            logging.info("DistributedWorker shutdown complete")
+            self.mpc_lock.release()
 
-    def check_node_updates(self):
-        """Check for updates from the node"""
-        current_time = time.time()
+        if response:
+            return response["return"]
 
-        # Only check at specified intervals to avoid overwhelming the node
-        if current_time - self.last_node_check < self.node_check_interval:
-            return
+    def handle_backward(self, module_id, tag, loss_relay):
+        """Handle backward pass with mixed precision support"""
+        module = self.modules[module_id]
+        n_batch = module.n_batch
+        next_node = module.host
 
-        self.last_node_check = current_time
-
-        # Check for module updates, removals, or termination signals
-        args = self.send_request("check_module", None, timeout=2)
-
-        if isinstance(args, tuple):
-            # New module to load
-            file_name, module_id, node_id, module_name, optimizer_name, training = args
-            self.load_module(
-                file_name, module_id, node_id, module_name, optimizer_name, training
-            )
-
-        elif isinstance(args, str):
-            # Module to remove
-            self.remove_module(args)
-
-        # Check for termination signal
-        self.check_for_termination()
-
-    def process_modules(self):
-        """Process all active modules"""
-        if not self.modules:
-            return
-
-        with self.global_lock:
-            module_ids = list(self.modules.keys())
-
-        for module_id in module_ids:
-            # Check if module still exists
-            with self.global_lock:
-                if module_id not in self.modules:
-                    continue
-                module = self.modules[module_id]
-
-            # Check for parameter requests
-            self.handle_parameter_request(module_id, module)
-
-            # Handle forward pass requests
-            self.handle_forward_requests(module_id, module)
-
-            # Handle training operations if in training mode
-            if hasattr(module, "training"):
-                # Check training status
-                is_training = self.send_request("check_train", module_id)
-                if isinstance(is_training, bool):
-                    module.training = is_training
-
-                if module.training:
-                    # Handle backward passes
-                    self.handle_backward_requests(module_id, module)
-
-                    # Handle optimizer updates
-                    self.handle_optimizer_updates(module_id, module)
-
-    def handle_parameter_request(self, module_id, module):
-        """Handle requests for model parameters"""
-        params_req = self.send_request(
-            "check_parameters_request", module_id, timeout=0.5
-        )
-
-        if params_req:
-            logging.info("DistributedWorker -> Sending parameters")
-
-            # Save state dict to file with safe CPU transfer
-            with open(f"parameters_{module_id}", "wb") as file:
-                if self.device.type == "cuda":
-                    # Temporarily move to CPU for saving
-                    cpu_state_dict = {
-                        k: v.detach().cpu() for k, v in module.state_dict().items()
-                    }
-                    torch.save(cpu_state_dict, file)
-                else:
-                    torch.save(module.state_dict(), file)
-
-            self.send_request("send_parameters", (module.host, module_id))
-
-    def handle_forward_requests(self, module_id, module):
-        """Handle forward pass requests"""
-        forward_task = self.send_request("check_forward", module_id)
-        if forward_task:
-            if isinstance(forward_task[0], str):
-                self._handle_generate(module_id, forward_task[1][0], forward_task[1][1])
-            else:
-                self._handle_forward(
-                    module_id, forward_task[0], forward_task[1], forward_task[2]
-                )
-
-    def handle_backward_requests(self, module_id, module):
-        """Handle backward pass requests"""
-        backward_task = self.send_request("check_backward", module_id)
-        if backward_task:
-            self._handle_backward(module_id, module, backward_task[0], backward_task[1])
-
-    def handle_optimizer_updates(self, module_id, module):
-        """Handle optimizer state updates"""
-        state_update = self.send_request("check_state_update", module_id)
-
-        if not state_update:
-            return
-
-        if state_update[0] == "init":
-            # Initialize optimizer
-            optimizer_kwargs = state_update[1]
-
-            if module_id in self.optimizers:
-                optimizer_cls = self.optimizers[module_id]
-                optimizer_name = (
-                    optimizer_cls.__name__
-                    if hasattr(optimizer_cls, '__name__')
-                    else "Unknown"
-                )
-
-                # Create optimizer with appropriate settings for CUDA/CPU
-                if self.use_amp and 'fused' not in optimizer_name.lower():
-                    # Use fused implementation when available for better performance
-                    if optimizer_name.lower() == 'adam':
-                        try:
-                            from torch.optim.adam import Adam
-
-                            self.optimizers[module_id] = Adam(
-                                module.parameters(),
-                                **optimizer_kwargs,
-                                fused=True,
-                            )
-                        except:
-                            self.optimizers[module_id] = optimizer_cls(
-                                module.parameters(),
-                                **optimizer_kwargs,
-                            )
-                    else:
-                        self.optimizers[module_id] = optimizer_cls(
-                            module.parameters(),
-                            **optimizer_kwargs,
-                        )
-                else:
-                    self.optimizers[module_id] = optimizer_cls(
-                        module.parameters(), **optimizer_kwargs
-                    )
-
-                self.send_request(
-                    "debug_print",
-                    (
-                        f"DistributedWorker -> Initialized optimizer: {optimizer_name} on {self.device.type}",
-                    ),
-                    timeout=0.5,
-                )
-
-            self.send_request("optimizer_response", (module_id, "loaded"))
-
-        elif state_update[0] == "step":
-            # Step optimizer
-            closure = state_update[1]
-
-            if module_id in self.optimizers:
-                if self.use_amp:
-                    # Update with scaler for mixed precision
-                    self.scaler.step(self.optimizers[module_id], closure)
-                    self.scaler.update()
-                else:
-                    self.optimizers[module_id].step(closure)
-
-                self.send_request("optimizer_response", (module_id, "stepped"))
-
-        elif state_update[0] == "zero_grad":
-            # Zero gradients
-            if module_id in self.optimizers:
-                if self.device.type == "cuda":
-                    # More efficient for CUDA
-                    for param in module.parameters():
-                        if param.grad is not None:
-                            param.grad = None
-                else:
-                    self.optimizers[module_id].zero_grad()
-
-            self.send_request("optimizer_response", (module_id, "zeroed"))
-
-    def _handle_backward(self, module_id, module, tag, loss_relay):
-        """Process backward pass with mixed precision support"""
-        if not module.training:
-            return
-
-        try:
+        # Only process if in training mode
+        if module.training:
             # Get tensor from shared memory
             tensor_bytes = get_from_shared_memory(
                 loss_relay[0], loss_relay[1], encoded=True
             )
             tensor = bytes_to_tensor(tensor_bytes)
 
-            # Move tensors to device efficiently
-            if self.device.type == "cuda":
-                with torch.cuda.stream(self.memory_stream):
-                    loss = attach_tensor(tensor, self.device, non_blocking=True)
+            # Move tensors to device
+            loss = attach_tensor(tensor, self.device)
 
-                    # Retrieve intermediate values from storage
-                    inter_tag = tuple(tag)
+            # Retrieve intermediate values from storage
+            inter_tag = tuple(tag)
+            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
+            assoc_input = assoc_input.to(self.device)
+            assoc_output = assoc_output.to(self.device)
 
-                    if inter_tag not in module.intermediates:
-                        logging.warning(
-                            f"Missing intermediate values for tag {inter_tag}"
-                        )
-                        return
-
-                    assoc_input, assoc_output = module.intermediates.pop(inter_tag)
-
-                    # Move to device with memory stream to overlap transfers
-                    assoc_input = assoc_input.to(self.device, non_blocking=True)
-                    assoc_output = assoc_output.to(self.device, non_blocking=True)
-
-                self.memory_stream.synchronize()
+            # Backward pass
+            if self.use_amp:
+                # Scale loss for mixed precision
+                scaled_loss = self.scaler.scale(loss)
+                assoc_output.backward(scaled_loss)
+                # Unscale gradients for optimizer
+                self.scaler.unscale_(self.optimizers.get(module_id, None))
             else:
-                # CPU path without non-blocking transfers
-                loss = attach_tensor(tensor, self.device)
-                inter_tag = tuple(tag)
-
-                if inter_tag not in module.intermediates:
-                    logging.warning(f"Missing intermediate values for tag {inter_tag}")
-                    return
-
-                assoc_input, assoc_output = module.intermediates.pop(inter_tag)
-                assoc_input = assoc_input.to(self.device)
-                assoc_output = assoc_output.to(self.device)
-
-            # Perform backward pass
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
-                with torch.cuda.stream(self.compute_stream):
-                    if self.use_amp:
-                        # Scale loss for mixed precision
-                        scaled_loss = self.scaler.scale(loss)
-                        assoc_output.backward(scaled_loss)
-
-                        if module_id in self.optimizers:
-                            # Unscale gradients for optimizer
-                            self.scaler.unscale_(self.optimizers[module_id])
-                    else:
-                        assoc_output.backward(loss)
-                self.compute_stream.synchronize()
-            else:
-                # CPU backward pass
                 assoc_output.backward(loss)
 
             # Detach gradients and prepare for next node
@@ -412,161 +170,124 @@ class DistributedWorker:
             # Store pass in shared memory and send to next node
             dvalues_bytes = tensor_to_bytes(dvalues)
             size, name = store_in_shared_memory(dvalues_bytes, encoded=True)
-            self.send_request("send_backward", (module.host, size, name, tag))
+            self.send_request("send_backward", (next_node, size, name, tag))
 
             # Strategic memory management - clear only when necessary
-            if self.device.type == "cuda" and module.n_batch % 10 == 0:
+            if self.device.type == "cuda" and n_batch % 10 == 0:
                 torch.cuda.empty_cache()
-
-        except Exception as e:
-            logging.error(f"Error in backward pass: {str(e)}")
-            traceback.print_exc()
 
     def _handle_forward(self, module_id, key, size, name):
-        """Process forward pass with mixed precision"""
-        try:
-            module = self.modules.get(module_id)
-            if not module:
-                logging.warning(f"Module {module_id} not found for forward pass")
-                return
+        """Handle forward pass with mixed precision"""
+        module = self.modules[module_id]
 
-            # Get data from shared memory
-            tensor_bytes = get_from_shared_memory(size, name, encoded=True)
-            args, kwargs = tensor_bytes.split(b"|")
-            args = bytes_to_tensor(args)
-            kwargs = bytes_to_tensor(kwargs)
+        # Get data from shared memory
+        tensor_bytes = get_from_shared_memory(size, name, encoded=True)
+        args, kwargs = tensor_bytes.split(b"|")
+        args = bytes_to_tensor(args)
+        kwargs = bytes_to_tensor(kwargs)
 
-            # Move tensors to device efficiently
-            if self.device.type == "cuda":
-                with torch.cuda.stream(self.memory_stream):
-                    inp = enable_grad(attach_tensor(args, self.device))
-                    kwargs = enable_grad(attach_tensor(kwargs, self.device))
-                self.memory_stream.synchronize()
-            else:
-                inp = enable_grad(attach_tensor(args, self.device))
-                kwargs = enable_grad(attach_tensor(kwargs, self.device))
+        # Move tensors to device
+        inp = enable_grad(attach_tensor(args, self.device))
+        kwargs = enable_grad(attach_tensor(kwargs, self.device))
 
-            # Forward pass with optional mixed precision
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
-                with torch.cuda.stream(self.compute_stream):
-                    if self.use_amp and module.training:
-                        with amp.autocast():
-                            out = module(inp, **kwargs)
-                    else:
-                        with torch.set_grad_enabled(module.training):
-                            out = module(inp, **kwargs)
-                self.compute_stream.synchronize()
-            else:
-                with torch.set_grad_enabled(module.training):
-                    out = module(inp, **kwargs)
+        # Forward pass
+        if self.use_amp and module.training:
+            with amp.autocast():
+                out = module(inp, **kwargs)
+        else:
+            with torch.set_grad_enabled(module.training):
+                out = module(inp, **kwargs)
 
-            # Store intermediate results if training
-            if module.training:
-                module.intermediates[key] = [
-                    inp,
-                    handle_output(out).to(
-                        self.device,
-                        non_blocking=True if self.device.type == "cuda" else False,
-                    ),
-                ]
+        # Store intermediate results if training
+        if module.training:
+            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
 
-            # Detach and store output
-            detached_out = detach_tensor(out)
+        # Detach and store output
+        detached_out = detach_tensor(out)
+        output_bytes = tensor_to_bytes(detached_out)
+        size, name = store_in_shared_memory(output_bytes)
 
-            if self.device.type == "cuda":
-                with torch.cuda.stream(self.memory_stream):
-                    output_bytes = tensor_to_bytes(detached_out)
-                    size, name = store_in_shared_memory(output_bytes)
-                self.memory_stream.synchronize()
-            else:
-                output_bytes = tensor_to_bytes(detached_out)
-                size, name = store_in_shared_memory(output_bytes)
+        self.send_request("send_forward", (module.host, size, name, key))
 
-            # Send result to host
-            self.send_request("send_forward", (module.host, size, name, key))
+        # Incremental training counter
+        if module.training:
+            module.n_batch += 1
 
-            # Incremental training counter
-            if module.training:
-                module.n_batch += 1
-
-            # Strategic memory management
-            if self.device.type == "cuda" and module.n_batch % 20 == 0:
-                torch.cuda.empty_cache()
-
-        except Exception as e:
-            logging.error(f"Error in forward pass: {str(e)}")
-            traceback.print_exc()
+        # Strategic memory management
+        if self.device.type == "cuda" and module.n_batch % 20 == 0:
+            torch.cuda.empty_cache()
 
     def _handle_generate(self, module_id, size, name):
-        """Process text generation with CUDA acceleration"""
+        """Optimized text generation with CUDA acceleration"""
+        module = self.modules.get(module_id)
+        query_bytes = get_from_shared_memory(size, name, encoded=True)
+        args, kwargs = query_bytes.split(b"::")
+
+        # Convert args to tensor and move to device
+        input_ids = bytes_to_tensor(args)
+
+        # Use pinned memory for faster host->device transfer
+        if self.device.type == "cuda":
+            # Pin memory for faster transfers
+            input_ids = input_ids.pin_memory()
+            input_ids = input_ids.to(self.device, non_blocking=True)
+        else:
+            input_ids = attach_tensor(input_ids, self.device)
+
+        # Load kwargs but filter out non-generation parameters
+        all_kwargs = bytes_to_tensor(kwargs)
+        # Filter out other known non-generation parameters
+        known_non_generation_params = ['module', 'class', 'data']
+        for param in known_non_generation_params:
+            all_kwargs.pop(param, None)
+
+        # Optimize generation parameters if not specified
+        if 'num_beams' not in all_kwargs and self.device.type == "cuda":
+            all_kwargs['num_beams'] = (
+                4  # Use beam search for better results when on GPU
+            )
+
+        # Use efficient attention if available and not specified
+        if self.device.type == "cuda" and 'use_cache' not in all_kwargs:
+            all_kwargs['use_cache'] = True  # Enable KV caching for faster generation
+
+        # Synchronize for accurate profiling
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+
         try:
-            module = self.modules.get(module_id)
-            if not module:
-                logging.warning(f"Module {module_id} not found for generation")
-                return
-
-            query_bytes = get_from_shared_memory(size, name, encoded=True)
-            args, kwargs = query_bytes.split(b"::")
-
-            # Convert args to tensor and move to device
-            input_ids = bytes_to_tensor(args)
-
-            # Load kwargs but filter out non-generation parameters
-            all_kwargs = bytes_to_tensor(kwargs)
-            # Filter out other known non-generation parameters
-            known_non_generation_params = ['module', 'class', 'data']
-            for param in known_non_generation_params:
-                all_kwargs.pop(param, None)
-
-            # Optimize generation parameters if not specified
-            if 'num_beams' not in all_kwargs and self.device.type == "cuda":
-                all_kwargs['num_beams'] = (
-                    4  # Use beam search for better results when on GPU
-                )
-
-            # Use efficient attention if available and not specified
-            if self.device.type == "cuda" and 'use_cache' not in all_kwargs:
-                all_kwargs['use_cache'] = (
-                    True  # Enable KV caching for faster generation
-                )
-
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Generating with input arguments: {all_kwargs}",
+                    "bright_blue",
+                    logging.DEBUG,
+                ),
+            )
             # Generate text with the model
             with torch.no_grad():
                 if isinstance(input_ids, list):
                     input_ids = input_ids[-1]
 
-                # Use pinned memory for faster host->device transfer
-                if self.device.type == "cuda":
-                    input_ids = input_ids.pin_memory()
-                    input_ids = input_ids.to(self.device, non_blocking=True)
-                    torch.cuda.synchronize()
-                else:
-                    input_ids = attach_tensor(input_ids, self.device)
-
                 # Use CUDA stream for generation
                 if self.device.type == "cuda":
-                    with torch.cuda.stream(self.compute_stream):
-                        output = module.generate(input_ids, **all_kwargs)
-                    self.compute_stream.synchronize()
+                    output = module.generate(**input_ids, **all_kwargs)
                 else:
-                    if not isinstance(input_ids, torch.Tensor):
-                        output = module.generate(**input_ids, **all_kwargs)
-                    else:
-                        output = module.generate(input_ids, **all_kwargs)
+                    output = module.generate(**input_ids, **all_kwargs)
+
+            if self.device.type == "cuda":
+                torch.cuda.synchronize()
 
             # Detach and store generated output
             detached_out = detach_tensor(output)
             output_bytes = tensor_to_bytes(detached_out)
-
         except Exception as e:
             # Handle any exceptions during generation
             output_bytes = json.dumps({"error": str(e)}).encode()
-            logging.error(f"Error in generation: {str(e)}")
-            traceback.print_exc()
+
+        size, name = store_in_shared_memory(output_bytes)
 
         # Send the generated output back
-        size, name = store_in_shared_memory(output_bytes)
         self.send_request("send_forward", (module.host, size, name, "generate"))
 
         # Clean memory
@@ -576,264 +297,298 @@ class DistributedWorker:
     def load_module(
         self, file_name, module_id, node_id, module_name, optimizer_name, training
     ):
-        """Load and prepare model with CUDA optimizations"""
-        try:
-            print("Loading Model:", module_name)
+        """Load and prepare model"""
+        # Load the module based on trusted status
+        if self.trusted:
+            with open(file_name, "rb") as f:
+                module = pickle.load(f)
+                module = module.to(self.device)
+        # Else try Hugging Face for model info
+        elif len(module_name) > 0:
+            api = HfApi()
+            try:
+                # Get model information from Hugging Face api
+                api.model_info(repo_id=module_name)
 
-            # Load the module based on trusted status
-            if self.trusted:
-                with open(file_name, "rb") as f:
-                    module = pickle.load(f)
-
-                    # Move model to GPU asynchronously if possible
+                if os.stat(file_name).st_size == 0:
+                    # Load model directly
                     if self.device.type == "cuda":
-                        module = module.to(self.device, non_blocking=True)
-                    else:
-                        module = module.to(self.device)
-
-            # Else try Hugging Face for model info
-            elif len(module_name) > 0:
-                api = HfApi()
-                try:
-                    # Get model information from Hugging Face api
-                    api.model_info(repo_id=module_name)
-
-                    if os.stat(file_name).st_size == 0:
-                        # Optimize model loading with device map for large models
-                        if self.device.type == "cuda":
-                            # Check GPU memory to determine loading strategy
-                            free_memory = (
-                                torch.cuda.get_device_properties(0).total_memory
-                                - torch.cuda.memory_allocated()
-                            )
-
-                            # If GPU has enough memory, load directly to GPU, otherwise use disk offloading
-                            if free_memory > 8 * 1e9:  # 8GB threshold
-                                module = AutoModelForCausalLM.from_pretrained(
-                                    module_name,
-                                    torch_dtype=(
-                                        torch.float16 if self.use_amp else torch.float32
-                                    ),
-                                )
-                            else:
-                                # Use CPU offloading for large models
-                                module = AutoModelForCausalLM.from_pretrained(
-                                    module_name,
-                                    offload_folder="tmp/offload",
-                                    torch_dtype=(
-                                        torch.float16 if self.use_amp else torch.float32
-                                    ),
-                                )
-                        else:
-                            module = AutoModelForCausalLM.from_pretrained(module_name)
-                    else:
-                        with open(file_name, "rb") as f:
-                            metadata_size = int.from_bytes(f.read(4), "big")
-                            metadata_bytes = f.read(metadata_size)
-                            metadata = json.loads(metadata_bytes.decode("utf-8"))
-
-                            state_dict_bytes = f.read()
-                            state_dict_buffer = io.BytesIO(state_dict_bytes)
-
-                            # Load with appropriate device placement
-                            if self.device.type == "cuda":
-                                received_state_dict = torch.load(
-                                    state_dict_buffer,
-                                    weights_only=True,
-                                    map_location=self.device,
-                                )
-                            else:
-                                received_state_dict = torch.load(
-                                    state_dict_buffer, weights_only=True
-                                )
-
-                        # Load the expected model with optimized settings
-                        if self.device.type == "cuda":
-                            module = AutoModel.from_pretrained(
+                        free_memory = (
+                            torch.cuda.get_device_properties(0).total_memory
+                            - torch.cuda.memory_allocated()
+                        )
+                        # If GPU has enough memory, load directly to GPU, otherwise use disk offloading
+                        if free_memory > 8 * 1e9:  # 8GB threshold
+                            module = AutoModelForCausalLM.from_pretrained(
                                 module_name,
-                                device_map="auto",
                                 torch_dtype=(
                                     torch.float16 if self.use_amp else torch.float32
                                 ),
                             )
                         else:
-                            module = AutoModel.from_pretrained(module_name)
-
-                        model_state_dict = module.state_dict()
-
-                        # Map received keys to expected keys
-                        new_state_dict = {}
-                        for expected_key, received_key in zip(
-                            model_state_dict.keys(), received_state_dict.keys()
-                        ):
-                            new_state_dict[expected_key] = received_state_dict[
-                                received_key
-                            ]
-
-                        # Load remapped state dict with error handling
-                        module.load_state_dict(new_state_dict, strict=False)
-
-                except Exception as e:
-                    # TODO route error to validator for reporting
-                    raise e
-
-            else:
-                # Load TorchScript model with device placement
-                if self.device.type == "cuda":
-                    module = torch.jit.load(file_name, map_location=self.device)
+                            # Use CPU offloading for large models
+                            module = AutoModelForCausalLM.from_pretrained(
+                                module_name,
+                                offload_folder="tmp/offload",
+                                torch_dtype=(
+                                    torch.float16 if self.use_amp else torch.float32
+                                ),
+                            )
+                    else:
+                        module = AutoModelForCausalLM.from_pretrained(module_name)
                 else:
-                    module = torch.jit.load(file_name)
+                    with open(file_name, "rb") as f:
+                        metadata_size = int.from_bytes(f.read(4), "big")
+                        metadata_bytes = f.read(metadata_size)
+                        metadata = json.loads(metadata_bytes.decode("utf-8"))
 
-            # Cleanup file
-            os.remove(file_name)
-            print("Cleaning Model...")
+                        state_dict_bytes = f.read()
+                        state_dict_buffer = io.BytesIO(state_dict_bytes)
 
-            # Apply model optimizations
+                        # Load with appropriate device placement
+                        if self.device.type == "cuda":
+                            received_state_dict = torch.load(
+                                state_dict_buffer,
+                                weights_only=True,
+                                map_location=self.device,
+                            )
+                        else:
+                            received_state_dict = torch.load(
+                                state_dict_buffer, weights_only=True
+                            )
+
+                    # Load the expected model with optimized settings
+                    if self.device.type == "cuda":
+                        module = AutoModel.from_pretrained(
+                            module_name,
+                            device_map="auto",
+                            torch_dtype=(
+                                torch.float16 if self.use_amp else torch.float32
+                            ),
+                        )
+                    else:
+                        module = AutoModel.from_pretrained(module_name)
+
+                    model_state_dict = module.state_dict()
+
+                    # Map received keys to expected keys
+                    new_state_dict = {}
+                    for expected_key, received_key in zip(
+                        model_state_dict.keys(), received_state_dict.keys()
+                    ):
+                        new_state_dict[expected_key] = received_state_dict[received_key]
+
+                    # Load remapped state dict with error handling
+                    module.load_state_dict(
+                        new_state_dict, strict=False
+                    )  # strict=False allows minor mismatches
+
+            except Exception as e:
+                # TODO route error to validator for reporting
+                raise e
+        else:
+            # Load TorchScript model with device placement
             if self.device.type == "cuda":
-                # Try converting to faster kernel implementations when possible
-                if hasattr(module, 'to_bettertransformer'):
+                module = torch.jit.load(file_name, map_location=self.device)
+            else:
+                module = torch.jit.load(file_name)
+
+        # Cleanup file
+        os.remove(file_name)
+        print("Cleaning Model...")
+
+        # Apply model optimizations
+        if self.device.type == "cuda":
+            # Try converting to faster kernel implementations when possible
+            if hasattr(module, 'to_bettertransformer'):
+                try:
+                    module = module.to_bettertransformer()
+                    print("Using BetterTransformer optimization")
+                except:
+                    pass
+
+        # Initialize storage structures
+        module.intermediates = {}
+        module.host = node_id
+        module.n_batch = 0
+
+        self.modules[module_id] = module
+        if training:
+            print("Creating Optimizer")
+            optimizer_cls = get_optimizer_from_name(optimizer_name)
+            # Placeholder - actual initialization happens in state_update
+            self.optimizers[module_id] = optimizer_cls
+
+        self.send_request("module_loaded", module_id)
+
+    def process_state_update(self, module_id, state_update):
+        """Process optimizer state updates"""
+        module = self.modules[module_id]
+
+        if state_update[0] == "init":
+            optimizer_kwargs = state_update[1]
+            optimizer_name = self.optimizers[module_id].__name__
+
+            # Configure optimizer with mixed precision support
+            if self.use_amp and 'fused' not in optimizer_name.lower():
+                # Use fused implementation when available for better performance
+                if optimizer_name.lower() == 'adam':
                     try:
-                        module = module.to_bettertransformer()
-                        print("Using BetterTransformer optimization")
-                    except Exception as e:
-                        logging.warning(f"Failed to apply BetterTransformer: {str(e)}")
+                        from torch.optim.adam import Adam
 
-            # Initialize state
-            module.forward_queue = queue.Queue()
-            module.backward_queue = queue.Queue()
-            module.intermediates = {}
-            module.host = node_id
-            module.n_batch = 0
-
-            # Store module and create optimizer reference
-            with self.global_lock:
-                self.modules[module_id] = module
-
-                if training:
-                    print("Creating Optimizer")
-                    optimizer_cls = get_optimizer_from_name(optimizer_name)
-                    self.optimizers[module_id] = optimizer_cls
-
-            self.send_request("module_loaded", module_id)
-
-        except Exception as e:
-            logging.error(f"Error loading module: {str(e)}")
-            traceback.print_exc()
-
-    def remove_module(self, module_id):
-        """Safely remove a module from the worker"""
-        with self.global_lock:
-            if module_id in self.modules:
-                # Remove optimizer if it exists
-                if module_id in self.optimizers:
-                    del self.optimizers[module_id]
-
-                # Remove the module
-                del self.modules[module_id]
-
-                self.send_request(
-                    "debug_print",
-                    (f"Module {module_id} removed.",),
-                    timeout=0.5,
+                        self.optimizers[module_id] = Adam(
+                            module.parameters(), **optimizer_kwargs, fused=True
+                        )
+                    except:
+                        self.optimizers[module_id] = self.optimizers[module_id](
+                            module.parameters(), **optimizer_kwargs
+                        )
+                else:
+                    self.optimizers[module_id] = self.optimizers[module_id](
+                        module.parameters(), **optimizer_kwargs
+                    )
+            else:
+                self.optimizers[module_id] = self.optimizers[module_id](
+                    module.parameters(), **optimizer_kwargs
                 )
 
-    def check_for_termination(self):
-        """Check if worker should terminate"""
-        try:
-            shutdown_signal = self.send_request("check_shutdown", None, timeout=1)
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Initialized optimizer: {optimizer_name} on {self.device.type}",
+                    "bright_blue",
+                    logging.INFO,
+                ),
+            )
+            self.send_request("optimizer_response", (module_id, "loaded"))
+
+        elif state_update[0] == "step":
+            closure = state_update[1]
+            # Step optimizer with mixed precision support if using CUDA
+            if self.use_amp:
+                # Update with scaler for mixed precision
+                self.scaler.step(self.optimizers[module_id], closure)
+                self.scaler.update()
+            else:
+                self.optimizers[module_id].step(closure)
+
+            self.send_request(
+                "debug_print",
+                (
+                    "DistributedWorker -> Optimizer stepped.",
+                    "bright_blue",
+                    logging.INFO,
+                ),
+            )
+            self.send_request("optimizer_response", (module_id, "stepped"))
+
+        elif state_update[0] == "zero_grad":
+            # Zero gradients with optimized memory usage
+            if self.device.type == "cuda":
+                # More efficient for CUDA
+                for param in module.parameters():
+                    if param.grad is not None:
+                        param.grad = None
+            else:
+                self.optimizers[module_id].zero_grad()
+
+            self.send_request(
+                "debug_print",
+                ("DistributedWorker -> Optimizer zeroed.", "bright_blue", logging.INFO),
+            )
+            self.send_request("optimizer_response", (module_id, "zeroed"))
+
+    def run(self):
+        """Main execution method - simplified sequential approach"""
+        while not self.terminate:
+            # Check for new modules to load
+            args = self.send_request("check_module", None)
+            if isinstance(args, tuple):
+                (
+                    file_name,
+                    module_id,
+                    node_id,
+                    module_name,
+                    optimizer_name,
+                    training,
+                ) = args
+                self.load_module(
+                    file_name, module_id, node_id, module_name, optimizer_name, training
+                )
+            # Check for job completion/deletion requests
+            elif isinstance(args, str):
+                if args in self.modules:
+                    if self.modules[args].training:
+                        del self.optimizers[args]
+                    del self.modules[args]
+                    self.send_request("debug_print", (f"Module {args} removed.",))
+
+            # Check for termination request
+            shutdown_signal = self.send_request("check_shutdown", None)
             if shutdown_signal:
                 self.send_request(
                     "debug_print",
                     "Termination signal received. Shutting down DistributedWorker process...",
                 )
                 self.terminate = True
+                break
 
-        except Exception as e:
-            logging.error(f"Error checking for termination: {str(e)}")
+            # Process each module sequentially
+            if self.modules:
+                for module_id in list(self.modules.keys()):
+                    module = self.modules[module_id]
 
-    def send_request(self, request_type, args, timeout=None):
-        """Send request to node with timeout"""
-        if not hasattr(self, "hosted_models"):
-            logging.debug(f"Req_type: {request_type}")
+                    # Check if module is in training mode
+                    is_training = self.send_request("check_train", module_id)
+                    if isinstance(is_training, bool):
+                        module.training = is_training
 
-        request = {"type": request_type, "args": args}
-        response = None
+                    # Check for parameters requests
+                    params_req = self.send_request(
+                        "check_parameters_request", module_id
+                    )
+                    if params_req:
+                        self.send_request(
+                            "debug_print", ("DistributedWorker -> Sending parameters.",)
+                        )
+                        # Save state dict to file
+                        with open(f"parameters_{module_id}", "wb") as file:
+                            # Optimize CPU transfer if needed
+                            if self.device.type == "cuda":
+                                # Temporarily move to CPU for saving
+                                cpu_state_dict = {
+                                    k: v.detach().cpu()
+                                    for k, v in module.state_dict().items()
+                                }
+                                torch.save(cpu_state_dict, file)
+                            else:
+                                torch.save(module.state_dict(), file)
 
-        try:
-            # Try to acquire lock with timeout
-            if not self.mpc_lock.acquire(timeout=timeout):
-                logging.warning(f"Failed to acquire mpc_lock for {request_type}")
-                return None
+                        self.send_request("send_parameters", (module.host, module_id))
 
-            try:
-                self.node_requests.put(request)
-                # Use timeout for waiting for response to avoid deadlocks
-                response = self.node_responses.get(timeout=timeout)
-            finally:
-                self.mpc_lock.release()
+                    # Handle state updates
+                    state_update = self.send_request("check_state_update", module_id)
+                    if state_update:
+                        self.process_state_update(module_id, state_update)
 
-        except TimeoutError as e:
-            logging.error(f"Timeout in send_request for {request_type}: {str(e)}")
+                    # Handle forward queue
+                    forward_task = self.send_request("check_forward", module_id)
+                    if forward_task:
+                        key, (size, name) = forward_task
+                        if isinstance(key, str):
+                            self._handle_generate(module_id, size, name)
+                        else:
+                            self._handle_forward(module_id, key, size, name)
 
-        except Exception as e:
-            logging.error(f"Error in send_request for {request_type}: {str(e)}")
-            response = {"return": str(e)}
+                    # Handle backward queue
+                    backward_task = self.send_request("check_backward", module_id)
+                    if backward_task:
+                        tag, loss_relay = backward_task
+                        self.handle_backward(module_id, tag, loss_relay)
 
-        if response:
-            return response["return"]
-        return None
+            # Small sleep to prevent CPU hogging
+            time.sleep(0.1)
 
-    def store_snapshot(self, module_id, _input, _output, epoch, micro):
-        """Store model snapshot with efficient CPU transfer"""
-        try:
-            # Ensure the snapshots directory exists
-            os.makedirs("tmp/snapshots", exist_ok=True)
-
-            # Move to CPU before serialization to avoid GPU memory pressure
-            with torch.no_grad():
-                # Get module safely
-                with self.global_lock:
-                    if module_id not in self.modules:
-                        logging.warning(f"Module {module_id} not found for snapshot")
-                        return
-
-                # Get parameters and convert tensors to a serializable format
-                params = {
-                    k: v.detach().cpu().numpy().tolist()
-                    for k, v in self.modules[module_id].state_dict().items()
-                }
-
-                # Convert input/output tensors to CPU for serialization
-                cpu_input = _input.detach().cpu().numpy().tolist()
-                cpu_output = _output.detach().cpu().numpy().tolist()
-
-            # Prepare snapshot data
-            snapshot = {
-                "id": module_id,
-                "params": params,
-                "input": cpu_input,
-                "output": cpu_output,
-                "epoch": epoch,
-                "micro": micro,
-            }
-
-            # Define the filename
-            file_path = os.path.join(
-                "tmp", "snapshots", f"{module_id}_{epoch}_{micro}.json"
-            )
-
-            # Write the snapshot to a JSON file
-            with open(file_path, "w") as f:
-                json.dump(snapshot, f)
-            logging.info(f"Snapshot saved successfully: {file_path}")
-
-        except Exception as e:
-            logging.error(f"Error saving snapshot: {str(e)}")
-            traceback.print_exc()
-
-    def _cleanup(self):
-        """Clean up resources before shutdown"""
-        # Clear all modules and optimizers
-        with self.global_lock:
-            self.modules.clear()
-            self.optimizers.clear()
+        # Final cleanup
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()

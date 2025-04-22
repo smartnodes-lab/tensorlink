@@ -2,8 +2,7 @@ from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.utils import estimate_hf_model_memory, get_hf_model
 from tensorlink.ml.worker import DistributedWorker
 
-import traceback
-import threading
+import torch
 import logging
 import json
 import time
@@ -103,27 +102,98 @@ class DistributedValidator(DistributedWorker):
             )
 
     def run(self):
-        """Single main loop that handles all operations sequentially"""
-        try:
-            logging.info("Starting DistributedWorker main loop")
-            while not self.terminate:
-                # First check for node updates (higher priority)
-                self.check_node_updates()
+        """Main execution method - simplified sequential approach"""
+        while not self.terminate:
+            # Check for new modules to load
+            args = self.send_request("check_module", None)
+            if isinstance(args, tuple):
+                (
+                    file_name,
+                    module_id,
+                    node_id,
+                    module_name,
+                    optimizer_name,
+                    training,
+                ) = args
+                self.load_module(
+                    file_name, module_id, node_id, module_name, optimizer_name, training
+                )
+            # Check for job completion/deletion requests
+            elif isinstance(args, str):
+                if args in self.modules:
+                    if self.modules[args].training:
+                        del self.optimizers[args]
+                    del self.modules[args]
+                    self.send_request("debug_print", (f"Module {args} removed.",))
 
-                # Process any pending work in modules
-                self.process_modules()
+            # Check for termination request
+            shutdown_signal = self.send_request("check_shutdown", None)
+            if shutdown_signal:
+                self.send_request(
+                    "debug_print",
+                    "Termination signal received. Shutting down DistributedWorker process...",
+                )
+                self.terminate = True
+                break
 
-                self.check_node()
+            # Process each module sequentially
+            if self.modules:
+                for module_id in list(self.modules.keys()):
+                    module = self.modules[module_id]
 
-                # Adaptive sleep based on activity level
-                if not self.modules:
-                    time.sleep(1)  # Longer sleep when idle
-                else:
-                    time.sleep(0.005)  # Short sleep when active
+                    # Check if module is in training mode
+                    is_training = self.send_request("check_train", module_id)
+                    if isinstance(is_training, bool):
+                        module.training = is_training
 
-        except Exception as e:
-            logging.error(f"Error in main loop: {str(e)}")
-            traceback.print_exc()
-        finally:
-            self._cleanup()
-            logging.info("DistributedWorker shutdown complete")
+                    # Check for parameters requests
+                    params_req = self.send_request(
+                        "check_parameters_request", module_id
+                    )
+                    if params_req:
+                        self.send_request(
+                            "debug_print", ("DistributedWorker -> Sending parameters.",)
+                        )
+                        # Save state dict to file
+                        with open(f"parameters_{module_id}", "wb") as file:
+                            # Optimize CPU transfer if needed
+                            if self.device.type == "cuda":
+                                # Temporarily move to CPU for saving
+                                cpu_state_dict = {
+                                    k: v.detach().cpu()
+                                    for k, v in module.state_dict().items()
+                                }
+                                torch.save(cpu_state_dict, file)
+                            else:
+                                torch.save(module.state_dict(), file)
+
+                        self.send_request("send_parameters", (module.host, module_id))
+
+                    # Handle state updates
+                    state_update = self.send_request("check_state_update", module_id)
+                    if state_update:
+                        self.process_state_update(module_id, state_update)
+
+                    # Handle forward queue
+                    forward_task = self.send_request("check_forward", module_id)
+                    if forward_task:
+                        key, (size, name) = forward_task
+                        if isinstance(key, str):
+                            self.handle_generate(module_id, size, name)
+                        else:
+                            self.handle_forward(module_id, key, size, name)
+
+                    # Handle backward queue
+                    backward_task = self.send_request("check_backward", module_id)
+                    if backward_task:
+                        tag, loss_relay = backward_task
+                        self.handle_backward(module_id, tag, loss_relay)
+
+            self.check_node()
+
+            # Small sleep to prevent CPU hogging
+            time.sleep(0.1)
+
+        # Final cleanup
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()

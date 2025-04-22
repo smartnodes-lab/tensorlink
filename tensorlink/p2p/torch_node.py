@@ -348,6 +348,7 @@ class TorchNode(SmartNode):
                 "check_module": self._handle_check_module,
                 "check_module_request": self._handle_check_module_request,
                 "check_forward": self._handle_check_forward,
+                "check_generate": self._handle_check_generate,
                 "check_backward": self._handle_check_backward,
                 "send_optimizer_request": self._handle_send_optimizer_request,
                 "check_state_update": self._handle_check_state_update,
@@ -501,6 +502,16 @@ class TorchNode(SmartNode):
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
+    def _handle_check_generate(self, request):
+        return_val = None
+        module_id = request["args"]
+        if module_id in self.modules:
+            if "generate" in self.modules[module_id]["forward_queue"]:
+                return_val = self.modules[module_id]["forward_queue"]["generate"]
+                del self.modules[module_id]["forward_queue"]["generate"]
+
+        self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
     def _handle_check_forward(self, request):
         # Check if forward pass has been received and is loaded in shared mpc
         return_val = None
@@ -513,9 +524,6 @@ class TorchNode(SmartNode):
                 if module_id in module["forward_queue"].keys():
                     return_val = (module_id, module["forward_queue"][module_id])
                     del module["forward_queue"][module_id]
-                elif "generate" in module["forward_queue"].keys():
-                    return_val = self.modules[module_id]["forward_queue"]["generate"]
-                    del self.modules[module_id]["forward_queue"]["generate"]
 
                 else:
                     min_iter, min_micro = -1, -1
