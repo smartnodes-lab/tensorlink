@@ -226,14 +226,6 @@ class DistributedWorker:
         # Convert args to tensor and move to device
         input_ids = bytes_to_tensor(args)
 
-        # Use pinned memory for faster host->device transfer
-        if self.device.type == "cuda":
-            # Pin memory for faster transfers
-            input_ids = input_ids.pin_memory()
-            input_ids = input_ids.to(self.device, non_blocking=True)
-        else:
-            input_ids = attach_tensor(input_ids, self.device)
-
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
         # Filter out other known non-generation parameters
@@ -251,10 +243,6 @@ class DistributedWorker:
         if self.device.type == "cuda" and 'use_cache' not in all_kwargs:
             all_kwargs['use_cache'] = True  # Enable KV caching for faster generation
 
-        # Synchronize for accurate profiling
-        if self.device.type == "cuda":
-            torch.cuda.synchronize()
-
         try:
             self.send_request(
                 "debug_print",
@@ -269,14 +257,18 @@ class DistributedWorker:
                 if isinstance(input_ids, list):
                     input_ids = input_ids[-1]
 
-                # Use CUDA stream for generation
+                # Use pinned memory for faster host->device transfer and synchronize for accurate profiling
                 if self.device.type == "cuda":
+                    # Pin memory for faster transfers
+                    input_ids = input_ids.pin_memory()
+                    input_ids = input_ids.to(self.device, non_blocking=True)
+                    torch.cuda.synchronize()
                     output = module.generate(**input_ids, **all_kwargs)
-                else:
-                    output = module.generate(**input_ids, **all_kwargs)
+                    torch.cuda.synchronize()
 
-            if self.device.type == "cuda":
-                torch.cuda.synchronize()
+                else:
+                    input_ids = attach_tensor(input_ids, self.device)
+                    output = module.generate(**input_ids, **all_kwargs)
 
             # Detach and store generated output
             detached_out = detach_tensor(output)
