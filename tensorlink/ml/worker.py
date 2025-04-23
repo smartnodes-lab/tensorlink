@@ -257,18 +257,26 @@ class DistributedWorker:
                 if isinstance(input_ids, list):
                     input_ids = input_ids[-1]
 
+                # Merge input_ids with all_kwargs conditionally
+                if isinstance(input_ids, dict):
+                    # If input_ids is already a dict (e.g. from tokenizer(..., return_tensors="pt"))
+                    all_kwargs.update(input_ids)
+                else:
+                    # Otherwise, treat input_ids as the tensor itself
+                    all_kwargs['input_ids'] = input_ids
+
                 # Use pinned memory for faster host->device transfer and synchronize for accurate profiling
                 if self.device.type == "cuda":
                     # Pin memory for faster transfers
                     input_ids = input_ids.pin_memory()
                     input_ids = input_ids.to(self.device, non_blocking=True)
                     torch.cuda.synchronize()
-                    output = module.generate(**input_ids, **all_kwargs)
+                    output = module.generate(**all_kwargs)
                     torch.cuda.synchronize()
 
                 else:
                     input_ids = attach_tensor(input_ids, self.device)
-                    output = module.generate(**input_ids, **all_kwargs)
+                    output = module.generate(**all_kwargs)
 
             # Detach and store generated output
             detached_out = detach_tensor(output)
