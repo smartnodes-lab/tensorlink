@@ -79,6 +79,12 @@ class DistributedWorker:
         self.scaler = amp.GradScaler()
         self.use_amp = self.device.type == "cuda"  # Only use AMP with CUDA
 
+        # Initialize CUDA streams for overlapping operations - key performance feature
+        if self.device.type == "cuda":
+            self.default_stream = torch.cuda.Stream()
+            self.compute_stream = torch.cuda.Stream()
+            self.memory_stream = torch.cuda.Stream()
+
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
         if self.device.type == "cuda":
@@ -226,8 +232,17 @@ class DistributedWorker:
         # Convert args to tensor and move to device
         input_ids = bytes_to_tensor(args)
 
+        if isinstance(input_ids, list):
+            input_ids = input_ids[-1]
+
+        if self.device.type == "cuda":
+            # Pin memory for faster transfers
+            input_ids = input_ids.pin_memory()
+
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
+        all_kwargs = attach_tensor(all_kwargs, self.device)
+
         # Filter out other known non-generation parameters
         known_non_generation_params = ['module', 'class', 'data']
         for param in known_non_generation_params:
@@ -254,33 +269,19 @@ class DistributedWorker:
             )
             # Generate text with the model
             with torch.no_grad():
-                if isinstance(input_ids, list):
-                    input_ids = input_ids[-1]
-
-                # Merge input_ids with all_kwargs conditionally
-                if isinstance(input_ids, dict):
-                    # If input_ids is already a dict (e.g. from tokenizer(..., return_tensors="pt"))
-                    all_kwargs.update(input_ids)
-                else:
-                    # Otherwise, treat input_ids as the tensor itself
-                    all_kwargs['input_ids'] = input_ids
-
                 # Use pinned memory for faster host->device transfer and synchronize for accurate profiling
                 if self.device.type == "cuda":
-                    # Pin memory for faster transfers
-                    input_ids = input_ids.pin_memory()
-                    input_ids = input_ids.to(self.device, non_blocking=True)
-                    torch.cuda.synchronize()
-                    output = module.generate(**all_kwargs)
-                    torch.cuda.synchronize()
+                    with torch.cuda.stream(self.compute_stream):
+                        output = module.generate(**all_kwargs)
+                    self.compute_stream.synchronize()
 
                 else:
-                    input_ids = attach_tensor(input_ids, self.device)
                     output = module.generate(**all_kwargs)
 
             # Detach and store generated output
             detached_out = detach_tensor(output)
             output_bytes = tensor_to_bytes(detached_out)
+
         except Exception as e:
             # Handle any exceptions during generation
             output_bytes = json.dumps({"error": str(e)}).encode()
