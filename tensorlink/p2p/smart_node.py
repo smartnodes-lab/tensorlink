@@ -12,7 +12,6 @@ from dotenv import get_key, set_key
 from typing import Tuple, Union
 from miniupnpc import UPnP
 from web3 import Web3
-import atexit
 import hashlib
 import ipaddress
 import json
@@ -303,9 +302,6 @@ class SmartNode(threading.Thread):
                     level=logging.CRITICAL,
                 )
                 self.stop()
-
-        # Shutdown hook to ensure UPnP port mappings are removed on shutdown
-        atexit.register(self._stop_upnp)
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -1276,7 +1272,7 @@ class SmartNode(threading.Thread):
                 mapping = self.upnp.getspecificportmapping(index, "TCP")
                 if mapping:
                     _, port, description, _, _ = mapping
-                    if description != f"SmartNode-{self.port}-{self.role}":
+                    if description != self._get_port_identifier():
                         self.remove_port_mapping(port)
                 index += 1
 
