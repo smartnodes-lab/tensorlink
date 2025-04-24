@@ -231,7 +231,6 @@ class DistributedWorker:
 
         # Convert args to tensor and move to device
         input_ids = bytes_to_tensor(args)
-        input_ids = attach_tensor(input_ids, self.device)
 
         if isinstance(input_ids, list):
             input_ids = input_ids[-1]
@@ -242,11 +241,7 @@ class DistributedWorker:
 
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
-
-        if 'input_ids' not in all_kwargs:
-            all_kwargs['input_ids'] = input_ids
-
-        # if isinstance(input_ids, dict):
+        all_kwargs['input_ids'] = input_ids
         all_kwargs = attach_tensor(all_kwargs, self.device)
 
         # Filter out other known non-generation parameters
@@ -256,9 +251,7 @@ class DistributedWorker:
 
         # Optimize generation parameters if not specified
         if 'num_beams' not in all_kwargs and self.device.type == "cuda":
-            all_kwargs['num_beams'] = (
-                4  # Use beam search for better results when on GPU
-            )
+            all_kwargs['num_beams'] = 2
 
         # Use efficient attention if available and not specified
         if self.device.type == "cuda" and 'use_cache' not in all_kwargs:
