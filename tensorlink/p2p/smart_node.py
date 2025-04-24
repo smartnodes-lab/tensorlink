@@ -12,6 +12,7 @@ from dotenv import get_key, set_key
 from typing import Tuple, Union
 from miniupnpc import UPnP
 from web3 import Web3
+import atexit
 import hashlib
 import ipaddress
 import json
@@ -302,6 +303,9 @@ class SmartNode(threading.Thread):
                     level=logging.CRITICAL,
                 )
                 self.stop()
+
+        # Shutdown hook to ensure UPnP port mappings are removed on shutdown
+        atexit.register(self._stop_upnp)
 
     def handle_data(self, data: bytes, node: Connection) -> bool:
         """
@@ -717,6 +721,8 @@ class SmartNode(threading.Thread):
         confirm their identity. This is then reciprocated on the other node.
         """
         try:
+            connection.settimeout(5)
+
             # Receive and parse initial node information
             node_info = _parse_initial_connection(connection)
 
@@ -1027,7 +1033,10 @@ class SmartNode(threading.Thread):
             return True
 
         if _can_connect:
-            for attempt in range(2):
+            backoff = 1
+            max_attempts = 3
+
+            for attempt in range(max_attempts):
                 try:
                     # Open up a free port
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1063,15 +1072,13 @@ class SmartNode(threading.Thread):
                     return success
 
                 except Exception as e:
+                    wait_time = backoff * (2**attempt)  # Exponential backoff
                     self.debug_print(
-                        f"Attempt {attempt + 1}: could not connect to {host}:{port} -> {e}",
-                        colour="red",
+                        f"Attempt {attempt + 1}/{max_attempts} failed: {e}. Retrying in {wait_time}s",
                         level=logging.WARNING,
                     )
-                    time.sleep(1)
+                    time.sleep(wait_time)
                     self.remove_port_mapping(our_port)
-                    if attempt == 2:  # Last attempt
-                        return False
 
         else:
             return False
@@ -1182,16 +1189,23 @@ class SmartNode(threading.Thread):
 
         self.add_port_mapping(self.port, self.port)
 
+    def _get_port_identifier(self):
+        """Generate a unique identifier for this node's UPnP mappings"""
+        # Use first 8 chars of hash to generate a unique identifier
+        short_hash = self.rsa_key_hash[:8]
+        return f"SmartNode-{short_hash}-{self.role}"
+
     def add_port_mapping(self, external_port, internal_port):
         """Open up a port via UPnP for a connection"""
         if self.upnp:
             try:
+                port_identifier = self._get_port_identifier()
                 result = self.upnp.addportmapping(
                     external_port,
                     "TCP",
                     self.upnp.lanaddr,
                     internal_port,
-                    f"SmartNode-{self.port}-{self.role}",
+                    port_identifier,
                     "",
                 )
 
