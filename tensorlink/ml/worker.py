@@ -231,6 +231,7 @@ class DistributedWorker:
 
         # Convert args to tensor and move to device
         input_ids = bytes_to_tensor(args)
+        input_ids = attach_tensor(input_ids, self.device)
 
         if isinstance(input_ids, list):
             input_ids = input_ids[-1]
@@ -241,6 +242,11 @@ class DistributedWorker:
 
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
+
+        if 'input_ids' not in all_kwargs:
+            all_kwargs['input_ids'] = input_ids
+
+        # if isinstance(input_ids, dict):
         all_kwargs = attach_tensor(all_kwargs, self.device)
 
         # Filter out other known non-generation parameters
@@ -318,23 +324,14 @@ class DistributedWorker:
                             torch.cuda.get_device_properties(0).total_memory
                             - torch.cuda.memory_allocated()
                         )
-                        # If GPU has enough memory, load directly to GPU, otherwise use disk offloading
-                        if free_memory > 8 * 1e9:  # 8GB threshold
-                            module = AutoModelForCausalLM.from_pretrained(
-                                module_name,
-                                torch_dtype=(
-                                    torch.float16 if self.use_amp else torch.float32
-                                ),
-                            )
-                        else:
-                            # Use CPU offloading for large models
-                            module = AutoModelForCausalLM.from_pretrained(
-                                module_name,
-                                offload_folder="tmp/offload",
-                                torch_dtype=(
-                                    torch.float16 if self.use_amp else torch.float32
-                                ),
-                            )
+                        # TODO ensure free memory
+                        module = AutoModelForCausalLM.from_pretrained(
+                            module_name,
+                            # device_map="auto",
+                            torch_dtype=(
+                                torch.float16 if self.use_amp else torch.float32
+                            ),
+                        )
                     else:
                         module = AutoModelForCausalLM.from_pretrained(module_name)
                 else:
@@ -409,6 +406,7 @@ class DistributedWorker:
                     pass
 
         # Initialize storage structures
+        module = module.to(self.device)
         module.intermediates = {}
         module.host = node_id
         module.n_batch = 0
