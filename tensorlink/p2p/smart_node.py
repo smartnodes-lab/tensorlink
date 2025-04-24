@@ -721,7 +721,7 @@ class SmartNode(threading.Thread):
         confirm their identity. This is then reciprocated on the other node.
         """
         try:
-            connection.settimeout(5)
+            connection.settimeout(10)
 
             # Receive and parse initial node information
             node_info = _parse_initial_connection(connection)
@@ -925,7 +925,7 @@ class SmartNode(threading.Thread):
                 new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 new_sock.connect((node_address[0], new_port))
-                new_sock.settimeout(3)
+                new_sock.settimeout(6)
                 connection = new_sock
             except Exception as e:
                 self.debug_print(f"Port swap failed ({self.host}:{our_port}): {e}")
@@ -939,8 +939,8 @@ class SmartNode(threading.Thread):
             # Create a new socket and bind to the selected port
             new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             new_sock.bind((self.host, our_port))
-            new_sock.settimeout(3)
-            new_sock.listen(3)
+            new_sock.settimeout(6)
+            new_sock.listen(5)
 
             # Accept the incoming connection on the new port
             connection, new_node_address = new_sock.accept()
