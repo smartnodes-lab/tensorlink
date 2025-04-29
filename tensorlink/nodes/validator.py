@@ -920,7 +920,7 @@ class Validator(TorchNode):
         while not self.terminate_flag.is_set():
             if counter % 300 == 0:
                 self.save_dht_state()
-            if counter % 60 == 0:
+            if counter % 120 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
             if counter % 180 == 0:
