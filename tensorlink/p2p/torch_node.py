@@ -201,7 +201,7 @@ class TorchNode(SmartNode):
 
     def _handle_forward(self, data: bytes, node: Connection):
         # Basic check, must be upgraded to check if we are expecting the request
-        if self.role == "V" or node.node_id not in self.nodes:
+        if self.role == "U" or node.node_id not in self.nodes:
             node.ghosts += 1
             return False
         else:
@@ -224,7 +224,7 @@ class TorchNode(SmartNode):
             else:
                 module_id = None
                 for module in self.modules:
-                    if node.node_id in self.modules[module]["workers"]:
+                    if node.node_id in [w[0] for w in self.modules[module]["workers"]]:
                         module_id = module
                         break
 
@@ -469,14 +469,25 @@ class TorchNode(SmartNode):
         for module_id, module in self.modules.items():
             if "mem_info" in module:
                 name = module["mem_info"]
-                return_val = (
-                    name,
-                    module_id,
-                    module["host"],
-                    module["name"],
-                    module["optimizer"],
-                    module["training"],
-                )
+
+                if self.role == "V":
+                    return_val = (
+                        name,
+                        module_id,
+                        module["distribution"],
+                        module["name"],
+                        module["optimizer"],
+                        module["training"],
+                    )
+                else:
+                    return_val = (
+                        name,
+                        module_id,
+                        module["host"],
+                        module["name"],
+                        module["optimizer"],
+                        module["training"],
+                    )
                 del module["mem_info"]
 
             elif "termination" in module:
@@ -592,7 +603,7 @@ class TorchNode(SmartNode):
     def _handle_check_state_update(self, request):
         module_id = request["args"]
         return_val = None
-        if self.state_updates[module_id]:
+        if self.state_updates.get(module_id):
             return_val = self.state_updates[module_id].pop()
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 

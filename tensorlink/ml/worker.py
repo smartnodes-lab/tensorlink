@@ -60,10 +60,11 @@ MODEL_TYPE_MAPPING = {
 
 
 class DistributedWorker:
-    def __init__(self, node_requests, node_responses, mpc_lock, trusted=False):
-        self.node_requests = node_requests
-        self.node_responses = node_responses
-        self.mpc_lock = mpc_lock
+    def __init__(self, node, trusted=False):
+        self.node = node
+        self.node_requests = node.node_requests
+        self.node_responses = node.node_responses
+        self.mpc_lock = node.mpc_lock
         self.storage_path = "./tmp/snapshots"
 
         self.modules = {}
@@ -258,15 +259,6 @@ class DistributedWorker:
             all_kwargs['use_cache'] = True  # Enable KV caching for faster generation
 
         try:
-            self.send_request(
-                "debug_print",
-                (
-                    f"DistributedWorker -> Generating with input arguments: {all_kwargs}",
-                    "bright_blue",
-                    logging.DEBUG,
-                ),
-            )
-            # Generate text with the model
             with torch.no_grad():
                 # Use pinned memory for faster host->device transfer and synchronize for accurate profiling
                 if self.device.type == "cuda":
@@ -295,98 +287,58 @@ class DistributedWorker:
             torch.cuda.empty_cache()
 
     def load_module(
-        self, file_name, module_id, node_id, module_name, optimizer_name, training
+        self,
+        file_name=None,
+        module_id=None,
+        node_id=None,
+        module_name=None,
+        optimizer_name=None,
+        training=False,
     ):
-        """Load and prepare model"""
-        # Load the module based on trusted status
-        if self.trusted:
-            with open(file_name, "rb") as f:
-                module = pickle.load(f)
-                module = module.to(self.device)
-        # Else try Hugging Face for model info
-        elif len(module_name) > 0:
-            api = HfApi()
-            try:
-                # Get model information from Hugging Face api
-                api.model_info(repo_id=module_name)
+        """
+        Load and prepare model from file or directly from HuggingFace.
 
-                if os.stat(file_name).st_size == 0:
-                    # Load model directly
-                    if self.device.type == "cuda":
-                        free_memory = (
-                            torch.cuda.get_device_properties(0).total_memory
-                            - torch.cuda.memory_allocated()
-                        )
-                        # TODO ensure free memory
-                        module = AutoModelForCausalLM.from_pretrained(
-                            module_name,
-                            # device_map="auto",
-                            torch_dtype=(
-                                torch.float16 if self.use_amp else torch.float32
-                            ),
-                        )
-                    else:
-                        module = AutoModelForCausalLM.from_pretrained(module_name)
-                else:
-                    with open(file_name, "rb") as f:
-                        metadata_size = int.from_bytes(f.read(4), "big")
-                        metadata_bytes = f.read(metadata_size)
-                        metadata = json.loads(metadata_bytes.decode("utf-8"))
+        For direct HuggingFace loading without a file, just provide module_name.
+        Default parameters allow for simplified calling when loading generic models.
+        """
+        # Special case: Loading directly from HuggingFace with just module_name
+        if file_name is None and module_name is not None:
+            # Generate unique module_id if not provided
+            if module_id is None:
+                module_id = (
+                    f"hf_model_{module_name.replace('/', '_')}_{int(time.time())}"
+                )
 
-                        state_dict_bytes = f.read()
-                        state_dict_buffer = io.BytesIO(state_dict_bytes)
+            # Load from HuggingFace
+            module = self._load_huggingface_model(module_name)
 
-                        # Load with appropriate device placement
-                        if self.device.type == "cuda":
-                            received_state_dict = torch.load(
-                                state_dict_buffer,
-                                weights_only=True,
-                                map_location=self.device,
-                            )
-                        else:
-                            received_state_dict = torch.load(
-                                state_dict_buffer, weights_only=True
-                            )
-
-                    # Load the expected model with optimized settings
-                    if self.device.type == "cuda":
-                        module = AutoModel.from_pretrained(
-                            module_name,
-                            device_map="auto",
-                            torch_dtype=(
-                                torch.float16 if self.use_amp else torch.float32
-                            ),
-                        )
-                    else:
-                        module = AutoModel.from_pretrained(module_name)
-
-                    model_state_dict = module.state_dict()
-
-                    # Map received keys to expected keys
-                    new_state_dict = {}
-                    for expected_key, received_key in zip(
-                        model_state_dict.keys(), received_state_dict.keys()
-                    ):
-                        new_state_dict[expected_key] = received_state_dict[received_key]
-
-                    # Load remapped state dict with error handling
-                    module.load_state_dict(
-                        new_state_dict, strict=False
-                    )  # strict=False allows minor mismatches
-
-            except Exception as e:
-                # TODO route error to validator for reporting
-                raise e
+        # Standard loading from file path
         else:
-            # Load TorchScript model with device placement
-            if self.device.type == "cuda":
-                module = torch.jit.load(file_name, map_location=self.device)
-            else:
-                module = torch.jit.load(file_name)
+            if file_name is None or module_id is None:
+                raise ValueError(
+                    "For standard loading, file_name and module_id must be provided"
+                )
 
-        # Cleanup file
-        os.remove(file_name)
-        print("Cleaning Model...")
+            # Try to load the module based on trusted status
+            if self.trusted:
+                with open(file_name, "rb") as f:
+                    module = pickle.load(f)
+                    module = module.to(self.device)
+
+            # Else try Hugging Face for model info
+            elif len(module_name) > 0:
+                module = self._load_huggingface_model(module_name, file_name)
+
+            #   else:
+            #     # Load TorchScript model with device placement
+            #     if self.device.type == "cuda":
+            #         module = torch.jit.load(file_name, map_location=self.device)
+            #     else:
+            #         module = torch.jit.load(file_name)
+
+            # Cleanup file
+            os.remove(file_name)
+            print("Cleaning Model...")
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -395,6 +347,7 @@ class DistributedWorker:
                 try:
                     module = module.to_bettertransformer()
                     print("Using BetterTransformer optimization")
+
                 except:
                     pass
 
@@ -412,6 +365,83 @@ class DistributedWorker:
             self.optimizers[module_id] = optimizer_cls
 
         self.send_request("module_loaded", module_id)
+
+    def _load_huggingface_model(self, module_name, file_name: str = None):
+        """Load model from HuggingFace based on file content and model name"""
+        api = HfApi()
+        try:
+            # Get model information from Hugging Face api
+            api.model_info(repo_id=module_name)
+
+            if (
+                file_name is None
+                or os.stat(file_name).st_size == 0
+                or file_name == module_name
+            ):
+                # Load model directly
+                if self.device.type == "cuda":
+                    free_memory = (
+                        torch.cuda.get_device_properties(0).total_memory
+                        - torch.cuda.memory_allocated()
+                    )
+                    # TODO ensure free memory
+                    module = AutoModelForCausalLM.from_pretrained(
+                        module_name,
+                        # device_map="auto",
+                        torch_dtype=(torch.float16 if self.use_amp else torch.float32),
+                    )
+                else:
+                    module = AutoModelForCausalLM.from_pretrained(module_name)
+            else:
+                with open(file_name, "rb") as f:
+                    metadata_size = int.from_bytes(f.read(4), "big")
+                    metadata_bytes = f.read(metadata_size)
+                    metadata = json.loads(metadata_bytes.decode("utf-8"))
+
+                    state_dict_bytes = f.read()
+                    state_dict_buffer = io.BytesIO(state_dict_bytes)
+
+                    # Load with appropriate device placement
+                    if self.device.type == "cuda":
+                        received_state_dict = torch.load(
+                            state_dict_buffer,
+                            weights_only=True,
+                            map_location=self.device,
+                        )
+                    else:
+                        received_state_dict = torch.load(
+                            state_dict_buffer, weights_only=True
+                        )
+
+                # Load the expected model with optimized settings
+                if self.device.type == "cuda":
+                    module = AutoModel.from_pretrained(
+                        module_name,
+                        device_map="auto",
+                        torch_dtype=(torch.float16 if self.use_amp else torch.float32),
+                    )
+                else:
+                    module = AutoModel.from_pretrained(module_name)
+
+                model_state_dict = module.state_dict()
+
+                # Map received keys to expected keys
+                new_state_dict = {}
+                for expected_key, received_key in zip(
+                    model_state_dict.keys(), received_state_dict.keys()
+                ):
+                    new_state_dict[expected_key] = received_state_dict[received_key]
+
+                # Load remapped state dict with error handling
+                module.load_state_dict(
+                    new_state_dict, strict=False
+                )  # strict=False allows minor mismatches
+
+            return module
+        except Exception as e:
+            # Handle exceptions appropriately
+            raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
+            # TODO route error to validator for reporting
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""
@@ -490,96 +520,103 @@ class DistributedWorker:
             )
             self.send_request("optimizer_response", (module_id, "zeroed"))
 
-    def run(self):
-        """Main execution method - simplified sequential approach"""
-        while not self.terminate:
-            # Check for new modules to load
-            args = self.send_request("check_module", None)
-            if isinstance(args, tuple):
-                (
-                    file_name,
-                    module_id,
-                    node_id,
-                    module_name,
-                    optimizer_name,
-                    training,
-                ) = args
-                self.load_module(
-                    file_name, module_id, node_id, module_name, optimizer_name, training
-                )
-            # Check for job completion/deletion requests
-            elif isinstance(args, str):
-                if args in self.modules:
-                    if self.modules[args].training:
-                        del self.optimizers[args]
-                    del self.modules[args]
-                    self.send_request("debug_print", (f"Module {args} removed.",))
+    def main_loop(self):
+        """Main execution loop. Sequentially executes the following tasks: check for new jobs, check for incoming data
+        or model update requests, and then processes any outstanding forwards or backwards passes on the loaded modules
+        """
+        # Check for new modules to load
+        args = self.send_request("check_module", None)
 
-            # Check for termination request
-            shutdown_signal = self.send_request("check_shutdown", None)
-            if shutdown_signal:
-                self.send_request(
-                    "debug_print",
-                    "Termination signal received. Shutting down DistributedWorker process...",
-                )
-                self.terminate = True
-                break
+        # If we have received model info now load the model in this process
+        if isinstance(args, tuple):
+            (
+                file_name,
+                module_id,
+                node_id,
+                module_name,
+                optimizer_name,
+                training,
+            ) = args
+            self.load_module(
+                file_name, module_id, node_id, module_name, optimizer_name, training
+            )
 
-            # Process each module sequentially
-            if self.modules:
-                for module_id in list(self.modules.keys()):
-                    module = self.modules[module_id]
+        # For workers that have received model info, now load the model in this process
+        elif isinstance(args, str):
+            if args in self.modules:
+                if self.modules[args].training:
+                    del self.optimizers[args]
+                del self.modules[args]
+                self.send_request("debug_print", (f"Module {args} removed.",))
 
-                    # Check if module is in training mode
-                    is_training = self.send_request("check_train", module_id)
-                    if isinstance(is_training, bool):
-                        module.training = is_training
+        # Check for termination request
+        shutdown_signal = self.send_request("check_shutdown", None)
+        if shutdown_signal:
+            self.send_request(
+                "debug_print",
+                "Termination signal received. Shutting down DistributedWorker process...",
+            )
+            self.terminate = True
 
-                    # Check for parameters requests
-                    params_req = self.send_request(
-                        "check_parameters_request", module_id
+        # Process each module sequentially
+        if self.modules:
+            for module_id in list(self.modules.keys()):
+                module = self.modules[module_id]
+
+                # Check if module is in training mode
+                is_training = self.send_request("check_train", module_id)
+                if isinstance(is_training, bool):
+                    module.training = is_training
+
+                # Check for parameters requests
+                params_req = self.send_request("check_parameters_request", module_id)
+                if params_req:
+                    self.send_request(
+                        "debug_print", ("DistributedWorker -> Sending parameters.",)
                     )
-                    if params_req:
-                        self.send_request(
-                            "debug_print", ("DistributedWorker -> Sending parameters.",)
-                        )
-                        # Save state dict to file
-                        with open(f"parameters_{module_id}", "wb") as file:
-                            # Optimize CPU transfer if needed
-                            if self.device.type == "cuda":
-                                # Temporarily move to CPU for saving
-                                cpu_state_dict = {
-                                    k: v.detach().cpu()
-                                    for k, v in module.state_dict().items()
-                                }
-                                torch.save(cpu_state_dict, file)
-                            else:
-                                torch.save(module.state_dict(), file)
-
-                        self.send_request("send_parameters", (module.host, module_id))
-
-                    # Handle state updates
-                    state_update = self.send_request("check_state_update", module_id)
-                    if state_update:
-                        self.process_state_update(module_id, state_update)
-
-                    # Handle forward queue
-                    forward_task = self.send_request("check_forward", module_id)
-                    if forward_task:
-                        key, (size, name) = forward_task
-                        if isinstance(key, str):
-                            self._handle_generate(module_id, size, name)
+                    # Save state dict to file
+                    with open(f"parameters_{module_id}", "wb") as file:
+                        # Optimize CPU transfer if needed
+                        if self.device.type == "cuda":
+                            # Temporarily move to CPU for saving
+                            cpu_state_dict = {
+                                k: v.detach().cpu()
+                                for k, v in module.state_dict().items()
+                            }
+                            torch.save(cpu_state_dict, file)
                         else:
-                            self._handle_forward(module_id, key, size, name)
+                            torch.save(module.state_dict(), file)
 
-                    # Handle backward queue
-                    backward_task = self.send_request("check_backward", module_id)
-                    if backward_task:
-                        tag, loss_relay = backward_task
-                        self.handle_backward(module_id, tag, loss_relay)
+                    self.send_request("send_parameters", (module.host, module_id))
 
-            # Small sleep to prevent CPU hogging
-            time.sleep(0.1)
+                # Handle state updates
+                state_update = self.send_request("check_state_update", module_id)
+                if state_update:
+                    self.process_state_update(module_id, state_update)
+
+                # Handle forward queue
+                forward_task = self.send_request("check_forward", module_id)
+                if forward_task:
+                    key, (size, name) = forward_task
+                    if isinstance(key, str):
+                        self._handle_generate(module_id, size, name)
+                    else:
+                        self._handle_forward(module_id, key, size, name)
+
+                # Handle backward queue
+                backward_task = self.send_request("check_backward", module_id)
+                if backward_task:
+                    tag, loss_relay = backward_task
+                    self.handle_backward(module_id, tag, loss_relay)
+
+        # Small sleep to prevent CPU hogging
+        time.sleep(0.1)
+
+    def run(self):
+        """Main execution thread"""
+        while not self.terminate:
+            self.main_loop()
+            time.sleep(0.005)
 
         # Final cleanup
         if self.device.type == "cuda":

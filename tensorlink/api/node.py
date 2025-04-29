@@ -5,7 +5,9 @@ from pydantic import BaseModel
 from typing import Optional, List
 import threading
 import uvicorn
+import asyncio
 import torch
+import time
 
 
 # For long term inference model requests
@@ -15,27 +17,25 @@ class JobRequest(BaseModel):
     payment: int
 
 
-# Handle inference requests for loaded models
 class GenerationRequest(BaseModel):
-    _model_name: str
+    hf_name: str
     message: str
+    prompt: str = None
     max_length: int = 256
     temperature: float = 0.4
     do_sample: bool = True
     num_beams: int = 4
     history: Optional[List[dict]] = None
+    output: str = None
+    processing: bool = False
 
 
-def create_endpoint(smart_node, port):
-    # Create and start the endpoint
+def create_endpoint(smart_node):
     app = FastAPI()
 
-    # Add CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            f"http://127.0.0.1:{port}/tensorlink-api"
-        ],  # Update with specific origins in production
+        allow_origins=["*"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -45,28 +45,42 @@ def create_endpoint(smart_node, port):
 
     @router.post("/generate")
     async def generate(request: GenerationRequest):
-        """Generate text from a loaded model"""
+        print("Incoming request:", request)
         try:
-            # Process input
-            input_text = request.message
+            setattr(request, "output", None)
+            smart_node.endpoint_requests["generate"].append(request)
+            start_time = time.time()
+
+            while not request.output:
+                await asyncio.sleep(0.5)
+
+                if time.time() - start_time > 30:
+                    raise HTTPException(status_code=504, detail="Request timed out.")
+
+            return_val = request.output
+            if return_val:
+                smart_node.endpoint_requests["generate"].pop(0)
+
+            return {"response": return_val}
 
         except Exception as e:
-            # logger.error(f"Error during generation: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
     app.include_router(router)
+
     thread = threading.Thread(
         target=uvicorn.run,
         args=(app,),
         kwargs={
-            "host": "127.0.0.1" if smart_node.local_test else "0.0.0.0",
-            "port": port,
+            "host": "0.0.0.0",
+            "port": 64747,
         },
     )
     thread.daemon = True
     thread.start()
 
     return thread
+
     # @app.post("/api/load_model")
     # async def load_model(request: JobRequest):
     #     """Load model and tokenizer"""

@@ -667,9 +667,14 @@ class SmartNode(threading.Thread):
                 if self.sock.fileno() == -1:
                     return
 
-                # Unpack nodes info
-                connection, node_address = self.sock.accept()
-                ip_address = node_address[0]
+                self.sock.settimeout(2.0)
+
+                try:
+                    # Unpack nodes info
+                    connection, node_address = self.sock.accept()
+                    ip_address = node_address[0]
+                except socket.timeout:
+                    continue
 
                 # Check rate limiting
                 if self.rate_limiter.is_blocked(ip_address):

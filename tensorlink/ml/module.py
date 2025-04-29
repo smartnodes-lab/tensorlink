@@ -36,6 +36,7 @@ from tensorlink.ml.utils import (
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
+
 MAX_WAIT_TIME = 300
 
 
@@ -147,6 +148,7 @@ class DistributedModel(nn.Module):
 
         # Store model and training resources
         self.user_memory = get_gpu_memory()
+        self.model_parser = ModelParser(self.user_memory)
 
         self.worker_info: Dict[str, Any] = {}
 
@@ -183,7 +185,8 @@ class DistributedModel(nn.Module):
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
 
         # Initialize model distribution
-        self._initialize_distribution()
+        if self.node.__class__.__name__ == "UserNode":
+            self._initialize_distribution()
 
     def forward(self, *args, **kwargs):
         """
@@ -709,9 +712,6 @@ class DistributedModel(nn.Module):
 
     def _initialize_distribution(self):
         """Initialize the distributed model."""
-        # Parse the model
-        model_parser = ModelParser(self.user_memory)
-
         if self.optimizer is None and self.training:
             optimizer_type = torch.optim.Adam
         else:
@@ -719,7 +719,7 @@ class DistributedModel(nn.Module):
 
         # Create the distribution on our end if we have the model loaded
         if isinstance(self.model, nn.Module):
-            distribution = model_parser.create_distributed_config(
+            distribution = self.model_parser.create_distributed_config(
                 self.model, training=self.training, trusted=False, handle_layers=False
             )
 

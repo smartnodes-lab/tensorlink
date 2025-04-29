@@ -366,19 +366,22 @@ class JobMonitor:
     def _check_user_status(self, job_data: Dict) -> bool:
         """Verify user connection and job activity status."""
         try:
-            user_data = self.node.query_dht(job_data["author"])
-            connected = self.node.connect_node(
-                job_data["author"], user_data["host"], user_data["port"]
-            )
-
-            if connected:
-                job_status = self.node.query_node(
-                    job_data["id"], self.node.nodes[job_data["author"]]
+            if job_data["author"] != self.node.rsa_key_hash:
+                user_data = self.node.query_dht(job_data["author"])
+                connected = self.node.connect_node(
+                    job_data["author"], user_data["host"], user_data["port"]
                 )
 
-                return job_status is not None and job_status.get("active", False)
+                if connected:
+                    job_status = self.node.query_node(
+                        job_data["id"], self.node.nodes[job_data["author"]]
+                    )
 
-            return False
+                    return job_status is not None and job_status.get("active", False)
+
+                return False
+
+            return True
 
         except Exception as e:
             self.node.debug_print(
@@ -396,8 +399,8 @@ class JobMonitor:
             if module_info["type"] != "offloaded":
                 continue
 
-            for worker in module_info["workers"]:
-                worker_healthy = self._check_single_worker(worker, module_id)
+            for worker_id, worker_info in module_info["workers"]:
+                worker_healthy = self._check_single_worker(worker_id, module_id)
                 all_workers_healthy = all_workers_healthy and worker_healthy
 
         return all_workers_healthy

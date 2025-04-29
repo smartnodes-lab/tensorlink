@@ -117,9 +117,6 @@ class Worker(TorchNode):
                 elif b"JOB-REQ" == data[:7]:
                     self._handle_job_req(data, node)
 
-                elif b"API-JOB-REQ" == data[:11]:
-                    self._handle_api_job_req(data, node)
-
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
@@ -148,49 +145,6 @@ class Worker(TorchNode):
             raise e
 
     def _handle_job_req(self, data: bytes, node: Connection):
-        try:
-            if node.role == "V":
-                # Accept job request from validator if we can handle it
-                (
-                    user_id,
-                    job_id,
-                    module_id,
-                    module_size,
-                    module_name,
-                    optimizer_name,
-                    training,
-                ) = json.loads(data[7:])
-
-                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
-                    # Respond to validator that we can accept the job
-                    if module_name is None:
-                        module_name = ""
-
-                    # Store a request to wait for the user connection
-                    self._store_request(user_id, module_id + module_name)
-
-                    if training:
-                        self._store_request(user_id, "OPTIMIZER" + optimizer_name)
-
-                    data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
-
-                    # Update available memory
-                    self.available_gpu_memory -= module_size
-
-                else:
-                    data = b"DECLINE-JOB"
-
-            else:
-                node.stop()
-
-            self.send_to_node(node, data)
-
-        except Exception as e:
-            print(data)
-            print(node.main_port)
-            raise e
-
-    def _handle_api_job_req(self, data: bytes, node: Connection):
         try:
             if node.role == "V":
                 # Accept job request from validator if we can handle it

@@ -1,3 +1,5 @@
-[
-  "Qwen/Qwen2.5-7B-Instruct"
-]
+{
+  "FREE_MODELS": [
+    "Qwen/Qwen2.5-7B-Instruct"
+  ]
+}

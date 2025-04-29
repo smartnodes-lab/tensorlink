@@ -65,10 +65,10 @@ if __name__ == "__main__":
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
+    time.sleep(1)
 
     # Connect worker node and user node to the validator node.
     # This would only have to be done for local jobs, and will soon be replaced by a config.json

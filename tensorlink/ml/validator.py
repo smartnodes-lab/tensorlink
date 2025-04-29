@@ -1,23 +1,30 @@
 from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.utils import estimate_hf_model_memory, get_hf_model
 from tensorlink.ml.worker import DistributedWorker
+from tensorlink.ml.module import DistributedModel
+from tensorlink.api.node import GenerationRequest
 
+from transformers import AutoTokenizer
 import torch
 import logging
 import json
 import time
 import gc
+import re
 
 
-MODELS_PATH = "logs/models.json"
+MODELS_CACHE_PATH = "logs/models.json"
+SUPPORTED_MODELS_PATH = "tensorlink/config/models.json"
 
-POPULAR_MODELS = []
-FREE_MODELS = ["Qwen/Qwen2.5-7B-Instruct"]
+
+with open(SUPPORTED_MODELS_PATH, "rb") as f:
+    MODELS = json.load(f)
+    FREE_MODELS = MODELS["FREE_MODELS"]
 
 
 def load_models():
     try:
-        with open(MODELS_PATH, "r") as f:
+        with open(MODELS_CACHE_PATH, "r") as f:
             return json.load(f)
 
     except (FileNotFoundError, json.JSONDecodeError):
@@ -25,22 +32,101 @@ def load_models():
 
 
 def save_models(models):
-    with open(MODELS_PATH, "w") as f:
+    with open(MODELS_CACHE_PATH, "w") as f:
         json.dump(models, f, indent=4)
 
 
+def extract_assistant_response(text: str, model_name: str = None) -> str:
+    # Split on 'assistant' prompts
+    assistant_responses = re.split(r"\bassistant\b", text)
+    if len(assistant_responses) < 2:
+        return text.strip()
+
+    # Take the last assistant response and strip off any trailing user/system prompts
+    last_response = assistant_responses[-1].strip()
+
+    # Optionally remove any 'user' or 'system' that follows
+    last_response = re.split(r"\b(user|system)\b", last_response)[0].strip()
+
+    return last_response
+
+
+def format_chat_prompt(model_name, current_message, history):
+    """Format the chat history and current message into a prompt suitable for the specified model."""
+
+    # Different models require different formatting
+    if "Qwen" in model_name:
+        # Qwen-specific formatting
+        system_prompt = (
+            "You are a helpful assistant. Respond directly to the user's questions."
+        )
+
+        formatted_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+
+        # Add conversation history
+        if history and len(history) > 0:
+            for msg in history:
+                role = msg["role"]
+                content = msg["content"]
+                formatted_prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
+
+        # Add the current message
+        formatted_prompt += f"<|im_start|>user\n{current_message}<|im_end|>\n"
+        formatted_prompt += "<|im_start|>assistant\n"
+
+        return formatted_prompt
+
+    elif "llama" in model_name.lower():
+        # Llama-style formatting
+        system_prompt = (
+            "You are a helpful assistant. Respond directly to the user's questions."
+        )
+        formatted_prompt = f"<s>[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n"
+
+        # Add conversation history
+        if history and len(history) > 0:
+            for i, msg in enumerate(history):
+                if msg["role"] == "user":
+                    if i > 0:
+                        formatted_prompt += "[/INST]\n\n[INST] "
+                    formatted_prompt += f"{msg['content']}"
+                else:  # assistant
+                    formatted_prompt += f" [/INST]\n\n{msg['content']}\n\n[INST] "
+
+        # Add the current message and prepare for response
+        formatted_prompt += f"{current_message} [/INST]\n\n"
+
+        return formatted_prompt
+
+    else:
+        # Generic formatting for other models
+        system_prompt = (
+            "You are a helpful assistant. Respond directly to the user's questions."
+        )
+        formatted_prompt = f"System: {system_prompt}\n\n"
+
+        # Add conversation history
+        if history and len(history) > 0:
+            for msg in history:
+                role_prefix = "User: " if msg["role"] == "user" else "Assistant: "
+                formatted_prompt += f"{role_prefix}{msg['content']}\n\n"
+
+        # Add the current message
+        formatted_prompt += f"User: {current_message}\n\nAssistant: "
+
+        return formatted_prompt
+
+
 class DistributedValidator(DistributedWorker):
-    def __init__(self, node_requests, node_responses, mpc_lock, trusted=False):
-        super().__init__(node_requests, node_responses, mpc_lock, trusted)
-        self.models = load_models()
-        self.hosted_models = {}
+    def __init__(self, node, trusted=False):
+        super().__init__(node, trusted)
+        self.model_cache = load_models()
+        self.models = {}
+        self.tokenizers = {}
+        self.models_initialized = 0
 
     def inspect_model(self, model_name: str, job_data: dict = None):
         """Inspect a model with proper coordination with other threads"""
-        # We want to load a model and check if its worthy of a job
-        if job_data is None:
-            job_data = {"hosted": True, "model_name": model_name}
-
         parser = ModelParser()
         model_name = job_data.get("model_name", model_name)
 
@@ -53,9 +139,7 @@ class DistributedValidator(DistributedWorker):
                 trusted=False,
             )
             job_data["distribution"] = distribution
-
-            # Save the distribution with proper locking
-            self.models[model_name] = {"distribution": distribution}
+            self.model_cache[model_name] = {"distribution": distribution}
 
             self.send_request(
                 "debug_print",
@@ -79,12 +163,27 @@ class DistributedValidator(DistributedWorker):
     def check_node(self):
         """Check for node updates with efficient scheduling and locking and perform job inspection"""
         try:
+            if not self.node.init_kwargs.get("local_test", False):
+                if self.models_initialized < len(FREE_MODELS):
+                    time.sleep(10)  # Temporary sleep to allow network bootstrap first
+                    self.initialize_hosted_jobs()
+
             # Get job data for inspection
             job_data = self.send_request("get_jobs", None)
 
             if isinstance(job_data, dict):
                 # Offload model inspection to a background thread to avoid blocking
                 self.inspect_model(job_data.get("model_name"), job_data)
+
+            # Check for inference generate calls
+            for model_name, module_id in self.models.items():
+                if module_id in self.modules:
+                    generate_request = self.send_request(
+                        "update_api_request", (model_name, module_id)
+                    )
+                    if generate_request:
+                        self._handle_generate_request(generate_request)
+
         except Exception as e:
             logging.error(f"Error checking for jobs: {str(e)}")
 
@@ -92,108 +191,94 @@ class DistributedValidator(DistributedWorker):
         """Initialize hosted jobs with proper thread coordination"""
         # Use thread pool to avoid blocking the main thread
         for model_name in FREE_MODELS:
-            # Schedule model inspections with small delays to avoid overloading
-            # the system all at once
-            self.thread_pool.submit(
-                lambda name=model_name: (
-                    time.sleep(0.5),  # Small delay between model initializations
-                    self.inspect_model(name),
-                )
+            self._initialize_hosted_job(model_name)
+
+    def _handle_generate_request(self, request: GenerationRequest):
+        if request.hf_name in self.models:
+            module_id = self.models[request.hf_name]
+            model = self.modules[module_id]
+            tokenizer = self.tokenizers[request.hf_name]
+
+            # Format chat history into a standardized prompt
+            formatted_prompt = format_chat_prompt(
+                request.hf_name, request.message, request.history
             )
 
-    def run(self):
-        """Main execution method - simplified sequential approach"""
-        while not self.terminate:
-            # Check for new modules to load
+            # Tokenize formatted prompt
+            inputs = tokenizer(
+                formatted_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=request.max_length if request.max_length else 512,
+            )
+
+            # Generate
+            with torch.no_grad():
+                outputs = model.generate(
+                    inputs.input_ids,
+                    max_new_tokens=(
+                        request.max_new_tokens
+                        if hasattr(request, 'max_new_tokens')
+                        else 128
+                    ),
+                    temperature=request.temperature if request.temperature else 0.7,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                    do_sample=(
+                        request.do_sample if hasattr(request, 'do_sample') else True
+                    ),
+                    num_beams=request.num_beams if request.num_beams else 1,
+                )
+
+            # Decode generated tokens
+            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+            # Extract only the assistant's response from the generated text
+            clean_response = extract_assistant_response(generated_text, request.hf_name)
+
+            # Return the clean response
+            self.send_request(
+                "update_api_request", (request.hf_name, module_id, clean_response)
+            )
+
+    def _initialize_hosted_job(self, model_name: str):
+        # Check if the model loading is complete across workers and ready to go
+        if model_name in self.models:
             args = self.send_request("check_module", None)
             if isinstance(args, tuple):
                 (
                     file_name,
                     module_id,
-                    node_id,
+                    distribution,
                     module_name,
                     optimizer_name,
                     training,
                 ) = args
-                self.load_module(
-                    file_name, module_id, node_id, module_name, optimizer_name, training
-                )
-            # Check for job completion/deletion requests
-            elif isinstance(args, str):
-                if args in self.modules:
-                    if self.modules[args].training:
-                        del self.optimizers[args]
-                    del self.modules[args]
-                    self.send_request("debug_print", (f"Module {args} removed.",))
+                self.modules[module_id] = self.models.pop(model_name)
+                self.models[model_name] = module_id
+                self.models_initialized += 1
+                self.modules[module_id].distribute_model(distribution)
+                self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
-            # Check for termination request
-            shutdown_signal = self.send_request("check_shutdown", None)
-            if shutdown_signal:
-                self.send_request(
-                    "debug_print",
-                    "Termination signal received. Shutting down DistributedWorker process...",
-                )
-                self.terminate = True
-                break
+        else:
+            distributed_model = DistributedModel(model_name, node=self.node)
+            self.models[model_name] = distributed_model
+            job_data = {
+                "author": None,
+                "active": True,
+                "hosted": True,
+                "training": False,
+                "payment": 0,
+                "capacity": 0,
+                "n_pipelines": 1,
+                "dp_factor": 1,
+                "distribution": {"model_name": model_name},
+                "n_workers": 0,
+                "model_name": model_name,
+                "seed_validators": [],
+            }
+            self.inspect_model(model_name, job_data)
 
-            # Process each module sequentially
-            if self.modules:
-                for module_id in list(self.modules.keys()):
-                    module = self.modules[module_id]
-
-                    # Check if module is in training mode
-                    is_training = self.send_request("check_train", module_id)
-                    if isinstance(is_training, bool):
-                        module.training = is_training
-
-                    # Check for parameters requests
-                    params_req = self.send_request(
-                        "check_parameters_request", module_id
-                    )
-                    if params_req:
-                        self.send_request(
-                            "debug_print", ("DistributedWorker -> Sending parameters.",)
-                        )
-                        # Save state dict to file
-                        with open(f"parameters_{module_id}", "wb") as file:
-                            # Optimize CPU transfer if needed
-                            if self.device.type == "cuda":
-                                # Temporarily move to CPU for saving
-                                cpu_state_dict = {
-                                    k: v.detach().cpu()
-                                    for k, v in module.state_dict().items()
-                                }
-                                torch.save(cpu_state_dict, file)
-                            else:
-                                torch.save(module.state_dict(), file)
-
-                        self.send_request("send_parameters", (module.host, module_id))
-
-                    # Handle state updates
-                    state_update = self.send_request("check_state_update", module_id)
-                    if state_update:
-                        self.process_state_update(module_id, state_update)
-
-                    # Handle forward queue
-                    forward_task = self.send_request("check_forward", module_id)
-                    if forward_task:
-                        key, (size, name) = forward_task
-                        if isinstance(key, str):
-                            self.handle_generate(module_id, size, name)
-                        else:
-                            self.handle_forward(module_id, key, size, name)
-
-                    # Handle backward queue
-                    backward_task = self.send_request("check_backward", module_id)
-                    if backward_task:
-                        tag, loss_relay = backward_task
-                        self.handle_backward(module_id, tag, loss_relay)
-
-            self.check_node()
-
-            # Small sleep to prevent CPU hogging
-            time.sleep(0.1)
-
-        # Final cleanup
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+    def main_loop(self):
+        self.check_node()
+        time.sleep(0.005)
