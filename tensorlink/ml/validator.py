@@ -219,9 +219,9 @@ class DistributedValidator(DistributedWorker):
                     max_new_tokens=(
                         request.max_new_tokens
                         if hasattr(request, 'max_new_tokens')
-                        else 128
+                        else 2048
                     ),
-                    temperature=request.temperature if request.temperature else 0.7,
+                    temperature=request.temperature if request.temperature else 0.6,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
                     do_sample=(

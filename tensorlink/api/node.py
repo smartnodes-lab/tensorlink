@@ -21,7 +21,7 @@ class GenerationRequest(BaseModel):
     hf_name: str
     message: str
     prompt: str = None
-    max_length: int = 256
+    max_length: int = 2048
     temperature: float = 0.4
     do_sample: bool = True
     num_beams: int = 4
@@ -32,16 +32,7 @@ class GenerationRequest(BaseModel):
 
 def create_endpoint(smart_node):
     app = FastAPI()
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    router = APIRouter(prefix="/tensorlink-api")
+    router = APIRouter()
 
     @router.post("/generate")
     async def generate(request: GenerationRequest):
