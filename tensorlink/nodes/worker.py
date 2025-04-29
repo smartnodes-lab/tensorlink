@@ -9,7 +9,6 @@ import psutil
 import hashlib
 import json
 import logging
-import threading
 import time
 import os
 
@@ -118,9 +117,6 @@ class Worker(TorchNode):
                 elif b"JOB-REQ" == data[:7]:
                     self._handle_job_req(data, node)
 
-                elif b"API-JOB-REQ" == data[:11]:
-                    self._handle_api_job_req(data, node)
-
                 # elif b"PoL" == data[:3]:
                 #     self.debug_print(f"RECEIVED PoL REQUEST")
                 #     if self.training and self.model:
@@ -191,60 +187,14 @@ class Worker(TorchNode):
             print(node.main_port)
             raise e
 
-    def _handle_api_job_req(self, data: bytes, node: Connection):
-        try:
-            if node.role == "V":
-                # Accept job request from validator if we can handle it
-                (
-                    user_id,
-                    job_id,
-                    module_id,
-                    module_size,
-                    module_name,
-                    optimizer_name,
-                    training,
-                ) = json.loads(data[7:])
-
-                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
-                    # Respond to validator that we can accept the job
-                    if module_name is None:
-                        module_name = ""
-
-                    # Store a request to wait for the user connection
-                    self._store_request(user_id, module_id + module_name)
-
-                    if training:
-                        self._store_request(user_id, "OPTIMIZER" + optimizer_name)
-
-                    data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
-
-                    # Update available memory
-                    self.available_gpu_memory -= module_size
-
-                else:
-                    data = b"DECLINE-JOB"
-
-            else:
-                node.stop()
-
-            self.send_to_node(node, data)
-
-        except Exception as e:
-            print(data)
-            print(node.main_port)
-            raise e
-
     def run(self):
         # Accept users and back-check history
         # Get proposees from SC and send our state to them
         super().run()
 
-        node_cleaner = threading.Thread(target=self.clean_node, daemon=True)
-        node_cleaner.start()
-
         counter = 0
         while not self.terminate_flag.is_set():
-            if counter % 120 == 0:
+            if counter % 180 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
 
@@ -434,4 +384,4 @@ class Worker(TorchNode):
 
     def print_status(self):
         self.print_base_status()
-        print("==========================================\n")
+        print("=============================================\n")

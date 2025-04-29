@@ -129,7 +129,7 @@ class TorchNode(SmartNode):
             colour="blue",
         )
         file_name = f"tmp/{module_id}_parameters"
-        key = "P" + module_id
+        key = "PREQPREQPREQ" + module_id
         self.memory_manager[key] = file_name
         return True
 
@@ -138,7 +138,7 @@ class TorchNode(SmartNode):
 
         # TODO Must ensure requesting node is indeed the master or an overseeing validator
         module_id = data[10:74].decode()
-        self.memory_manager["P" + module_id] = True
+        self.memory_manager["PREQPREQPREQ" + module_id] = True
         return True
 
     def _handle_optimizer_request(self, data: bytes, node: Connection):
@@ -201,7 +201,7 @@ class TorchNode(SmartNode):
 
     def _handle_forward(self, data: bytes, node: Connection):
         # Basic check, must be upgraded to check if we are expecting the request
-        if self.role == "V" or node.node_id not in self.nodes:
+        if self.role == "U" or node.node_id not in self.nodes:
             node.ghosts += 1
             return False
         else:
@@ -224,7 +224,7 @@ class TorchNode(SmartNode):
             else:
                 module_id = None
                 for module in self.modules:
-                    if node.node_id in self.modules[module]["workers"]:
+                    if node.node_id in [w[0] for w in self.modules[module]["workers"]]:
                         module_id = module
                         break
 
@@ -469,20 +469,32 @@ class TorchNode(SmartNode):
         for module_id, module in self.modules.items():
             if "mem_info" in module:
                 name = module["mem_info"]
-                return_val = (
-                    name,
-                    module_id,
-                    module["host"],
-                    module["name"],
-                    module["optimizer"],
-                    module["training"],
-                )
+
+                if self.role == "V":
+                    return_val = (
+                        name,
+                        module_id,
+                        module["distribution"],
+                        module["name"],
+                        module["optimizer"],
+                        module["training"],
+                    )
+                else:
+                    return_val = (
+                        name,
+                        module_id,
+                        module["host"],
+                        module["name"],
+                        module["optimizer"],
+                        module["training"],
+                    )
                 del module["mem_info"]
+
             elif "termination" in module:
                 return_val = module_id
                 del module["termination"]
                 module["terminated"] = True
-                self.available_gpu_memory += module[""]
+                self.available_gpu_memory += module["vram"]
                 del self.modules[module_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
@@ -503,7 +515,6 @@ class TorchNode(SmartNode):
 
     def _handle_check_generate(self, request):
         return_val = None
-
         module_id = request["args"]
         if module_id in self.modules:
             if "generate" in self.modules[module_id]["forward_queue"]:
@@ -592,7 +603,7 @@ class TorchNode(SmartNode):
     def _handle_check_state_update(self, request):
         module_id = request["args"]
         return_val = None
-        if self.state_updates[module_id]:
+        if self.state_updates.get(module_id):
             return_val = self.state_updates[module_id].pop()
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -601,8 +612,8 @@ class TorchNode(SmartNode):
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     def _handle_check_parameters_request(self, request):
-        key = "P" + request["args"]
-        return_val = None
+        key = "PREQPREQPREQ" + request["args"]
+        return_val = False
 
         if key in self.memory_manager:
             del self.memory_manager[key]
@@ -614,7 +625,7 @@ class TorchNode(SmartNode):
 
     def _handle_check_parameters(self, request):
         module_id = request["args"]
-        key = "P" + module_id
+        key = "PREQPREQPREQ" + module_id
         if key in self.memory_manager:
             file_name = self.memory_manager[key]
             return_val = file_name
@@ -780,12 +791,12 @@ class TorchNode(SmartNode):
 
     def print_base_status(self):
         print(
-            f"\n===== Node Status Report ({'Worker' if self.role == 'W' else 'Validator'}) ====="
+            f"\n=========== Node Status Report ({'Worker' if self.role == 'W' else 'Validator'}) ==========="
         )
         print(f" Node ID: {self.rsa_key_hash} ({self.host}:{self.port})")
         print(f" Connections: {len(self.nodes)}")
         print(f"    Workers: {self.workers}")
         print(f"    Validators: {self.validators}")
         print(f"    Users: {self.users}")
-        print(f" GPU Memory: {self.available_gpu_memory:.2f} GB available")
+        print(f" VRAM Available: {self.available_gpu_memory / 1e9:.2f} GB")
         print(f" RAM Available: {psutil.virtual_memory().available / 1e9:.2f} GB")

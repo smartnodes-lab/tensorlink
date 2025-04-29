@@ -46,7 +46,7 @@ DP_FACTOR = 1
 TRAINING = False  # Set true to request train job and get a distributed optimizer
 
 # Chatbot parameters
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+model_name = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 MAX_HISTORY_TURNS = 6
 MAX_TOKENS = 2048
 MAX_NEW_TOKENS = 256
@@ -59,18 +59,16 @@ if __name__ == "__main__":
     validator = ValidatorNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
-    time.sleep(1)
 
     # Get validator node information for connecting
     val_key, val_host, val_port = validator.send_request("info", None)
+    time.sleep(1)
 
     # Connect worker node and user node to the validator node.
     # This would only have to be done for local jobs, and will soon be replaced by a config.json

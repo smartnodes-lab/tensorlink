@@ -1,4 +1,3 @@
-import atexit
 import logging
 import signal
 import sys
@@ -167,9 +166,7 @@ class WorkerNode(BaseNode):
 
     def start(self):
         super().start()
-        distributed_worker = DistributedWorker(
-            self.node_requests, self.node_responses, self.mpc_lock, trusted=self.trusted
-        )
+        distributed_worker = DistributedWorker(self, trusted=self.trusted)
         if self.utilization:
             t = threading.Thread(target=distributed_worker.run, daemon=True)
             t.start()
@@ -201,9 +198,7 @@ class ValidatorNode(BaseNode):
 
     def start(self):
         super().start()
-        distributed_validator = DistributedValidator(
-            self.node_requests, self.node_responses, self.mpc_lock
-        )
+        distributed_validator = DistributedValidator(self, trusted=self.trusted)
         if self.utilization:
             t = threading.Thread(target=distributed_validator.run, daemon=True)
             t.start()

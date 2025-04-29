@@ -232,7 +232,7 @@ class SmartNode(threading.Thread):
         self.print_level = logging.INFO
 
         # Connection Settings
-        self.upnp = None
+        self.upnp = upnp
         self.nodes = {}  # node hash: Connection
         self.max_attempts_per_minute = 5
         self.block_duration = 600
@@ -268,9 +268,14 @@ class SmartNode(threading.Thread):
         }
         self.off_chain_test = off_chain_test
         self.local_test = local_test
+
+        if local_test:
+            self.upnp = False
+            self.off_chain_test = True
+
         self.public_key = None
 
-        if upnp:
+        if self.upnp:
             self._init_upnp()
 
         self._init_sock()
@@ -662,9 +667,14 @@ class SmartNode(threading.Thread):
                 if self.sock.fileno() == -1:
                     return
 
-                # Unpack nodes info
-                connection, node_address = self.sock.accept()
-                ip_address = node_address[0]
+                self.sock.settimeout(2.0)
+
+                try:
+                    # Unpack nodes info
+                    connection, node_address = self.sock.accept()
+                    ip_address = node_address[0]
+                except socket.timeout:
+                    continue
 
                 # Check rate limiting
                 if self.rate_limiter.is_blocked(ip_address):
@@ -712,6 +722,8 @@ class SmartNode(threading.Thread):
         confirm their identity. This is then reciprocated on the other node.
         """
         try:
+            connection.settimeout(10)
+
             # Receive and parse initial node information
             node_info = _parse_initial_connection(connection)
 
@@ -914,7 +926,7 @@ class SmartNode(threading.Thread):
                 new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 new_sock.connect((node_address[0], new_port))
-                new_sock.settimeout(3)
+                new_sock.settimeout(6)
                 connection = new_sock
             except Exception as e:
                 self.debug_print(f"Port swap failed ({self.host}:{our_port}): {e}")
@@ -928,8 +940,8 @@ class SmartNode(threading.Thread):
             # Create a new socket and bind to the selected port
             new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             new_sock.bind((self.host, our_port))
-            new_sock.settimeout(3)
-            new_sock.listen(3)
+            new_sock.settimeout(6)
+            new_sock.listen(5)
 
             # Accept the incoming connection on the new port
             connection, new_node_address = new_sock.accept()
@@ -1022,7 +1034,10 @@ class SmartNode(threading.Thread):
             return True
 
         if _can_connect:
-            for attempt in range(2):
+            backoff = 1
+            max_attempts = 3
+
+            for attempt in range(max_attempts):
                 try:
                     # Open up a free port
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1031,6 +1046,9 @@ class SmartNode(threading.Thread):
                     self.debug_print(
                         f"SmartNode -> Selected next port: {our_port} for new connection"
                     )
+
+                    if self.local_test:
+                        host = "127.0.0.1"
 
                     # Attempt connection
                     sock.bind((self.host, our_port))
@@ -1055,15 +1073,13 @@ class SmartNode(threading.Thread):
                     return success
 
                 except Exception as e:
+                    wait_time = backoff * (2**attempt)  # Exponential backoff
                     self.debug_print(
-                        f"Attempt {attempt + 1}: could not connect to {host}:{port} -> {e}",
-                        colour="red",
+                        f"Attempt {attempt + 1}/{max_attempts} failed: {e}. Retrying in {wait_time}s",
                         level=logging.WARNING,
                     )
-                    time.sleep(1)
+                    time.sleep(wait_time)
                     self.remove_port_mapping(our_port)
-                    if attempt == 2:  # Last attempt
-                        return False
 
         else:
             return False
@@ -1174,16 +1190,23 @@ class SmartNode(threading.Thread):
 
         self.add_port_mapping(self.port, self.port)
 
+    def _get_port_identifier(self):
+        """Generate a unique identifier for this node's UPnP mappings"""
+        # Use first 8 chars of hash to generate a unique identifier
+        short_hash = self.rsa_key_hash[:8]
+        return f"SmartNode-{short_hash}-{self.role}"
+
     def add_port_mapping(self, external_port, internal_port):
         """Open up a port via UPnP for a connection"""
         if self.upnp:
             try:
+                port_identifier = self._get_port_identifier()
                 result = self.upnp.addportmapping(
                     external_port,
                     "TCP",
                     self.upnp.lanaddr,
                     internal_port,
-                    f"SmartNode-{self.port}-{self.role}",
+                    port_identifier,
                     "",
                 )
 
@@ -1254,7 +1277,7 @@ class SmartNode(threading.Thread):
                 mapping = self.upnp.getspecificportmapping(index, "TCP")
                 if mapping:
                     _, port, description, _, _ = mapping
-                    if description != f"SmartNode-{self.port}-{self.role}":
+                    if description != self._get_port_identifier():
                         self.remove_port_mapping(port)
                 index += 1
 

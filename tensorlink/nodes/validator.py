@@ -3,10 +3,8 @@ from tensorlink.p2p.torch_node import TorchNode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.ml.utils import estimate_hf_model_memory
+from tensorlink.api.node import create_endpoint, GenerationRequest
 
-# from tensorlink.api.node import
-
-from collections import Counter
 from dotenv import get_key
 import threading
 import hashlib
@@ -64,6 +62,8 @@ class Validator(TorchNode):
         self.contract_manager = None
         self.proposal_listener = None
         self.execution_listener = None
+        self.endpoint = None
+        self.endpoint_requests = {"generate": []}
 
         if off_chain_test is False:
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
@@ -95,6 +95,12 @@ class Validator(TorchNode):
                 )
                 self.terminate_flag.set()
 
+        # Start up the API for handling public jobs
+        self.endpoint = create_endpoint(self)
+        if not local_test:
+            self.add_port_mapping(64747, 64747)
+
+        # Finally, load up previous saved state if any
         self.load_dht_state()
 
     def handle_data(self, data, node: Connection):
@@ -223,8 +229,9 @@ class Validator(TorchNode):
 
             handlers = {
                 "get_jobs": self._handle_get_jobs,
-                # "send_hosted_job_request": self._handle_send_job,
-                "send_hf_job_request": self.create_base_job,
+                "send_job_request": self.create_base_job,
+                "get_api_request": self._handle_check_api,
+                "update_api_request": self._handle_update_api,
             }
 
             handler = handlers.get(req_type)
@@ -238,8 +245,8 @@ class Validator(TorchNode):
             self.response_queue.put({"status": "FAILURE", "error": str(e)})
 
     def _handle_get_jobs(self, request):
-        """Check if we have received any job requests for fully hosted / api jobs and relay that
-        information back to the DistributedValidator process"""
+        """Check if we have received any job requests for huggingface models and fully hosted or api jobs, then relay
+        that information back to the DistributedValidator process"""
         try:
             # Check for API job requests for this node
             if self.rsa_key_hash in self.requests:
@@ -301,13 +308,16 @@ class Validator(TorchNode):
     # t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
     # t.start()
 
-    def create_hf_job(self, job_info: dict, requesters_ip: str):
-        # Rate limitation checks
-        if self.rate_limiter.is_blocked(requesters_ip):
-            self.debug_print(f"Job declined! Reason: UserIPBlocked ({requesters_ip})")
-            return False
+    def create_hf_job(self, job_info: dict, requesters_ip: str = None):
+        # Rate limitation checks for requested jobs
+        if requesters_ip:
+            if self.rate_limiter.is_blocked(requesters_ip):
+                self.debug_print(
+                    f"Job declined! Reason: UserIPBlocked ({requesters_ip})"
+                )
+                return False
 
-        self.rate_limiter.record_attempt(requesters_ip)
+            self.rate_limiter.record_attempt(requesters_ip)
 
         # Huggingface model info checks
         (vram, ram) = estimate_hf_model_memory(
@@ -319,35 +329,39 @@ class Validator(TorchNode):
         else:
             _time = job_info.get("time")
 
-        # API job structure is of length 3
-        if len(job_info) == 3:
-            job_data = {
-                "id": hashlib.sha256(json.dumps(job_info).encode()).hexdigest(),
-                "author": requesters_ip,
-                "active": False,
-                "hosted": True,
-                "ram": ram,
-                "vram": vram,
-                "time": _time,
-                "payment": job_info.get("payment", 0),
-                "n_pipelines": 1,
-                "dp_factor": 1,
-                "distribution": {},
-                "n_workers": 0,
-                "seed_validators": [self.rsa_key_hash],
-                "model_name": job_info.get(
-                    "model_name"
-                ),  # Include model name for distribution
-            }
-        else:
-            job_data = job_info
-            job_data["ram"] = ram
-            job_data["vram"] = vram
-            job_data["time"] = _time
+        job_data = job_info
+        job_data["ram"] = ram
+        job_data["vram"] = vram
+        job_data["time"] = _time
 
-        # Hand off model dissection and worker assignment to DistributedValidator and downstream methods
+        # Hand off model dissection and worker assignment to DistributedValidator process
         request_value = "HF-JOB-REQ" + json.dumps(job_data)
         self._store_request(self.rsa_key_hash, request_value)
+
+    def _handle_check_api(self, request):
+        return_val = None
+        if len(self.endpoint_requests["generate"]) > 0:
+            return_val = self.endpoint_requests["generate"][0]
+
+        self.response_queue.put({"status": "SUCCESS", "return": return_val})
+
+    def _handle_update_api(self, request: tuple):
+        return_val = None
+        if self.endpoint_requests["generate"]:
+            if len(request) == 2:
+                model_name, model_id = request
+                api_request: GenerationRequest = self.endpoint_requests["generate"][0]
+                if not api_request.processing and api_request.hf_name == model_name:
+                    return_val = api_request
+                    api_request.processing = True
+
+            elif len(request) == 3:
+                model_name, model_id, generated_text = request
+                api_request: GenerationRequest = self.endpoint_requests["generate"][0]
+                if model_name == api_request.hf_name and api_request.processing:
+                    self.endpoint_requests["generate"][0].output = generated_text
+
+        self.response_queue.put({"STATUS": "SUCCESS", "return": return_val})
 
     def _handle_job_req(self, data: bytes, node: Connection):
         job_req = json.loads(data[7:])
@@ -405,24 +419,26 @@ class Validator(TorchNode):
         """Asserts that the specified user does not have an active job, and that
         the job capacity can be handled by the network."""
         # job_id = job_data["id"]
-        user_id = job_data["author"]
-        capacity = job_data["capacity"]
-        distribution = job_data["distribution"]
+        user_id = job_data.get("author")
+        capacity = job_data.get("capacity")
+        distribution = job_data.get("distribution")
 
         # Request updated worker statistics
         self.request_worker_stats()
 
-        user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
+        if user_id and user_id != self.rsa_key_hash:
+            # Check that user doesnt have an active job already
+            user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
 
-        # Check for active job
-        if user_info:
-            current_user_job_id = user_info.get("job")
+            # Check for active job
+            if user_info:
+                current_user_job_id = user_info.get("job")
 
-            if current_user_job_id:
-                current_user_job = self.query_dht(current_user_job_id)
+                if current_user_job_id:
+                    current_user_job = self.query_dht(current_user_job_id)
 
-                if current_user_job and current_user_job["active"]:
-                    return False
+                    if current_user_job and current_user_job["active"]:
+                        return False
 
         # Check network can handle the requested job
         total_memory = sum(self.worker_memories.values())
@@ -480,47 +496,85 @@ class Validator(TorchNode):
         return assigned_workers
 
     def create_base_job(self, job_data: dict):
-        modules = job_data["distribution"].copy()
-        job_id = job_data["id"]
-        author = job_data["author"]
-        n_pipelines = job_data["n_pipelines"]
+        modules, job_id, author, n_pipelines = self._prepare_job(job_data)
 
-        if job_data.get("hosted", False):
-            pass
-
-        requesting_node = self.nodes[author]
-
-        # Check network availability for job request
+        requesting_node = self._get_requesting_node(job_data, author)
         assigned_workers = self.check_job_availability(job_data)
 
-        # If no workers available, decline job
         if not assigned_workers:
-            self.debug_print(
-                f"Validator -> Declining job '{job_data['id']}': Could not find enough workers."
+            self._decline_job(
+                job_data, requesting_node, "Could not find enough workers."
             )
-            self.response_queue.put({"status": "SUCCESS", "return": False})
-            self.decline_job(requesting_node)
             return
 
-        # Store job
         self.store_value(job_id, job_data)
+        worker_connection_info = self._assign_workers_to_modules(
+            modules,
+            assigned_workers,
+            author,
+            job_id,
+            job_data,
+            n_pipelines,
+            requesting_node,
+        )
 
-        # Temporary structure to hold worker connection info
+        if worker_connection_info is None:
+            return  # job declined inside _assign_workers_to_modules
+
+        self._update_job_distribution(
+            job_data, worker_connection_info, n_pipelines, requesting_node
+        )
+
+        if requesting_node:
+            self._send_acceptance(requesting_node, job_id, job_data)
+        else:
+            self._setup_hosted_job(job_id, job_data)
+
+        self._finalize_job(job_id, job_data)
+
+    def _prepare_job(self, job_data):
+        modules = job_data.get("distribution").copy()
+        job_id = job_data.get("id")
+        author = job_data.get("author")
+        n_pipelines = job_data.get("n_pipelines")
+
+        if job_id is None:
+            job_id = hashlib.sha256(json.dumps(job_data).encode()).hexdigest()
+            job_data["id"] = job_id
+
+        return modules, job_id, author, n_pipelines
+
+    def _get_requesting_node(self, job_data, author):
+        if job_data.get("hosted"):
+            job_data["author"] = self.rsa_key_hash
+            return None
+        return self.nodes[author]
+
+    def _decline_job(self, job_data, requesting_node, reason):
+        self.debug_print(f"Validator -> Declining job '{job_data['id']}': {reason}")
+        self.response_queue.put({"status": "SUCCESS", "return": False})
+        if requesting_node:
+            self.decline_job(requesting_node)
+
+    def _assign_workers_to_modules(
+        self,
+        modules,
+        assigned_workers,
+        author,
+        job_id,
+        job_data,
+        n_pipelines,
+        requesting_node,
+    ):
         worker_connection_info = {}
 
-        # Assign workers for each module, ensuring unique workers for the same module across pipelines
         for module_id, module in modules.items():
-            worker_assignment = (
-                []
-            )  # Track assigned workers per pipeline for this module
+            worker_assignment = []
 
-            # For each pipeline, recruit unique workers (replicated model workflow)
             for stream in range(n_pipelines):
                 worker_found = False
 
-                # Recruit a worker that hasn't been assigned this module in other pipelines
                 for worker_id in assigned_workers:
-                    # Ensure worker isn't already assigned this module in a different pipeline
                     if worker_id not in worker_assignment:
                         if self.recruit_worker(
                             author,
@@ -532,71 +586,92 @@ class Validator(TorchNode):
                             job_data.get("optimizer", None),
                             job_data.get("training", False),
                         ):
-                            worker_assignment.append(
-                                worker_id
-                            )  # Assign worker to this pipeline's module
+                            worker_assignment.append(worker_id)
                             worker_found = True
                             time.sleep(0.25)
-                            break  # Move to the next pipeline for now, multi-worker pipelines coming soon...
+                            break
 
-                # If no suitable worker found for this pipeline, decline job
                 if not worker_found:
-                    self.debug_print(
-                        f"Validator -> Declining job '{job_data['id']}': Could not find enough workers for distribution"
+                    self._decline_job(
+                        job_data,
+                        requesting_node,
+                        "Could not find enough workers for distribution.",
                     )
-                    self.response_queue.put({"status": "SUCCESS", "return": False})
-                    self.decline_job(requesting_node)
-                    return
+                    return None
 
-            # Temporarily store worker connection info for this module
             worker_connection_info[module_id] = [
                 (worker_id, self.query_dht(worker_id))
                 for worker_id in worker_assignment
             ]
 
-        # After recruiting workers, update the original job_data structure
+        return worker_connection_info
+
+    def _update_job_distribution(
+        self, job_data, worker_connection_info, n_pipelines, requesting_node
+    ):
         for module_id, worker_info in worker_connection_info.items():
             job_data["distribution"][module_id]["workers"] = worker_info
 
-        # Check if all modules have the required number of pipelines assigned
-        for module, module_info in job_data["distribution"].items():
+        for module_id, module_info in job_data["distribution"].items():
             if len(module_info["workers"]) != n_pipelines:
-                self.debug_print(
-                    f"Validator -> Declining job '{job_data['id']}': Pipeline initialization error! \n"
-                    f"\tExpected: {n_pipelines:}, Received: {len(module_info['workers'])} ({job_data['distribution']})"
+                self._decline_job(
+                    job_data,
+                    requesting_node,
+                    f"Pipeline initialization error! Expected {n_pipelines}, Received {len(module_info['workers'])}.",
                 )
-                self.response_queue.put({"status": "SUCCESS", "return": False})
-                self.decline_job(requesting_node)
-                return
+                return None
 
-        # Send the updated job data with worker info to the user
+    def _send_acceptance(self, requesting_node, job_id, job_data):
         self.send_to_node(
             requesting_node,
             b"ACCEPT-JOB" + job_id.encode() + json.dumps(job_data).encode(),
         )
 
+    def _setup_hosted_job(self, job_id, job_data):
+        self.debug_print(
+            f"Creating public inference job with model {job_data.get('model_name')}"
+        )
+
+        for mod_id, module in job_data.get("distribution", {}).items():
+            self.modules[mod_id] = {
+                "mem_info": mod_id,
+                "host": self.rsa_key_hash,
+                "forward_queue": {},
+                "backward_queue": {},
+                "name": module.get("name"),
+                "optimizer": None,
+                "training": False,
+                "workers": module.get("workers", []),
+                "distribution": job_data.get("distribution"),
+            }
+            self.state_updates[mod_id] = []
+
+            if len(self.modules[mod_id]["workers"]) < 1:
+                self.debug_print(
+                    f"Network could not find workers for job '{job_id}' module {mod_id}.",
+                    level=logging.INFO,
+                    colour="red",
+                )
+                self.response_queue.put({"status": "SUCCESS", "return": False})
+                return
+
+    def _finalize_job(self, job_id, job_data):
         self.response_queue.put({"status": "SUCCESS", "return": True})
 
         self.jobs.append(job_id)
-
-        for module, module_info in job_data["distribution"].items():
-            # Remove worker info and just replace with id
-            worker_ids = list(a[0] for a in module_info["workers"])
-            module_info["workers"] = worker_ids
 
         job_data["timestamp"] = time.time()
         job_data["last_seen"] = time.time()
 
         self.store_value(job_id, job_data)
 
-        # Start monitor_job as a background task and store it in the list
         job_monitor = JobMonitor(self)
         t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
         t.start()
 
     def decline_job(self, node):
-        self.send_to_node(node, b"DECLINE-JOB")
-        pass
+        if node:
+            self.send_to_node(node, b"DECLINE-JOB")
 
     def recruit_worker(
         self,
@@ -610,6 +685,9 @@ class Validator(TorchNode):
         training: bool = False,
         is_api_job: bool = False,
     ) -> bool:
+        if user_id is None:
+            user_id = self.rsa_key_hash
+
         data = json.dumps(
             [
                 user_id,
@@ -705,7 +783,7 @@ class Validator(TorchNode):
     # def update_job(self, job_bytes: bytes):
     #     """Update non-seed validators, loss, accuracy, other info"""
     #     job = json.loads(job_bytes)
-
+    #
     # def get_jobs(self):
     #     """For more intensive, paid jobs that are requested directly from SmartnodesCore"""
     #     current_block = self.chain.eth.block_number
@@ -724,97 +802,97 @@ class Validator(TorchNode):
     #     events = event_filter.get_all_entries()
     #     for event in events:
     #         print(event)
-
-    def complete_job(self, job_data: dict):
-        """Decide whether to remove the job or add it to the next state update"""
-        pass
-
-    def validate_job(
-        self,
-        job_id: bytes,
-        user_id: bytes = None,
-        capacities: list = None,
-        active: bool = None,
-    ) -> bool:
-        # Grab user and job information
-        job_info = self.query_dht(job_id)
-
-        if job_info:
-            user_response = None
-
-            if user_id:
-                user_info = self.query_dht(user_id)
-
-                if user_info:
-                    # Connect to user and cross-validate job info
-                    user_host, user_port = user_info["host"], user_info["port"]
-                    connected = self.connect_node(user_id, user_host, user_port)
-
-                    if connected:
-                        # Query job information from the user
-                        user_response = self.query_node(job_id, self.nodes[user_id])
-
-            # Query job information from seed validators
-            job_responses = [
-                self.query_node(job_id, validator)
-                for validator in job_info["seed_validators"]
-            ]
-
-            # Include the user's response if it exists
-            if user_response:
-                job_responses.append(user_response)
-
-            if len(job_responses) > 0:
-                # Sort workers and seed_validators for comparison
-                for response in job_responses:
-                    if isinstance(response, dict):
-                        response["workers"] = sorted(response["workers"])
-                        response["seed_validators"] = sorted(
-                            response["seed_validators"]
-                        )
-
-                # Create hashable tuples for counting most common responses
-                normalized_responses = [
-                    (tuple(response["workers"]), tuple(response["seed_validators"]))
-                    for response in job_responses
-                ]
-
-                # Count the most common response
-                response_count = Counter(normalized_responses)
-                most_common, count = response_count.most_common(1)[0]
-
-                percent_match = count / len(job_responses)
-
-                if percent_match >= 0.66:
-                    # Gather the full original responses that match the most common normalized response
-                    matching_responses = [
-                        response
-                        for response in job_responses
-                        if (
-                            tuple(response["workers"]),
-                            tuple(response["seed_validators"]),
-                        )
-                        == most_common
-                    ]
-
-                    # Validate capacities and state if specified
-                    if capacities is not None or active is not None:
-                        for response in matching_responses:
-                            # Check capacities if provided
-                            if (
-                                capacities is not None
-                                and response.get("capacities") != capacities
-                            ):
-                                return False
-
-                            # Check state if provided
-                            if active is not None and response.get("active") != active:
-                                return False
-
-                    # If all checks passed or no capacities/state checks were specified
-                    return True
-
-        return False
+    #
+    # def complete_job(self, job_data: dict):
+    #     """Decide whether to remove the job or add it to the next state update"""
+    #     pass
+    #
+    # def validate_job(
+    #     self,
+    #     job_id: bytes,
+    #     user_id: bytes = None,
+    #     capacities: list = None,
+    #     active: bool = None,
+    # ) -> bool:
+    #     # Grab user and job information
+    #     job_info = self.query_dht(job_id)
+    #
+    #     if job_info:
+    #         user_response = None
+    #
+    #         if user_id:
+    #             user_info = self.query_dht(user_id)
+    #
+    #             if user_info:
+    #                 # Connect to user and cross-validate job info
+    #                 user_host, user_port = user_info["host"], user_info["port"]
+    #                 connected = self.connect_node(user_id, user_host, user_port)
+    #
+    #                 if connected:
+    #                     # Query job information from the user
+    #                     user_response = self.query_node(job_id, self.nodes[user_id])
+    #
+    #         # Query job information from seed validators
+    #         job_responses = [
+    #             self.query_node(job_id, validator)
+    #             for validator in job_info["seed_validators"]
+    #         ]
+    #
+    #         # Include the user's response if it exists
+    #         if user_response:
+    #             job_responses.append(user_response)
+    #
+    #         if len(job_responses) > 0:
+    #             # Sort workers and seed_validators for comparison
+    #             for response in job_responses:
+    #                 if isinstance(response, dict):
+    #                     response["workers"] = sorted(response["workers"])
+    #                     response["seed_validators"] = sorted(
+    #                         response["seed_validators"]
+    #                     )
+    #
+    #             # Create hashable tuples for counting most common responses
+    #             normalized_responses = [
+    #                 (tuple(response["workers"]), tuple(response["seed_validators"]))
+    #                 for response in job_responses
+    #             ]
+    #
+    #             # Count the most common response
+    #             response_count = Counter(normalized_responses)
+    #             most_common, count = response_count.most_common(1)[0]
+    #
+    #             percent_match = count / len(job_responses)
+    #
+    #             if percent_match >= 0.66:
+    #                 # Gather the full original responses that match the most common normalized response
+    #                 matching_responses = [
+    #                     response
+    #                     for response in job_responses
+    #                     if (
+    #                         tuple(response["workers"]),
+    #                         tuple(response["seed_validators"]),
+    #                     )
+    #                     == most_common
+    #                 ]
+    #
+    #                 # Validate capacities and state if specified
+    #                 if capacities is not None or active is not None:
+    #                     for response in matching_responses:
+    #                         # Check capacities if provided
+    #                         if (
+    #                             capacities is not None
+    #                             and response.get("capacities") != capacities
+    #                         ):
+    #                             return False
+    #
+    #                         # Check state if provided
+    #                         if active is not None and response.get("active") != active:
+    #                             return False
+    #
+    #                 # If all checks passed or no capacities/state checks were specified
+    #                 return True
+    #
+    #     return False
 
     def send_state_updates(self, validators):
         for job in self.jobs:
@@ -845,6 +923,8 @@ class Validator(TorchNode):
             if counter % 120 == 0:
                 self.clean_node()
                 self.clean_port_mappings()
+            if counter % 180 == 0:
+                self.print_status()
 
             time.sleep(1)
             counter += 1
@@ -1004,11 +1084,7 @@ class Validator(TorchNode):
         clean_nodes(self.validators)
         clean_nodes(self.users)
 
-        self.print_status()
-
     def print_status(self):
         self.print_base_status()
-        print(f"Tracked Workers: {len(self.all_workers)}")
-        print(f"Jobs Pending: {len(self.jobs_to_complete)}")
-        print(f"Current Proposal #: {self.current_proposal}")
-        print("==========================================\n")
+        print(f" Current Proposal: {self.current_proposal}")
+        print("=============================================\n")
