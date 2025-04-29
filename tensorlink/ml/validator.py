@@ -243,8 +243,8 @@ class DistributedValidator(DistributedWorker):
 
     def _initialize_hosted_job(self, model_name: str):
         # Check if the model loading is complete across workers and ready to go
-        if model_name in self.models:
-            args = self.send_request("check_module", None)
+        args = self.send_request("check_module", None)
+        if model_name in self.models and args:
             if isinstance(args, tuple):
                 (
                     file_name,
@@ -261,6 +261,9 @@ class DistributedValidator(DistributedWorker):
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
         else:
+            if model_name in self.models:
+                time.sleep(30)
+
             distributed_model = DistributedModel(model_name, node=self.node)
             self.models[model_name] = distributed_model
             job_data = {
