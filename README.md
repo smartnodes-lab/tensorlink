@@ -1,10 +1,8 @@
-<div style="margin-top: 32px;"></div>
-<p align="center">
-  <img src="docs/images/dark_logo copy.png" alt="Logo" width="90" style="vertical-align:middle; margin-right: 20px;">
-  <span style="font-size: 48px; font-weight: bold; vertical-align:middle;">Tensorlink</span>
-</p>
+<div style="display: flex; justify-content: center; align-items: center; margin-top: 20px; max-width: 400px; width: 100%; margin-left: auto; margin-right: auto;">
+  <img src="docs/images/logo_dark.png" alt="Logo" style="max-width: 100%; margin-bottom: 16px; border-radius: 12px;">
+</div>
 
-<h3 align="center" style="margin-top: 0px">Distributed AI Inference & Training for Everyone</h3>
+<h3 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h3>
 <p align="center">
   <i>Plug-and-play models and APIs for distributed neural network inference and training with PyTorch and Hugging Face.</i>
 </p>
