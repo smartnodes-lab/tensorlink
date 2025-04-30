@@ -1,18 +1,17 @@
-<p align="center">
-  <img src="docs/images/dark_logo.png" alt="Logo" width="420" style="vertical-align:middle; margin-right: 8px;">
-</p>
-
-<h3 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h3>
-
-<p align="center">
-  <i>Plug-and-play models and APIs for distributed neural network inference and training with PyTorch.</i>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/v0.1.4-Tensorlink-pink?logo=" alt="Tensorlink version"/>
-  <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"/>
-  <img src="https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social" alt="GitHub Repo stars"/>
-</p>
+<div align="center" style="background-color: #212121; border-radius: 12px; padding: 20px;">
+    <p align="center">
+      <img src="docs/images/dark_logo.png" alt="Logo" width="420" style="vertical-align:middle; margin-right: 8px;">
+    </p>
+    <h3 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h3>
+    <p align="center">
+      <i>Plug-and-play models and APIs for distributed neural network inference and training with PyTorch.</i>
+    </p>
+    <p align="center">
+      <img src="https://img.shields.io/badge/v0.1.4-Tensorlink-pink?logo=" alt="Tensorlink version"/>
+      <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License"/>
+      <img src="https://img.shields.io/github/stars/smartnodes-lab/tensorlink?style=social" alt="GitHub Repo stars"/>
+    </p>
+</div>
 
 **Tensorlink** is a Python library and computational platform that provides powerful tools and APIs for large-scale 
 neural network training and inference in PyTorch. It enables users to work with complex models that exceed the memory 
