@@ -1,6 +1,6 @@
-<div style="display: flex; justify-content: center; align-items: center; margin-top: 20px; max-width: 400px; width: 100%; margin-left: auto; margin-right: auto;">
-  <img src="docs/images/logo.png" alt="Logo" style="max-width: 100%; margin-bottom: 16px; border-radius: 12px;">
-</div>
+<p align="center">
+  <img src="docs/images/logo.png" alt="Logo" width="400" style="max-width: 100%; border-radius: 12px;">
+</p>
 
 <h3 align="center" style="margin-top: -32px">Distributed AI Inference & Training for Everyone</h3>
 <p align="center">

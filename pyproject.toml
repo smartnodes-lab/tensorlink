@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "tensorlink"
-version = "0.1.4"
+version = "0.1.5"
 description = "Tensorlink is a library designed to simplify distributed model training and inference with PyTorch, offering tools to easily distribute models across a network of peers and share computational resources both locally and globally."
 authors = ["Smartnodes Lab <smartnodes-lab@proton.me>"]
 readme = "README.md"
@@ -13,6 +13,7 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
     "License :: OSI Approved :: MIT License",
     "Natural Language :: English",
     "Operating System :: MacOS",
