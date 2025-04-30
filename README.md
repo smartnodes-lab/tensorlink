@@ -1,8 +1,8 @@
-<div style="display: flex; justify-content: center; margin-top:24px;">
-  <div style="background-color: #1a1a1a; border-radius: 16px; padding: 0 16px; max-width: 420px; width: 100%; text-align: center;">
-    <img src="docs/images/dark_logo.png" alt="Logo" style="max-width: 100%; border-radius: 12px">
-  </div>
-</div>
+<div style="margin-top: 32px;"></div>
+<p align="center">
+  <img src="docs/images/dark_logo copy.png" alt="Logo" width="90" style="vertical-align:middle; margin-right: 20px;">
+  <span style="font-size: 48px; font-weight: bold; vertical-align:middle;">Tensorlink</span>
+</p>
 
 <h3 align="center" style="margin-top: 0px">Distributed AI Inference & Training for Everyone</h3>
 <p align="center">
