@@ -24,16 +24,17 @@
 **Tensorlink** is a Python library and computational platform that provides powerful tools and APIs for large-scale 
 neural network training and inference in PyTorch. It enables users to work with complex models that exceed the memory 
 limits of a single device, expanding access to cutting-edge deep learning. Tensorlink streamlines the parsing and 
-distribution of models, and provides a framework for accessing and sharing computation directly peer-to-peer, making 
-powerful models available on demand.
+distribution of models and provides a framework for accessing and sharing computation directly peer-to-peer, making 
+powerful models available on demand and enabling users to easily donate or tap into idle compute.
 
 ## Table of Contents
 1. [Introduction & Key Features](#introduction)
 2. [Training & Inference with PyTorch](#training-and-inference-with-pytorch)
 3. [Inference APIs](#inference-apis)
-4. [Running a Node](#running-a-node)
+4. [Running a Node ('Mining')](#running-a-node)
 5. [Utilizing Local & Private Devices]()
-6. [Contribute](#contributing)
+6. [Roadmap](#roadmap)
+7. [Contribute](#contributing)
 
 > 💡 **Looking to get started?** Jump to [Training & Inference with PyTorch](#training-and-inference-with-pytorch) for a hands-on guide to running your first distributed model with Tensorlink.
 
@@ -62,7 +63,7 @@ of distributed training and inference to a broader community.
 A wrapper around `torch.nn.Module` objects designed to simplify the process of running models across multiple devices
 or nodes. It automatically parses and distributes model submodules across worker nodes, making efficient use of 
 available compute. Crucially, it preserves the standard PyTorch interface, including `forward`, 
-`backward`, and `parameters` — allowing developers to integrate it into existing codebases with minimal friction. 
+`backward`, and `parameters`, allowing developers to integrate it into existing codebases with minimal friction. 
 Tensorlink supports both model parallelism and data parallelism, and handles synchronization and communication between
 distributed components behind the scenes, streamlining complex workflows.
 
@@ -140,11 +141,18 @@ You can also use the distributed model to spawn an optimizer using `DistributedM
 from tensorlink import DistributedModel
 from torch.optim import AdamW
 from my_custom_model import CustomModel  # Optional: Your custom model
+import torch
 
 # Option 1: Hugging Face model (Stable)
 distributed_model = DistributedModel(
-    model="Qwen/Qwen2.5-7B-Instruct",
-    training=False
+    model="Qwen/Qwen2.5-7B-Instruct",  # Model name (str), nn.Module, or path to weights
+    training=False,                    # Set to True only if training; default is inference
+    optimizer_type=None,               # Required if training; ignored in inference
+    scheduler_type=None,               # Optional: pass a PyTorch scheduler class
+    device="cuda",                     # "cuda", "cpu", or None (auto-detect)
+    dtype=torch.float16,               # torch.float32 (default), float16, or bfloat16
+    trusted=False,                     # Set True only for local/trusted jobs
+    verbose=True                       # Enables debug output
 )
 
 # Option 2: Custom PyTorch model (⚠️ Experimental — Under development, may not work as expected)
@@ -174,11 +182,9 @@ Training progress and network activity will soon be viewable through the [Smartn
 
 Tensorlink offers a lightweight API for performing distributed inference, allowing access to popular 
 Hugging Face pre-trained models on-demand. Furthermore, you may offload your model using the `DistributedModel` and call
-it just like a regular PyTorch model—whether from a local script or remotely. 
+it just like a regular PyTorch model, whether from a local script or remotely. 
 
-### Exmples
-
-#### Python (with `requests`)
+#### Example: API request from Python (with `requests`)
 
 ```python
 import requests
@@ -205,7 +211,7 @@ print(response.json())
 ```
 
 
-#### JavaScript / TypeScript (Fetch API)
+#### Example: API request with JavaScript (Fetch API)
 
 ```js
 // Available endpoints (status may vary):
@@ -263,15 +269,7 @@ console.log(result);
 
 While the public Smartnodes network is designed for distributed AI workloads, certain use cases require higher levels of privacy, data control, or hardware isolation. **Smartnodes also supports fully private or LAN-based deployments** on your own hardware, ideal for running sensitive training or inference jobs.
 
-#### Setup Instructions
-1. **Disable P2P Discovery**: Set `peer_discovery = False` in your node configuration to prevent broadcasting your presence.
-2. **Custom Peering**: Manually define trusted local peers via IP and port, creating a closed loop of devices under your control.
-3. **Storage & Models**: Store models and shared memory on a centralized NAS or local SSD to reduce latency.
-4. **Security**: Use firewall rules and VLAN segmentation for network isolation. Load private keys from hardware wallets or encrypted vaults.
-
-### Creating a Private AI Cluster
-
-For users looking to build a **mini AI data center** or test Tensorlink functionality in an isolated environment, the following example demonstrates how to set up a fully private network using local-only devices:
+For users looking to build a **mini AI data center** or test Tensorlink functionality in an isolated environment, the following example demonstrates how you could set up a fully private network using local-only devices:
 
 ```python
 from tensorlink import UserNode, ValidatorNode, WorkerNode, DistributedModel
@@ -285,20 +283,21 @@ OFFCHAIN = LOCAL      # Use off-chain job coordination (fully private)
 
 model_name = 'TinyLlama/TinyLlama-1.1B-Chat-v1.0'
 
-# On Device 1
+# Run on Device 1
 validator = ValidatorNode(upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG)
-# On Device 2
+
+# Run on Device 1
 user = UserNode(upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG)
-# On Device 3
+
+# Run on Device 2+
 worker = WorkerNode(upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG)
 
 # Connect worker and user to validator manually
-val_key, val_host, val_port = validator.send_request("info", None)
-time.sleep(1)
+val_key, val_host, val_port = validator.send_request("info", None)  # Get device information
+
+# Connected to main device for each other device
 worker.connect_node(val_host, val_port, node_id=val_key)
-time.sleep(1)
 user.connect_node(val_host, val_port, node_id=val_key)
-time.sleep(1)
 
 # Request a distributed inference model
 distributed_model = DistributedModel(model_name, training=False, node=user)
@@ -332,37 +331,59 @@ validator.cleanup()
 
 ## Running a Node
 
-Tensorlink is designed to work across **local**, **private**, and **public** networks—but the public network is where it truly comes alive. By joining the decentralized ecosystem, your machine becomes part of a global infrastructure powering machine learning applications. Whether you're a hobbyist or a data center operator, running a Tensorlink node earns you rewards and directly contributes to the future of AI.
-
-### Why Run a Tensorlink Node?
-- 🚀 **Support Innovation**: Lend your GPU power to cutting-edge research and open-source projects.
-- 💸 **Earn Rewards**: Get compensated for your compute time—idle GPUs become productive assets.
-- 🌐 **Join the Movement**: Help build a censorship-resistant, decentralized compute backbone.
+Tensorlink is designed to work across **local**, **private**, and **public** networks, but it thrives on the public-side.
+By joining this distributed ecosystem, your machine becomes part of a global infrastructure powering real-world machine 
+learning applications. Whether you're a hobbyist or a data center operator, running a Tensorlink node helps drive the 
+future of AI and can earn you rewards along the way.
 
 ### Getting Started
 
 1. **Download the Node Binary**  
-   - Grab the latest `tensorlink-miner` from the [**Releases**](https://github.com/smartnodes-lab/tensorlink) page.
+   - Get the latest `tensorlink-miner` from the [**Releases**](https://github.com/smartnodes-lab/tensorlink/releases) page.
    - Make sure your system has:
-     - Python 3
-     - A **CUDA-enabled GPU**
+     - Python 3.10+
+     - A **CUDA-capable GPU** (Support for other hardware and backends coming soon.)
 
 2. **Configure Your Node**  
    - Open the `config.json` file and set:
-     - `"wallet"`: Your Ethereum-compatible wallet address (for receiving rewards).
-     - `"mining"`: Set to `true` if you want to run a local script while idle.
-     - `"mining_script"`: (Optional, BROKEN) Path to the script you want to run when not handling jobs.
+     - `"wallet"`: Your Ethereum (Base) wallet address (used to receive rewards).
+     - `"mining"`: Set to `true` if you'd like the node to run a script while idle (e.g., a GPU-mining script).
+     - `"mining_script"`: _(Optional, currently non-functional)_ Path to the script to run during idle time.  
+       ⚠️ **Note:** Mining support is a work in progress and is not yet implemented.
 
 3. **Run the Worker**  
    - Launch your node using the provided script:
      ```bash
      ./run-worker.sh
      ```
-
-   - You should start seeing logs that indicate connection to the network and readiness to receive jobs.
+   - You should see logs indicating a successful network connection and readiness to receive jobs.
 
 ---
 
+## Roadmap
+
+Here’s what’s in the works for Tensorlink:
+
+- ✅ **Multi-GPU / Large Model Support (Work in Progress)**  
+  Support for training models larger than a single GPU is already implemented. Deployment depends on growing the active node count to enable stable distributed execution.
+
+- 🧠 **Custom Model Integration (Work in Progress)**  
+  Users will be able to plug in and train their own PyTorch models using the Tensorlink infrastructure.
+
+- 🔐 **Smartnode Verification Layer (Work in Progress - Testnet)**  
+  On-chain proposal validation for enhanced security and decentralization.
+  Includes early support for stablecoin and native reward flows to workers and validators.
+
+- ⛏️ **Idle Script Execution / Mining Support (Work in Progress)**  
+  Nodes will be able to run a specified script while idle, such as GPU mining or other workloads. Configuration exists but the feature is not yet functional.
+
+- 🧪 **Scalable Validator Set (Work in Progress)**  
+  Improvements to the validator set are underway to handle higher volumes of job proposals and accommodate a broader range of HTTPS endpoints and server types used in real-world machine learning pipelines.
+
+- 🌐 **Web Dashboard (TBD)**  
+  Monitor job activity, system health, and earnings from a local or hosted interface.
+
+---
 
 ## Contributing
 
