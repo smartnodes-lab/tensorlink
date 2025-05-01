@@ -3,7 +3,7 @@ import os
 from setuptools import find_packages, setup
 
 # Version of the package
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 # Description of the package
 DESCRIPTION = (
@@ -53,10 +53,12 @@ setup(
     install_requires=parse_requirements(
         "requirements.txt"
     ),  # Read dependencies from requirements.txt
-    python_requires=">=3.11.9",
+    python_requires=">=3.10",
     classifiers=[
         "Development Status :: 2 - Pre-Alpha",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.10",
         "License :: OSI Approved :: MIT License",
         "Natural Language :: English",
         "Operating System :: MacOS",
