@@ -33,6 +33,7 @@ powerful models available on demand and enabling users to easily donate or tap i
 
 ## Table of Contents
 1. [Introduction](#introduction)
+   - [Why](#Why)
    - [Key Features](#key-features)
    - [Current Limitations](#current-limitations)
 2. [Getting Started](#getting-started)
@@ -57,6 +58,19 @@ hardware. By leveraging techniques such as model sharding, parallel workflow exe
 built-in incentive system, Tensorlink provides an efficient, decentralized alternative to traditional cloud-based ML 
 services. This significantly lowers the barrier to entry for both training and inference, empowering individuals and 
 organizations to deploy state-of-the-art AI models without the need for costly, centralized infrastructure.
+
+### Why
+
+State-of-the-art models are incredibly powerful, but also large, often too big to run on a single device. Hosting them 
+across multiple machines requires costly GPU infrastructure and complex workflows for device communication and 
+synchronization. This makes participation difficult for individual developers and small teams.
+
+Furthermore, existing cloud solutions store sensitive data on external servers, increasing the risk of data breaches 
+and unauthorized data harvesting. All 'free' commercial LLM services log and analyze user inputs, undermining user 
+privacy. On top of all that, these centralized data centres place a growing strain on power grids.
+
+Tensorlink provides a decentralized, privacy-first, and sustainable alternative, distributing workloads across consumer 
+hardware directly peer-to-peer, making advanced model inference and training accessible, secure, and grid-friendly.
 
 ### Key Features
 
