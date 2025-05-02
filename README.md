@@ -31,16 +31,14 @@ powerful models available on demand and enabling users to easily donate or tap i
 1. [Introduction & Key Features](#introduction)
 2. [Training & Inference with PyTorch](#training-and-inference-with-pytorch)
 3. [Inference APIs](#inference-apis)
-4. [Running a Node ('Mining')](#running-a-node)
-5. [Utilizing Local & Private Devices]()
+4. [Connecting Devices](#connecting-local--private-devices)
+5. [Running a Node (Mining)](#running-a-node-mining)
 6. [Roadmap](#roadmap)
 7. [Contribute](#contributing)
 
 > 💡 **Looking to get started?** Jump to [Training & Inference with PyTorch](#training-and-inference-with-pytorch) for a hands-on guide to running your first distributed model with Tensorlink.
 
-> 🖥️ **Interested in Powering the Network?** Learn how in the [Running a Node](#running-a-node) section to set up your own node and join the network.
-
----
+> 🖥️ **Interested in Powering the Network?** Learn how in the [Running a Node](#running-a-node-mining) section to set up your own node and join the network.
 
 ## Introduction
 
@@ -101,7 +99,6 @@ Finally, internet latency and connection quality can significantly affect perfor
 challenges for latency-sensitive or high-throughput training and inference scenarios. As the network matures, these 
 limitations are expected to be progressively addressed.
 
----
 
 ## Training and Inference with PyTorch
 
@@ -176,13 +173,17 @@ distributed_model.create_optimizer(lr=5e-5)
 
 Training progress and network activity will soon be viewable through the [Smartnodes](https://smartnodes.ca/app) dashboard (currently under development).
 
----
-
 ## Inference APIs
 
-Tensorlink offers a lightweight API for performing distributed inference, allowing access to popular 
-Hugging Face pre-trained models on-demand. Furthermore, you may offload your model using the `DistributedModel` and call
-it just like a regular PyTorch model, whether from a local script or remotely. 
+Tensorlink provides a lightweight API for distributed inference, offering on-demand access to popular pre-trained 
+models from Hugging Face. It supports both free public inference on a rotating set of models and paid requests for 
+dedicated jobs and custom services. The list of currently supported public models is maintained on our GitHub page 
+and updated regularly to reflect availability and usage trends. Below is the most recent set of free, publicly 
+accessible models:
+
+- `Qwen/Qwen2.5-7B-Instruct`
+
+> ⚠️ A wider selection of much larger models will become available as more nodes join the network. Sorry for the inconvenience.
 
 #### Example: API request from Python (with `requests`)
 
@@ -263,9 +264,8 @@ console.log(result);
 - Keep histories concise for faster response time.
 - Model loading and generation performance depends on network conditions and node availability.
 
----
 
-### Utilizing Local & Private Devices
+## Connecting Local & Private Devices
 
 While the public Smartnodes network is designed for distributed AI workloads, certain use cases require higher levels of privacy, data control, or hardware isolation. **Smartnodes also supports fully private or LAN-based deployments** on your own hardware, ideal for running sensitive training or inference jobs.
 
@@ -327,9 +327,7 @@ validator.cleanup()
 - All nodes are simulated on the same machine or LAN group.
 - Customize `connect_node()` with local IPs to run across multiple physical devices on a WAN/LAN.
 
----
-
-## Running a Node
+## Running a Node (Mining)
 
 Tensorlink is designed to work across **local**, **private**, and **public** networks, but it thrives on the public-side.
 By joining this distributed ecosystem, your machine becomes part of a global infrastructure powering real-world machine 
@@ -358,8 +356,6 @@ future of AI and can earn you rewards along the way.
      ```
    - You should see logs indicating a successful network connection and readiness to receive jobs.
 
----
-
 ## Roadmap
 
 Here’s what’s in the works for Tensorlink:
@@ -382,8 +378,6 @@ Here’s what’s in the works for Tensorlink:
 
 - 🌐 **Web Dashboard (TBD)**  
   Monitor job activity, system health, and earnings from a local or hosted interface.
-
----
 
 ## Contributing
 
