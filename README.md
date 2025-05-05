@@ -219,7 +219,7 @@ Below is the most recent set of free, publicly accessible models:
 import requests
 
 https_serv = "https://smartnodes-lab.ddns.net/tensorlink-api"  # May not work with all clients 
-http_serv = "http://smartnodes-lab.ddns.net:443/tensorlink-api"  # Use this if HTTPS fails
+http_serv = "http://smartnodes-lab.ddns.net/tensorlink-api"  # Use this if HTTPS fails
 
 payload = {
     "hf_name": "Qwen/Qwen2.5-7B-Instruct",
@@ -235,7 +235,7 @@ payload = {
     ]
 }
 
-response = requests.post(f"{http_serv}/generate", json=payload)
+response = requests.post(f"{https_serv}/generate", json=payload)
 print(response.json())
 ```
 

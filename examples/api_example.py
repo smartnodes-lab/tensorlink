@@ -1,18 +1,26 @@
-from tensorlink import ValidatorNode, WorkerNode
 import requests
-import time
 
 
-if __name__ == "__main__":
-    """Test the /api/request-job endpoint"""
+https_serv = (
+    "https://smartnodes-lab.ddns.net/tensorlink-api"  # May not work with all clients
+)
+http_serv = "http://smartnodes-lab.ddns.net/tensorlink-api"  # Use this if HTTPS fails
 
-    # Start by setting up the network simulation
-    worker = WorkerNode(local_test=True)
-    validator = ValidatorNode(local_test=True)
 
-    # Get validator credentials for direct connection
-    val_key, val_host, val_port = validator.send_request("info", None)
-    worker.connect_node(val_host, val_port, node_id=val_key, timeout=5)
+payload = {
+    "hf_name": "Qwen/Qwen2.5-7B-Instruct",
+    "message": "Describe the role of AI in medicine.",
+    "max_length": 1024,
+    "max_new_tokens": 256,
+    "temperature": 0.7,
+    "do_sample": True,
+    "num_beams": 4,
+    "history": [
+        {"role": "user", "content": "What is artificial intelligence?"},
+        {"role": "assistant", "content": "Artificial intelligence refers to..."},
+    ],
+}
 
-    # Ensures validator has enough time to start up and load some models
-    time.sleep(10)
+
+response = requests.post(f"{https_serv}/generate", json=payload)
+print(response.json())
