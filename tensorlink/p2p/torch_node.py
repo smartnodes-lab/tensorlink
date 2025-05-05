@@ -27,6 +27,8 @@ def format_size(size_bytes):
 
 
 class TorchNode(SmartNode):
+    """"""
+
     def __init__(
         self,
         request_queue,
@@ -201,7 +203,7 @@ class TorchNode(SmartNode):
 
     def _handle_forward(self, data: bytes, node: Connection):
         # Basic check, must be upgraded to check if we are expecting the request
-        if self.role == "U" or node.node_id not in self.nodes:
+        if node.node_id not in self.nodes:
             node.ghosts += 1
             return False
         else:
