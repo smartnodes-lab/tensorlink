@@ -242,7 +242,13 @@ class DistributedWorker:
 
         # Load kwargs but filter out non-generation parameters
         all_kwargs = bytes_to_tensor(kwargs)
-        all_kwargs['input_ids'] = input_ids
+        if hasattr(input_ids, "input_ids"):
+            all_kwargs['input_ids'] = input_ids.input_ids
+            if hasattr(input_ids, "attention_mask"):
+                all_kwargs["attention_mask"] = input_ids.attention_mask
+        else:
+            all_kwargs['input_ids'] = input_ids
+
         all_kwargs = attach_tensor(all_kwargs, self.device)
 
         # Filter out other known non-generation parameters
