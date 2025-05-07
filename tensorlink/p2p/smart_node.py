@@ -9,7 +9,7 @@ from tensorlink.p2p.monitor import ConnectionMonitor
 
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import get_key, set_key
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 from miniupnpc import UPnP
 from web3 import Web3
 import hashlib
@@ -917,55 +917,133 @@ class SmartNode(threading.Thread):
         node_address: tuple,
     ) -> bool:
         """Finalize the node connection process"""
-        if instigator:
-            try:
-                self.debug_print(
-                    f"Switching connection to new port: {node_address[0]}:{new_port}"
-                )
-                time.sleep(1)
-                new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                new_sock.connect((node_address[0], new_port))
-                new_sock.settimeout(6)
-                connection = new_sock
-            except Exception as e:
-                self.debug_print(f"Port swap failed ({self.host}:{our_port}): {e}")
-                raise e
-        else:
-            self.debug_print(
-                f"SmartNode -> Listening for the instigator on the new port: {our_port}"
-            )
-            time.sleep(1)
+        connection = None
 
-            # Create a new socket and bind to the selected port
-            new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            new_sock.bind((self.host, our_port))
-            new_sock.settimeout(6)
+        try:
+            # Handle the connection differently based on role
+            if instigator:
+                connection = self._establish_instigator_connection(
+                    node_address[0], new_port
+                )
+            else:
+                connection = self._establish_receiver_connection(our_port)
+                if not connection:
+                    return False
+
+            # Check for existing connection
+            if self._is_duplicate_connection(node_address):
+                if connection:
+                    connection.close()
+                return False
+
+            # Create connection thread
+            thread_client = self._create_connection(
+                connection,
+                host=node_address[0],
+                port=new_port,
+                main_port=main_port,
+                node_id=node_info['node_id'],
+                role=node_info['role'],
+            )
+            thread_client.start()
+
+            # Store and categorize node
+            return self._store_node_connection(thread_client, node_info)
+
+        except Exception as e:
+            self.debug_print(
+                f"Connection finalization failed: {e}", level=logging.ERROR
+            )
+            if connection:
+                try:
+                    connection.close()
+                except Exception as close_error:
+                    self.debug_print(
+                        f"Error closing connection: {close_error}", level=logging.ERROR
+                    )
+            return False
+
+    def _establish_instigator_connection(self, host: str, port: int) -> socket.socket:
+        """Establish connection as the instigator"""
+        self.debug_print(f"Switching connection to new port: {host}:{port}")
+
+        # Increase wait time to allow receiver to fully set up socket
+        time.sleep(2.5)  # Increased from 1 to 2.5 seconds
+
+        new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            # Set connect timeout to avoid freezing
+            new_sock.settimeout(5)  # Set timeout before connect operation
+            new_sock.connect((host, port))
+            new_sock.settimeout(10)  # Standard operation timeout after connection
+            return new_sock
+
+        except socket.timeout:
+            self.debug_print(f"Port swap connection timeout: {host}:{port}")
+            new_sock.close()
+            raise ConnectionError(f"Connection timeout to {host}:{port}")
+
+        except ConnectionRefusedError:
+            self.debug_print(f"Port swap connection refused: {host}:{port}")
+            new_sock.close()
+            raise ConnectionError(f"Connection refused to {host}:{port}")
+
+        except Exception as e:
+            self.debug_print(
+                f"Port swap failed ({self.host}:{port}): {e}", level=logging.ERROR
+            )
+            new_sock.close()
+            raise
+
+    def _establish_receiver_connection(self, port: int) -> Optional[socket.socket]:
+        """Establish connection as the receiver"""
+        self.debug_print(
+            f"SmartNode -> Listening for the instigator on the new port: {port}"
+        )
+
+        # Create socket earlier to reduce race condition
+        new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        new_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        try:
+            new_sock.bind((self.host, port))
             new_sock.listen(5)
 
-            # Accept the incoming connection on the new port
-            connection, new_node_address = new_sock.accept()
+            # Signal we're ready by sleeping AFTER socket setup
+            time.sleep(1)
 
-        # Check for existing connection
+            # Accept with reasonable timeout
+            new_sock.settimeout(10)  # Increased from 6 to 10 seconds
+            connection, _ = new_sock.accept()
+            return connection
+
+        except socket.timeout:
+            self.debug_print(
+                f"Timeout waiting for instigator on port {port}", level=logging.ERROR
+            )
+            new_sock.close()
+            return None
+
+        except Exception as e:
+            self.debug_print(
+                f"Error accepting instigator connection: {e}", level=logging.ERROR
+            )
+            new_sock.close()
+            return None
+
+        finally:
+            # Close the listening socket after accepting connection
+            new_sock.close()
+
+    def _is_duplicate_connection(self, node_address: tuple) -> bool:
+        """Check if we already have a connection to this node"""
         for node in self.nodes.values():
             if node.host == node_address[0] and node.port == node_address[1]:
                 self.debug_print(f"Already connected to node: {node.node_id}")
-                connection.close()
-                return False
-
-        # Create connection thread
-        thread_client = self._create_connection(
-            connection,
-            host=node_address[0],
-            port=new_port,
-            main_port=main_port,
-            node_id=node_info['node_id'],
-            role=node_info['role'],
-        )
-        thread_client.start()
-
-        # Store and categorize node
-        return self._store_node_connection(thread_client, node_info)
+                return True
+        return False
 
     def _store_node_connection(self, thread_client, node_info: dict) -> bool:
         """Store node connection details and categorize"""
