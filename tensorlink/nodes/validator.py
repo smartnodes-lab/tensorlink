@@ -230,7 +230,6 @@ class Validator(TorchNode):
             handlers = {
                 "get_jobs": self._handle_get_jobs,
                 "send_job_request": self.create_base_job,
-                "get_api_request": self._handle_check_api,
                 "update_api_request": self._handle_update_api,
             }
 
@@ -338,16 +337,11 @@ class Validator(TorchNode):
         request_value = "HF-JOB-REQ" + json.dumps(job_data)
         self._store_request(self.rsa_key_hash, request_value)
 
-    def _handle_check_api(self, request):
-        return_val = None
-        if len(self.endpoint_requests["generate"]) > 0:
-            return_val = self.endpoint_requests["generate"][0]
-
-        self.response_queue.put({"status": "SUCCESS", "return": return_val})
-
     def _handle_update_api(self, request: tuple):
+        """Receives and responds to API requests"""
         return_val = None
         if self.endpoint_requests["generate"]:
+            # Incoming request triggers ml-process
             if len(request) == 2:
                 model_name, model_id = request
                 api_request: GenerationRequest = self.endpoint_requests["generate"][0]
@@ -355,6 +349,7 @@ class Validator(TorchNode):
                     return_val = api_request
                     api_request.processing = True
 
+            # Responding to request after ml-processing
             elif len(request) == 3:
                 model_name, model_id, generated_text = request
                 api_request: GenerationRequest = self.endpoint_requests["generate"][0]
@@ -1088,3 +1083,17 @@ class Validator(TorchNode):
         self.print_base_status()
         print(f" Current Proposal: {self.current_proposal}")
         print("=============================================\n")
+
+    def get_tensorlink_status(self):
+        with open("tensorlink/config/models.json", "rb") as f:
+            models = json.load(f)
+            free_models = models["FREE_MODELS"]
+
+        return {
+            "validators": len(self.validators) + 1,
+            "workers": len(self.all_workers),
+            "users": len(self.users),
+            "proposal": self.current_proposal,
+            "capacity": sum(self.worker_memories.values()),
+            "models": free_models,
+        }
