@@ -9,7 +9,7 @@ from tensorlink.p2p.monitor import ConnectionMonitor
 
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import get_key, set_key
-from typing import Tuple, Union, Optional
+from typing import Tuple, Union, Optional, List
 from miniupnpc import UPnP
 from web3 import Web3
 import hashlib
@@ -41,6 +41,35 @@ COLOURS = {
     "bright_magenta": "\033[95m",
     "bright_cyan": "\033[96m",
     "bright_white": "\033[97m",
+}
+
+# Map logging levels to colors
+LEVEL_COLOURS = {
+    logging.DEBUG: "blue",
+    logging.INFO: "green",
+    logging.WARNING: "yellow",
+    logging.ERROR: "red",
+    logging.CRITICAL: "bright_red",
+}
+
+
+BACKGROUND_COLOURS = {
+    "black": "\033[40m",
+    "red": "\033[41m",
+    "green": "\033[42m",
+    "Validator": "\033[43m",
+    "Smartnode": "\033[44m",
+    "User": "\033[45m",
+    "Worker": "\033[46m",
+    "white": "\033[47m",
+    "DHT": "\033[100m",
+    "bright_red": "\033[101m",
+    "bright_green": "\033[102m",
+    "bright_yellow": "\033[103m",
+    "bright_blue": "\033[104m",
+    "bright_magenta": "\033[105m",
+    "bright_cyan": "\033[106m",
+    "bright_white": "\033[107m",
 }
 
 
@@ -82,23 +111,13 @@ os.makedirs("logs", exist_ok=True)
 os.makedirs("tmp", exist_ok=True)
 
 log_handler = TimedRotatingFileHandler(
-    "logs/runtime.log", when="midnight", interval=1, backupCount=30
+    "logs/runtime.log", when="midnight", interval=1, backupCount=7
 )
 log_handler.setFormatter(logging.Formatter("[%(asctime)s] - %(message)s"))
 log_handler.suffix = "%Y%m%d"
 logging.getLogger().addHandler(log_handler)
 logging.getLogger().setLevel(logging.DEBUG)
 BASE_PORT = 38751
-
-
-def hash_key(key: bytes, number=False):
-    """
-    Hashes the key to determine its position in the keyspace.
-    """
-    if number is True:
-        return int(hashlib.sha256(key).hexdigest(), 16)
-    else:
-        return hashlib.sha256(key).hexdigest()
 
 
 def calculate_xor(key_hash, node_id):
@@ -192,7 +211,7 @@ class Bucket:
             self.values.remove(value)
 
 
-class SmartNode(threading.Thread):
+class Smartnode(threading.Thread):
     """
     A P2P nodes secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
     Combines smart contract queries and a kademlia-like DHT implementation for data storage and access.
@@ -207,7 +226,7 @@ class SmartNode(threading.Thread):
         local_test: bool = False,
         debug_colour=None,
     ):
-        super(SmartNode, self).__init__()
+        super(Smartnode, self).__init__()
 
         # Node info
         self.terminate_flag = threading.Event()
@@ -286,7 +305,7 @@ class SmartNode(threading.Thread):
             self.chain = Web3(Web3.HTTPProvider(CHAIN_URL))
             self.contract_address = Web3.to_checksum_address(CONTRACT)
 
-            # Grab the SmartNode contract
+            # Grab the Smartnode contract
             try:
                 self.contract = self.chain.eth.contract(
                     address=self.contract_address, abi=ABI
@@ -297,9 +316,10 @@ class SmartNode(threading.Thread):
 
             except Exception as e:
                 self.debug_print(
-                    f"SmartNode -> Could not retrieve contract: {e}",
+                    f"Could not retrieve contract: {e}",
                     colour="bright_red",
                     level=logging.CRITICAL,
+                    tag="Smartnode",
                 )
                 self.stop()
 
@@ -387,7 +407,12 @@ class SmartNode(threading.Thread):
             node.ping = time.time() - node.pinged
             node.pinged = -1
         else:
-            self.debug_print("Received pong with no corresponding ping", colour="red")
+            self.debug_print(
+                "Received pong with no corresponding ping",
+                colour="red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             node.ghosts += 1
 
         return True
@@ -405,12 +430,22 @@ class SmartNode(threading.Thread):
         """
         # Validate response packet size
         if len(data) < 86:
-            self.debug_print("Received incomplete value response", colour="red")
+            self.debug_print(
+                "Received incomplete value response",
+                colour="red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             return False
 
         # Check if we have an active request for this node
         if node.node_id not in self.requests:
-            self.debug_print("Received unsolicited data", colour="red")
+            self.debug_print(
+                "Received unsolicited data",
+                colour="red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             return False
 
         value_id = data[22:86].decode()
@@ -423,7 +458,12 @@ class SmartNode(threading.Thread):
             self._store_request(value_id, value)
             return True
 
-        self.debug_print(f"Ghost data from node: {node.node_id}", colour="red")
+        self.debug_print(
+            f"Ghost data from node: {node.node_id}",
+            colour="red",
+            level=logging.WARNING,
+            tag="Smartnode",
+        )
         node.ghosts += 1
         return False
 
@@ -464,10 +504,10 @@ class SmartNode(threading.Thread):
             message (str): Error message to log
         """
         self.debug_print(
-            f"SmartNode -> {message}", colour="bright_red", level=logging.ERROR
+            f"{message}", colour="bright_red", level=logging.ERROR, tag="Smartnode"
         )
 
-    def debug_print(self, message, level=logging.DEBUG, colour=None) -> None:
+    def debug_print(self, message, level=logging.DEBUG, colour=None, tag=None) -> None:
         """Print to console if debug is enabled"""
         logging.log(level, message)
 
@@ -480,15 +520,25 @@ class SmartNode(threading.Thread):
             elif self.role == "W":
                 role_colour = COLOURS["cyan"]
             elif self.role == "V":
-                role_colour = COLOURS["yellow"]
+                role_colour = COLOURS["bright_black"]
 
-            if colour is None or colour not in COLOURS.keys():
-                colour = "\033[37m"
-            else:
-                colour = COLOURS[colour]
+            if colour is None:
+                colour = LEVEL_COLOURS.get(level, "white")
 
+            colour_code = COLOURS.get(colour, "\033[37m")
             reset_colour = "\033[0m"
-            print(f"{role_colour}{timestamp}{colour} -> {message}{reset_colour}")
+
+            tag_width = 12  # Adjust as needed
+            if tag:
+                centered_tag = tag.center(tag_width)
+                background_colour = BACKGROUND_COLOURS.get(tag.strip(), "\033[40m")
+                tag = f" {background_colour}{centered_tag}{reset_colour}"
+            else:
+                tag = " " * (tag_width + 1)
+
+            print(
+                f"[{role_colour}{timestamp}{reset_colour}]{tag} -> {colour_code}{message}{reset_colour}"
+            )
 
     """Methods for DHT Query and Storage"""
 
@@ -500,7 +550,7 @@ class SmartNode(threading.Thread):
         if isinstance(key_hash, bytes):
             key_hash = key_hash.decode()
 
-        self.debug_print(f"SmartNode -> Querying DHT for {key_hash}")
+        self.debug_print(f"Querying DHT for {key_hash}", tag="Smartnode")
         closest_node = None
         closest_distance = float("inf")
 
@@ -549,7 +599,7 @@ class SmartNode(threading.Thread):
         key_hash: Union[str, bytes],
         node: Connection,
         requester: Union[str, bytes] = None,
-        ids_to_exclude: list = None,
+        ids_to_exclude: Optional[List] = None,
     ):
         """Query a specific nodes for a value"""
         if requester is None:
@@ -641,10 +691,10 @@ class SmartNode(threading.Thread):
                 return
 
             del self.routing_table[key]
-            self.debug_print(f"SmartNode -> Key {key} deleted from DHT.", colour="blue")
+            self.debug_print(f"Key {key} deleted from DHT.", colour="blue")
         else:
             self.debug_print(
-                f"SmartNode -> Key {key} not found in DHT.",
+                f"Key {key} not found in DHT.",
                 colour="red",
                 level=logging.ERROR,
             )
@@ -697,14 +747,14 @@ class SmartNode(threading.Thread):
                     )
 
             except socket.timeout:
-                # self.debug_print(f"listen: connection timed out!")
                 pass
 
             except Exception as e:
                 self.debug_print(
-                    f"SmartNode -> listen connection error {e}",
+                    f"Listen connection error {e}",
                     colour="bright_red",
                     level=logging.CRITICAL,
+                    tag="Smartnode",
                 )
 
             # self.reconnect_nodes()
@@ -764,6 +814,7 @@ class SmartNode(threading.Thread):
                     f"Poor reputation: {node_info['node_id_hash']}",
                     colour="red",
                     level=logging.WARNING,
+                    tag="Smartnode",
                 )
                 connection.close()
                 return False
@@ -858,7 +909,12 @@ class SmartNode(threading.Thread):
             proof = decrypt(node_info['random'].encode(), self.role)
             return float(proof)
         except Exception as e:
-            self.debug_print(f"Proof validation failed: {e}")
+            self.debug_print(
+                f"Proof validation failed: {e}",
+                colour="bright_red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             return 0
 
     def _validate_response(
@@ -890,8 +946,8 @@ class SmartNode(threading.Thread):
                 # Select a new port for the node to use (since we accepted connection from the listening/main socket)
                 our_port = self._get_next_port()
                 self.debug_print(
-                    f"SmartNode -> Selected next port: {our_port} for new connection.",
-                    level=logging.DEBUG,
+                    f"Selected next port: {our_port} for new connection.",
+                    tag="Smartnode",
                 )
                 self.add_port_mapping(our_port, our_port)
 
@@ -904,7 +960,12 @@ class SmartNode(threading.Thread):
             return rand_n_proof == expected_rand_n, our_port, new_port, main_port
 
         except Exception as e:
-            self.debug_print(f"Response validation failed: {e}")
+            self.debug_print(
+                f"Response validation failed: {e}",
+                colour="bright_red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             return False, 0, 0, 0
 
     def _finalize_connection(
@@ -952,20 +1013,28 @@ class SmartNode(threading.Thread):
 
         except Exception as e:
             self.debug_print(
-                f"Connection finalization failed: {e}", level=logging.ERROR
+                f"Connection finalization failed: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
             )
             if connection:
                 try:
                     connection.close()
                 except Exception as close_error:
                     self.debug_print(
-                        f"Error closing connection: {close_error}", level=logging.ERROR
+                        f"Error closing connection: {close_error}",
+                        colour="bright_red",
+                        level=logging.ERROR,
+                        tag="Smartnode",
                     )
             return False
 
     def _establish_instigator_connection(self, host: str, port: int) -> socket.socket:
         """Establish connection as the instigator"""
-        self.debug_print(f"Switching connection to new port: {host}:{port}")
+        self.debug_print(
+            f"Switching connection to new port: {host}:{port}", tag="Smartnode"
+        )
 
         # Increase wait time to allow receiver to fully set up socket
         time.sleep(2.5)  # Increased from 1 to 2.5 seconds
@@ -981,18 +1050,31 @@ class SmartNode(threading.Thread):
             return new_sock
 
         except socket.timeout:
-            self.debug_print(f"Port swap connection timeout: {host}:{port}")
+            self.debug_print(
+                f"Port swap connection timeout: {host}:{port}",
+                colour="bright_red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             new_sock.close()
             raise ConnectionError(f"Connection timeout to {host}:{port}")
 
         except ConnectionRefusedError:
-            self.debug_print(f"Port swap connection refused: {host}:{port}")
+            self.debug_print(
+                f"Port swap connection refused: {host}:{port}",
+                colour="bright_red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
             new_sock.close()
             raise ConnectionError(f"Connection refused to {host}:{port}")
 
         except Exception as e:
             self.debug_print(
-                f"Port swap failed ({self.host}:{port}): {e}", level=logging.ERROR
+                f"Port swap failed ({self.host}:{port}): {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
             )
             new_sock.close()
             raise
@@ -1000,7 +1082,7 @@ class SmartNode(threading.Thread):
     def _establish_receiver_connection(self, port: int) -> Optional[socket.socket]:
         """Establish connection as the receiver"""
         self.debug_print(
-            f"SmartNode -> Listening for the instigator on the new port: {port}"
+            f"Listening for the instigator on the new port: {port}", tag="Smartnode"
         )
 
         # Create socket earlier to reduce race condition
@@ -1021,14 +1103,20 @@ class SmartNode(threading.Thread):
 
         except socket.timeout:
             self.debug_print(
-                f"Timeout waiting for instigator on port {port}", level=logging.ERROR
+                f"Timeout waiting for instigator on port {port}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
             )
             new_sock.close()
             return None
 
         except Exception as e:
             self.debug_print(
-                f"Error accepting instigator connection: {e}", level=logging.ERROR
+                f"Error accepting instigator connection: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
             )
             new_sock.close()
             return None
@@ -1041,7 +1129,9 @@ class SmartNode(threading.Thread):
         """Check if we already have a connection to this node"""
         for node in self.nodes.values():
             if node.host == node_address[0] and node.port == node_address[1]:
-                self.debug_print(f"Already connected to node: {node.node_id}")
+                self.debug_print(
+                    f"Already connected to node: {node.node_id}", tag="Smartnode"
+                )
                 return True
         return False
 
@@ -1083,6 +1173,7 @@ class SmartNode(threading.Thread):
             f"Connected to node: {thread_client.host}:{thread_client.port}",
             level=logging.INFO,
             colour="bright_green",
+            tag="Smartnode",
         )
 
         return True
@@ -1107,7 +1198,7 @@ class SmartNode(threading.Thread):
         # Check that we are not already connected
         if id_hash in self.nodes:
             self.debug_print(
-                f"SmartNode -> connect_node: Already connected to {id_hash}"
+                f"connect_node: Already connected to {id_hash}", tag="Smartnode"
             )
             return True
 
@@ -1122,7 +1213,8 @@ class SmartNode(threading.Thread):
                     our_port = self._get_next_port()
                     self.add_port_mapping(our_port, our_port)
                     self.debug_print(
-                        f"SmartNode -> Selected next port: {our_port} for new connection"
+                        f"Selected next port: {our_port} for new connection",
+                        tag="Smartnode",
                     )
 
                     if self.local_test:
@@ -1134,9 +1226,10 @@ class SmartNode(threading.Thread):
                     sock.settimeout(10)
 
                     self.debug_print(
-                        f"SmartNode -> connect_node: connecting to {host}:{port}",
+                        f"connect_node: connecting to {host}:{port}",
                         colour="blue",
                         level=logging.INFO,
+                        tag="Smartnode",
                     )
 
                     # Send our info to node
@@ -1155,6 +1248,8 @@ class SmartNode(threading.Thread):
                     self.debug_print(
                         f"Attempt {attempt + 1}/{max_attempts} failed: {e}. Retrying in {wait_time}s",
                         level=logging.WARNING,
+                        colour="bright_red",
+                        tag="Smartnode",
                     )
                     time.sleep(wait_time)
                     self.remove_port_mapping(our_port)
@@ -1258,13 +1353,23 @@ class SmartNode(threading.Thread):
         # Clean up mappings previously created by this application.
         try:
             if devices_found == 0:
-                self.debug_print("No UPnP devices found.")
+                self.debug_print(
+                    "No UPnP devices found.",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                    tag="Smartnode",
+                )
                 return
 
             self.clean_port_mappings()
 
         except Exception as e:
-            self.debug_print(f"Error during UPnP cleanup: {e}")
+            self.debug_print(
+                f"Error during UPnP cleanup: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
+            )
 
         self.add_port_mapping(self.port, self.port)
 
@@ -1272,7 +1377,7 @@ class SmartNode(threading.Thread):
         """Generate a unique identifier for this node's UPnP mappings"""
         # Use first 8 chars of hash to generate a unique identifier
         short_hash = self.rsa_key_hash[:8]
-        return f"SmartNode-{short_hash}-{self.role}"
+        return f"Smartnode-{short_hash}-{self.role}"
 
     def add_port_mapping(self, external_port, internal_port):
         """Open up a port via UPnP for a connection"""
@@ -1290,23 +1395,26 @@ class SmartNode(threading.Thread):
 
                 if result:
                     self.debug_print(
-                        f"SmartNode -> UPnP port forward successful on port {self.port}"
+                        f"UPnP port forward successful on port {self.port}",
+                        tag="Smartnode",
                     )
                     return True
                 else:
                     self.debug_print(
-                        f"SmartNode -> Failed to initialize UPnP. (internal port: {internal_port},"
+                        f"Failed to initialize UPnP. (internal port: {internal_port},"
                         f" external port: {external_port})",
                         level=logging.CRITICAL,
                         colour="bright_red",
+                        tag="Smartnode",
                     )
                     return False
 
             except Exception as e:
                 if "ConflictInMapping" in str(e):
                     self.debug_print(
-                        f"SmartNode -> Port {external_port} is already mapped.",
+                        f"Port {external_port} is already mapped.",
                         level=logging.DEBUG,
+                        tag="Smartnode",
                     )
                     return False
                 else:
@@ -1321,19 +1429,22 @@ class SmartNode(threading.Thread):
 
                 if result is True:
                     self.debug_print(
-                        f"SmartNode -> Successfully removed UPnP port mapping for external port {external_port}"
+                        f"Successfully removed UPnP port mapping for external port {external_port}",
+                        tag="Smartnode",
                     )
                 else:
                     self.debug_print(
-                        f"SmartNode -> Could not remove port mapping: {result}",
+                        f"Could not remove port mapping: {result}",
                         level=logging.WARNING,
                         colour="yellow",
+                        tag="Smartnode",
                     )
             except Exception as e:
                 self.debug_print(
-                    f"SmartNode -> Error removing UPnP port mapping for port {external_port}: {e}",
+                    f"Error removing UPnP port mapping for port {external_port}: {e}",
                     level=logging.ERROR,
                     colour="bright_red",
+                    tag="Smartnode",
                 )
 
     def clean_port_mappings(self):
@@ -1345,7 +1456,7 @@ class SmartNode(threading.Thread):
 
         if not self.upnp:
             self.debug_print(
-                "SmartNode -> UPnP is not initialized.", level=logging.WARNING
+                "UPnP is not initialized.", level=logging.WARNING, tag="Smartnode"
             )
             return mappings
 
@@ -1365,8 +1476,9 @@ class SmartNode(threading.Thread):
                     break
 
                 self.debug_print(
-                    f"SmartNode -> Error retrieving port mapping at index {index}: {e}",
+                    f"Error retrieving port mapping at index {index}: {e}",
                     level=logging.ERROR,
+                    tag="Smartnode",
                 )
                 break
 
@@ -1396,7 +1508,9 @@ class SmartNode(threading.Thread):
         # Check if trying to connect to self
         if host == self.host and port == self.port:
             self.debug_print(
-                "SmartNode -> connect_with_node: cannot connect with yourself!"
+                "connect_with_node: cannot connect with yourself!",
+                level=logging.WARNING,
+                tag="Smartnode",
             )
             return False
 
@@ -1404,7 +1518,8 @@ class SmartNode(threading.Thread):
         for node in self.nodes.values():
             if node.host == host and (node.port == port or node.main_port == port):
                 self.debug_print(
-                    f"SmartNode -> connect_with_node: already connected with node: {node.node_id}"
+                    f"connect_with_node: already connected with node: {node.node_id}",
+                    tag="Smartnode",
                 )
                 return False
 
@@ -1414,22 +1529,34 @@ class SmartNode(threading.Thread):
         """Send data to a connected nodes"""
         if n in self.nodes.values():
             self.debug_print(
-                f"SmartNode -> send_to_node: Sending {len(data)} to node: {n.host}:{n.port}"
+                f"send_to_node: Sending {len(data)} to node: {n.host}:{n.port}",
+                tag="Smartnode",
             )
             n.send(data)
         else:
-            self.debug_print("SmartNode -> send_to_node: node not found!", colour="red")
+            self.debug_print(
+                "send_to_node: node not found!",
+                colour="red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
 
     def send_to_node_from_file(self, n: Connection, file, tag):
         if n in self.nodes.values():
             n.send_from_file(file, tag)
         else:
-            self.debug_print("SmartNode -> send_to_node: node not found!", colour="red")
+            self.debug_print(
+                "send_to_node: node not found!",
+                colour="red",
+                level=logging.WARNING,
+                tag="Smartnode",
+            )
 
     def handle_message(self, node: Connection, data) -> None:
         """Callback method to handles incoming data from connections"""
         self.debug_print(
-            f"SmartNode -> handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB"
+            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB",
+            tag="Smartnode",
         )
         self.handle_data(data, node)
 
@@ -1462,7 +1589,7 @@ class SmartNode(threading.Thread):
         if additional_info:
             message += f": {additional_info}"
 
-        self.debug_print("SmartNode -> " + message, colour="red", level=logging.DEBUG)
+        self.debug_print(message, colour="red", level=logging.DEBUG, tag="Smartnode")
         self.remove_port_mapping(n.getsockname()[1])
         n.close()
 
@@ -1470,18 +1597,26 @@ class SmartNode(threading.Thread):
         """Shuts down UPnP on port"""
         if self.upnp:
             self.clean_port_mappings()
-            self.debug_print("SmartNode -> _stop_upnp: UPnP cleaned.")
+            self.debug_print("_stop_upnp: UPnP cleaned.", tag="Smartnode")
 
     def stop(self) -> None:
         """Shut down nodes and all associated connections/threads"""
-        self.debug_print("Node stopping...", colour="bright_yellow", level=logging.INFO)
+        self.debug_print(
+            "Node stopping...",
+            colour="bright_yellow",
+            level=logging.INFO,
+            tag="Smartnode",
+        )
         self.terminate_flag.set()
 
         try:
             self.sock.close()
         except Exception as e:
             self.debug_print(
-                f"Error closing socket: {e}", colour="bright_red", level=logging.ERROR
+                f"Error closing socket: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Smartnode",
             )
 
         for node in self.nodes.values():
@@ -1493,7 +1628,9 @@ class SmartNode(threading.Thread):
         self._stop_upnp()
         clean()
 
-        self.debug_print("Node stopped.", colour="bright_yellow", level=logging.INFO)
+        self.debug_print(
+            "Node stopped.", colour="bright_yellow", level=logging.INFO, tag="Smartnode"
+        )
 
     """Methods to Interact with Flask Endpoints"""
 

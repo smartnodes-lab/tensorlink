@@ -1,6 +1,6 @@
 from tensorlink.ml.utils import get_gpu_memory, handle_output
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.p2p.torchnode import Torchnode
 
 import torch
 import torch.nn as nn
@@ -17,7 +17,7 @@ STATE_FILE = "logs/dht_state.json"
 LATEST_STATE_FILE = "logs/latest_state.json"
 
 
-class Worker(TorchNode):
+class Worker(Torchnode):
     """
     Todo:
         - link workers to database or download training data for complete offloading
@@ -54,6 +54,7 @@ class Worker(TorchNode):
         self.debug_print(
             f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
             level=logging.INFO,
+            tag="Worker",
         )
         self.available_gpu_memory = get_gpu_memory()
         self.total_gpu_memory = self.available_gpu_memory
@@ -63,7 +64,8 @@ class Worker(TorchNode):
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if not self.public_key:
                 self.debug_print(
-                    "Public key not found in .env file, using donation wallet..."
+                    "Public key not found in .env file, using donation wallet...",
+                    tag="Worker",
                 )
                 self.public_key = "0x1Bc3a15dfFa205AA24F6386D959334ac1BF27336"
 
@@ -72,17 +74,21 @@ class Worker(TorchNode):
             if self.local_test is False:
                 attempts = 0
 
-                self.debug_print("Bootstrapping...")
+                self.debug_print("Bootstrapping...", tag="Worker")
                 while attempts < 3 and len(self.validators) == 0:
                     self.bootstrap()
                     if len(self.validators) == 0:
                         time.sleep(15)
-                        self.debug_print("No validators found, trying again...")
+                        self.debug_print(
+                            "No validators found, trying again...", tag="Worker"
+                        )
                         attempts += 1
 
                 if len(self.validators) == 0:
                     self.debug_print(
-                        "No validators found, shutting down...", level=logging.CRITICAL
+                        "No validators found, shutting down...",
+                        level=logging.CRITICAL,
+                        tag="Worker",
                     )
                     self.stop()
                     self.terminate_flag.set()
@@ -105,7 +111,7 @@ class Worker(TorchNode):
                 # Try worker-related tags
                 if b"STATS-REQUEST" == data[:13]:
                     self.debug_print(
-                        f"Worker -> Received stats request from: {node.node_id}"
+                        f"Received stats request from: {node.node_id}", tag="Worker"
                     )
                     self.handle_statistics_request(node)
 
@@ -138,9 +144,10 @@ class Worker(TorchNode):
 
         except Exception as e:
             self.debug_print(
-                f"Worker -> stream data exception: {e}",
+                f"stream data exception: {e}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="Worker",
             )
             raise e
 
@@ -293,9 +300,10 @@ class Worker(TorchNode):
                             existing_data = json.load(f)
                     except json.JSONDecodeError:
                         self.debug_print(
-                            "SmartNode -> Existing state file read error.",
+                            "Existing state file read error.",
                             level=logging.WARNING,
                             colour="red",
+                            tag="Worker",
                         )
 
                 # Update the archive with current data
@@ -307,17 +315,19 @@ class Worker(TorchNode):
                     json.dump(existing_data, f, indent=4)
 
             self.debug_print(
-                "SmartNode -> DHT state saved successfully to "
+                "DHT state saved successfully to "
                 + f"{'both files' if not latest_only else 'latest file only'}.",
                 level=logging.INFO,
                 colour="green",
+                tag="Worker",
             )
 
         except Exception as e:
             self.debug_print(
-                f"SmartNode -> Error saving DHT state: {e}",
+                f"Error saving DHT state: {e}",
                 colour="bright_red",
                 level=logging.WARNING,
+                tag="Worker",
             )
 
     def load_dht_state(self):
@@ -337,18 +347,19 @@ class Worker(TorchNode):
                         self.routing_table.update(items)
 
                 self.debug_print(
-                    "SmartNode -> DHT state loaded successfully.", level=logging.INFO
+                    "DHT state loaded successfully.", level=logging.INFO, tag="Worker"
                 )
 
             except Exception as e:
                 self.debug_print(
-                    f"SmartNode -> Error loading DHT state: {e}",
+                    f"Error loading DHT state: {e}",
                     colour="bright_red",
                     level=logging.INFO,
+                    tag="Worker",
                 )
         else:
             self.debug_print(
-                "SmartNode -> No DHT state file found.", level=logging.INFO
+                "No DHT state file found.", level=logging.INFO, tag="Worker"
             )
 
     def clean_node(self):
