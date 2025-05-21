@@ -284,4 +284,5 @@ class DistributedValidator(DistributedWorker):
 
     def main_loop(self):
         self.check_node()
+        super().main_loop()
         time.sleep(0.005)

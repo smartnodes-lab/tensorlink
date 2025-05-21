@@ -1,7 +1,7 @@
 from tensorlink.ml.utils import get_gpu_memory
 from tensorlink.mpc.shared_memory import get_from_shared_memory
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.smart_node import SmartNode
+from tensorlink.p2p.smart_node import Smartnode
 
 from multiprocessing import shared_memory
 import logging
@@ -26,7 +26,7 @@ def format_size(size_bytes):
         return f"{size_bytes} bytes"
 
 
-class TorchNode(SmartNode):
+class Torchnode(Smartnode):
     """"""
 
     def __init__(
@@ -39,7 +39,7 @@ class TorchNode(SmartNode):
         off_chain_test=False,
         local_test=False,
     ):
-        super(TorchNode, self).__init__(
+        super(Torchnode, self).__init__(
             role=role,
             max_connections=max_connections,
             upnp=upnp,
@@ -107,9 +107,10 @@ class TorchNode(SmartNode):
 
         except Exception as e:
             self.debug_print(
-                f"TorchNode -> Error handling data: {e}",
+                f"Error handling data: {e}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="Torchnode",
             )
 
     def _train_updated(self, data: bytes):
@@ -127,8 +128,7 @@ class TorchNode(SmartNode):
     def _handle_parameters(self, data: bytes):
         module_id = data[10:74].decode()
         self.debug_print(
-            f"TorchNode -> Received Parameters for: {module_id}",
-            colour="blue",
+            f"Received Parameters for: {module_id}", colour="blue", tag="Torchnode"
         )
         file_name = f"tmp/{module_id}_parameters"
         key = "PREQPREQPREQ" + module_id
@@ -136,7 +136,7 @@ class TorchNode(SmartNode):
         return True
 
     def _handle_parameters_request(self, data: bytes):
-        self.debug_print("TorchNode -> RECEIVED PARAMS REQUEST")
+        self.debug_print("RECEIVED PARAMS REQUEST", tag="Torchnode")
 
         # TODO Must ensure requesting node is indeed the master or an overseeing validator
         module_id = data[10:74].decode()
@@ -161,19 +161,22 @@ class TorchNode(SmartNode):
 
             if response_type == "loaded":
                 self.debug_print(
-                    f"TorchNode -> Optimizer for module: {module_id} loaded on worker {node.node_id}",
+                    f"Optimizer for module: {module_id} loaded on worker {node.node_id}",
                     level=logging.INFO,
                     colour="bright_cyan",
+                    tag="Torchnode",
                 )
             elif response_type == "stepped":
                 self.debug_print(
-                    f"TorchNode -> Optimizer for module: {module_id} stepped on worker {node.node_id}",
+                    f"Optimizer for module: {module_id} stepped on worker {node.node_id}",
                     colour="bright_cyan",
+                    tag="Torchnode",
                 )
             elif response_type == "zeroed":
                 self.debug_print(
-                    f"TorchNode -> Optimizer for module: {module_id} zeroed on worker {node.node_id}",
+                    f"Optimizer for module: {module_id} zeroed on worker {node.node_id}",
                     colour="bright_cyan",
+                    tag="Torchnode",
                 )
 
             self.state_updates[module_id].append(response_type + node.node_id)
@@ -190,7 +193,7 @@ class TorchNode(SmartNode):
             size = int(data[8:eos])
 
             formatted_size = format_size(size)
-            self.debug_print(f"TorchNode -> RECEIVED BACKWARD: {formatted_size}")
+            self.debug_print(f"RECEIVED BACKWARD: {formatted_size}", tag="Torchnode")
 
             # TODO we must check that the forward received corresponds to a sent pass/specific module
             # must also do with backwards
@@ -211,7 +214,7 @@ class TorchNode(SmartNode):
             eos = data.find(b"::")
             size = int(data[7:eos])
             formatted_size = format_size(size)
-            self.debug_print(f"TorchNode -> RECEIVED FORWARD: {formatted_size}")
+            self.debug_print(f"RECEIVED FORWARD: {formatted_size}", tag="Torchnode")
 
             # TODO we must check that the forward received corresponds to a sent pass/specific module
             # must also do with backwards
@@ -226,9 +229,17 @@ class TorchNode(SmartNode):
             else:
                 module_id = None
                 for module in self.modules:
-                    if node.node_id in [w[0] for w in self.modules[module]["workers"]]:
-                        module_id = module
-                        break
+                    # Validators store worker info as workers instead so must be conditional
+                    if self.role == "V":
+                        if node.node_id in [
+                            w[0] for w in self.modules[module]["workers"]
+                        ]:
+                            module_id = module
+                            break
+                    else:
+                        if node.node_id in self.modules[module]["workers"]:
+                            module_id = module
+                            break
 
                 shm = shared_memory.SharedMemory(create=True, size=size)
                 buffer = shm.buf[:size]
@@ -242,7 +253,7 @@ class TorchNode(SmartNode):
 
     def _handle_generate(self, data: bytes, node: Connection):
         # Received a forward pass
-        self.debug_print("TorchNode -> RECEIVED GENERATE")
+        self.debug_print("RECEIVED GENERATE", tag="Torchnode")
 
         # if self.role == "U":
         #
@@ -286,9 +297,10 @@ class TorchNode(SmartNode):
 
             if module_name is not None:
                 self.debug_print(
-                    f"TorchNode -> Loading distributed module: {module_id}",
+                    f"Loading distributed module: {module_id}",
                     colour="bright_cyan",
                     level=logging.INFO,
+                    tag="Torchnode",
                 )
 
                 self.modules[module_id] = {
@@ -313,9 +325,10 @@ class TorchNode(SmartNode):
     def _handle_module_loaded(self, data: bytes, node: Connection):
         """Remove load module request to signal to distributed process"""
         self.debug_print(
-            f"TorchNode -> Successfully offloaded submodule to: {node.node_id}",
+            f"Successfully offloaded submodule to: {node.node_id}",
             level=logging.INFO,
             colour="bright_cyan",
+            tag="Torchnode",
         )
         module_id = data[6:70].decode()
         self._remove_request(node.node_id, "MODULE" + module_id)
@@ -699,7 +712,7 @@ class TorchNode(SmartNode):
             level = logging.DEBUG
         else:
             message, colour, level = request["args"]
-        self.debug_print(message, colour=colour, level=level)
+        self.debug_print(message, colour=colour, level=level, tag="Torchnode")
         self.response_queue.put({"status": "SUCCESS", "return": False})
 
     def send_forward(self, node: Connection, forward_bytes, context):
@@ -751,9 +764,10 @@ class TorchNode(SmartNode):
 
     def send_module(self, file_name: bytes, module_id: str, node: Connection):
         self.debug_print(
-            f"TorchNode -> Sending module: {module_id} to worker: {node.node_id}",
+            f"Sending module: {module_id} to worker: {node.node_id}",
             level=logging.INFO,
             colour="bright_blue",
+            tag="Torchnode",
         )
         self._store_request(node.node_id, "MODULE" + module_id)
         self.state_updates[module_id] = []
@@ -786,9 +800,7 @@ class TorchNode(SmartNode):
 
     def _stop_mpc_comms(self):
         self.mpc_terminate_flag.set()
-        self.debug_print(
-            "Shutting down distributed ML processes...", level=logging.DEBUG
-        )
+        self.debug_print("Shutting down distributed ML processes...", tag="Torchnode")
         self._mpc_comms.join()
 
     def print_base_status(self):

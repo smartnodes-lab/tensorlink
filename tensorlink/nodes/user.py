@@ -1,5 +1,5 @@
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torch_node import TorchNode
+from tensorlink.p2p.torch_node import Torchnode
 
 from dotenv import get_key
 import hashlib
@@ -11,7 +11,7 @@ import threading
 import time
 
 
-class User(TorchNode):
+class User(Torchnode):
     def __init__(
         self,
         request_queue,
@@ -38,6 +38,7 @@ class User(TorchNode):
         self.debug_print(
             f"Launching User: {self.rsa_key_hash} ({self.host}:{self.port})",
             level=logging.INFO,
+            tag="User",
         )
 
         # self.endpoint = create_endpoint(self)
@@ -67,26 +68,31 @@ class User(TorchNode):
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if not self.public_key:
                 self.debug_print(
-                    "Public key not found in .env file, using donation wallet..."
+                    "Public key not found in .env file, using donation wallet...",
+                    tag="User",
                 )
                 self.public_key = "0x1Bc3a15dfFa205AA24F6386D959334ac1BF27336"
 
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             if self.local_test is False:
                 attempts = 0
 
-                self.debug_print("Bootstrapping...")
+                self.debug_print("Bootstrapping...", tag="User")
                 while attempts < 3 and len(self.validators) == 0:
                     self.bootstrap()
                     if len(self.validators) == 0:
                         time.sleep(15)
-                        self.debug_print("No validators found, trying again...")
+                        self.debug_print(
+                            "No validators found, trying again...", tag="User"
+                        )
                         attempts += 1
 
                 if len(self.validators) == 0:
                     self.debug_print(
-                        "No validators found, shutting down...", level=logging.CRITICAL
+                        "No validators found, shutting down...",
+                        level=logging.WARNING,
+                        tag="User",
                     )
                     self.stop()
                     self.terminate_flag.set()
@@ -112,16 +118,19 @@ class User(TorchNode):
                     if node.node_id in self.jobs[-1]["seed_validators"]:
                         reason = data[11:]
                         self.debug_print(
-                            f"User -> Validator ({node.node_id}) declined job! Reason: {reason}",
+                            f"Validator ({node.node_id}) declined job! Reason: {reason}",
                             colour="bright_red",
                             level=logging.ERROR,
+                            tag="User",
                         )
                         self.stop()
 
                     else:
                         ghost += 1
                 elif b"WORKERS" == data[:7]:
-                    self.debug_print(f"User -> Received workers from: {node.node_id}")
+                    self.debug_print(
+                        f"Received workers from: {node.node_id}", tag="User"
+                    )
                     workers = json.loads(data[7:])
                     for worker, stats in workers.items():
                         self.worker_stats[worker] = stats
@@ -136,9 +145,10 @@ class User(TorchNode):
 
         except Exception as e:
             self.debug_print(
-                f"User -> error handling data {e}",
+                f"Error handling data {e}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="User",
             )
             raise e
 
@@ -181,13 +191,14 @@ class User(TorchNode):
         """
         try:
             job_id = self.jobs[-1]
-            job_data = self.query_dht(job_id)
+            job_data = self.dht.query(job_id)
 
             if job_data and node.node_id in job_data["seed_validators"]:
                 self.debug_print(
-                    f"User -> Validator ({node.node_id}) accepted job!",
+                    f"Validator ({node.node_id}) accepted job!",
                     colour="bright_green",
                     level=logging.INFO,
+                    tag="User",
                 )
                 job_id = data[10:74].decode()
                 job_data = json.loads(data[74:])
@@ -211,30 +222,34 @@ class User(TorchNode):
 
                         if connected:
                             self.debug_print(
-                                f"User -> Module: {mod_id} has connected to Worker: {worker_info}"
+                                f"Module: {mod_id} has connected to Worker: {worker_info}",
+                                tag="User",
                             )
                             self.modules[mod_id]["workers"].append(worker_info["id"])
                         else:
                             self.debug_print(
-                                f"User -> Error connecting Module: {mod_id} to Worker: {worker_info}"
+                                f"Error connecting Module: {mod_id} to Worker: {worker_info}",
+                                tag="User",
                             )
 
                 # Update DHT with new worker assignments
-                self.store_value(job_id, job_data)
+                self.dht.store(job_id, job_data)
                 if node.node_id in self.requests:
                     if job_id in self.requests[node.node_id]:
                         self.requests[node.node_id].remove(job_id)
             else:
                 self.debug_print(
-                    f"User -> Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
+                    f"Unexpected ACCEPT-JOB from non-seed validator: {node.node_id}",
                     level=logging.WARNING,
+                    tag="User",
                 )
 
         except Exception as e:
             self.debug_print(
-                f"User -> handle job accept error: {e}",
+                f"handle job accept error: {e}",
                 level=logging.CRITICAL,
                 colour="bright_red",
+                tag="User",
             )
             raise e
 
@@ -329,10 +344,12 @@ class User(TorchNode):
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
         job_request["id"] = job_hash
-        self.store_value(job_hash, job_request)
+        self.dht.store(job_hash, job_request)
         self.jobs.append(job_hash)
 
-        self.debug_print(f"Creating job request: {job_request}")
+        self.debug_print(
+            f"Creating job request: {job_request}", tag="User", level=logging.INFO
+        )
 
         # Send job request to multiple validators (seed validators)
         job_req_threads = []
@@ -348,8 +365,8 @@ class User(TorchNode):
             t.join()
 
         # Get updated job info
-        job_request = self.query_dht(job_hash)
-        self.debug_print(f"Received response from validator: {job_request}")
+        job_request = self.dht.query(job_hash)
+        self.debug_print(f"Received response from validator: {job_request}", tag="User")
         distribution = job_request["distribution"]
 
         # Check that we have received all required workers (ie N-offloaded * DP factor)
@@ -362,6 +379,7 @@ class User(TorchNode):
                     "Network could not find workers for job.",
                     level=logging.INFO,
                     colour="red",
+                    tag="User",
                 )
                 return
 
@@ -399,9 +417,10 @@ class User(TorchNode):
             if time.time() - start_time > 120:
                 # TODO handle validator not responding and request new seed validator thru other seed validators
                 self.debug_print(
-                    "User -> SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB",
+                    "SEED VALIDATOR TIMED OUT WHILE REQUESTING JOB",
                     colour="bright_yellow",
                     level=logging.WARNING,
+                    tag="User",
                 )
                 return
         return

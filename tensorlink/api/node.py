@@ -57,6 +57,34 @@ def create_endpoint(smart_node):
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    # @app.get("/api/status")
+    # async def get_status():
+    #     """Get current model status"""
+    #     model_loaded = model is not None and tokenizer is not None
+    #     node_active = node is not None
+    #
+    #     device_info = {}
+    #     if torch.cuda.is_available():
+    #         device_info = {
+    #             "gpu_available": True,
+    #             "device_name": torch.cuda.get_device_name(0),
+    #             "memory_allocated": f"{torch.cuda.memory_allocated(0) / 1024 ** 2:.2f} MB",
+    #             "memory_reserved": f"{torch.cuda.memory_reserved(0) / 1024 ** 2:.2f} MB"
+    #         }
+    #     else:
+    #         device_info = {"gpu_available": False}
+    #
+    #     return {
+    #         "model_loaded": model_loaded,
+    #         "model_name": getattr(model, "name_or_path", None) if model else None,
+    #         "tensorlink_active": node_active,
+    #         "device_info": device_info
+    #     }
+
+    @app.get("/stats")
+    async def get_network_stats():
+        return smart_node.get_tensorlink_status()
+
     app.include_router(router)
 
     thread = threading.Thread(
@@ -111,31 +139,6 @@ def create_endpoint(smart_node):
     #         raise HTTPException(
     #             status_code=500, detail=f"Error loading model: {str(e)}"
     #         )
-    #
-    # @app.get("/api/status")
-    # async def get_status():
-    #     """Get current model status"""
-    #     model_loaded = model is not None and tokenizer is not None
-    #     node_active = node is not None
-    #
-    #     device_info = {}
-    #     if torch.cuda.is_available():
-    #         device_info = {
-    #             "gpu_available": True,
-    #             "device_name": torch.cuda.get_device_name(0),
-    #             "memory_allocated": f"{torch.cuda.memory_allocated(0) / 1024 ** 2:.2f} MB",
-    #             "memory_reserved": f"{torch.cuda.memory_reserved(0) / 1024 ** 2:.2f} MB"
-    #         }
-    #     else:
-    #         device_info = {"gpu_available": False}
-    #
-    #     return {
-    #         "model_loaded": model_loaded,
-    #         "model_name": getattr(model, "name_or_path", None) if model else None,
-    #         "tensorlink_active": node_active,
-    #         "device_info": device_info
-    #     }
-    #
     #
     # @app.post("/api/unload_model")
     # async def unload_model():

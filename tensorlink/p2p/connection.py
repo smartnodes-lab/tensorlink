@@ -142,17 +142,19 @@ class Connection(threading.Thread):
                     # Print debug information for every chunk, or you can choose an interval.
                     if chunk_number % 100 == 0:
                         self.main_node.debug_print(
-                            f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                            f"Sent chunk {chunk_number} of {num_chunks}",
                             colour="magenta",
+                            tag="Connection",
                         )
 
                 self.sock.sendall(self.EOT_CHAR)
 
         except Exception as e:
             self.main_node.debug_print(
-                f"Connection -> connection send error: {e}",
+                f"Connection send error: {e}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="Connection",
             )
             self.stop()
 
@@ -177,12 +179,14 @@ class Connection(threading.Thread):
                     # Optionally print or log the number of bytes left
                     if chunk_number % 10 == 0:
                         self.main_node.debug_print(
-                            f"Connection -> Bytes left to send: {bytes_left}",
+                            f"Bytes left to send: {bytes_left}",
                             colour="magenta",
+                            tag="Connection",
                         )
                         self.main_node.debug_print(
-                            f"Connection -> Sent chunk {chunk_number} of {num_chunks}",
+                            f"Sent chunk {chunk_number} of {num_chunks}",
                             colour="magenta",
+                            tag="Connection",
                         )
 
                     chunk = file.read(chunk_size)
@@ -200,9 +204,10 @@ class Connection(threading.Thread):
 
         except Exception as e:
             self.main_node.debug_print(
-                f"Connection -> Error sending file: {e}",
+                f"Error sending file: {e}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="Connection",
             )
             self.stop()
 
@@ -256,9 +261,10 @@ class Connection(threading.Thread):
         """Handle standard connection errors."""
         self.terminate_flag.set()
         self.main_node.debug_print(
-            f"Connection -> Connection with {self.host}:{self.port} lost: {error}",
+            f"Connection with {self.host}:{self.port} lost: {error}",
             colour="bright_red",
             level=logging.ERROR,
+            tag="Connection",
         )
         self.main_node.disconnect_node(self.node_id)
 
@@ -266,23 +272,22 @@ class Connection(threading.Thread):
         """Handle unexpected connection errors."""
         self.terminate_flag.set()
         self.main_node.debug_print(
-            f"Connection -> Unexpected connection error: {error}",
+            f"Unexpected connection error: {error}",
             colour="bright_red",
             level=logging.ERROR,
+            tag="Connection",
         )
         self.main_node.disconnect_node(self.node_id)
 
     def _handle_connection_close(self, reason=None):
         """Handle graceful connection closure."""
-        message = "Connection -> Connection closed"
+        message = "Connection closed"
         if reason:
             message += f": {reason}"
 
         self.terminate_flag.set()
         self.main_node.debug_print(
-            message,
-            colour="bright_red",
-            level=logging.INFO,
+            message, colour="bright_red", level=logging.INFO, tag="Connection"
         )
         self.main_node.disconnect_node(self.node_id)
 
@@ -292,9 +297,10 @@ class Connection(threading.Thread):
                 f.write(buffer)
         except Exception as e:
             self.main_node.debug_print(
-                f"Connection -> file writing error: {e}",
+                f"File writing error: {e}",
                 level=logging.ERROR,
                 colour="bright_red",
+                tag="Connection",
             )
 
     def _cleanup_socket(self):
@@ -333,7 +339,7 @@ class Connection(threading.Thread):
 
                     except Exception as e:
                         self._handle_connection_close(
-                            f"Connection -> No activity from {self.host}:{self.port} for {elapsed:.1f} seconds: {e}"
+                            f"No activity from {self.host}:{self.port} for {elapsed:.1f} seconds: {e}"
                         )
                         break
 
