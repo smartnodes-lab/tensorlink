@@ -6,6 +6,7 @@ from tensorlink.crypto.rsa import (
 )
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.monitor import ConnectionMonitor
+from tensorlink.p2p.dht import DHT
 
 from logging.handlers import TimedRotatingFileHandler
 from dotenv import get_key, set_key
@@ -54,14 +55,11 @@ LEVEL_COLOURS = {
 
 
 BACKGROUND_COLOURS = {
-    "black": "\033[40m",
-    "red": "\033[41m",
-    "green": "\033[42m",
-    "Validator": "\033[43m",
+    "Validator": "\033[40m",
+    "Torchnode": "\033[41m",
     "Smartnode": "\033[44m",
     "User": "\033[45m",
-    "Worker": "\033[46m",
-    "white": "\033[47m",
+    "Worker": "\033[47m",
     "DHT": "\033[100m",
     "bright_red": "\033[101m",
     "bright_green": "\033[102m",
@@ -191,26 +189,6 @@ def _parse_initial_connection(connection: socket.socket) -> dict:
     }
 
 
-class Bucket:
-    """A bucket for storing local values in the Kademlia-inspired DHT"""
-
-    def __init__(self, distance_from_key, max_values):
-        self.values = []
-        self.distance_from_key = distance_from_key
-        self.max_values = max_values * (2**distance_from_key)
-
-    def is_full(self):
-        return len(self.values) >= self.max_values
-
-    def add_node(self, value):
-        if not self.is_full():
-            self.values.append(value)
-
-    def remove_node(self, value):
-        if value in self.values:
-            self.values.remove(value)
-
-
 class Smartnode(threading.Thread):
     """
     A P2P nodes secured by RSA encryption and smart contract validation for the Smartnodes ecosystem.
@@ -263,13 +241,6 @@ class Smartnode(threading.Thread):
         if debug_colour:
             self.debug_colour = debug_colour
 
-        # DHT Parameters
-        self.replication_factor = 3
-        self.bucket_size = 2
-        self.buckets = [Bucket(d, self.bucket_size) for d in range(256)]
-        self.routing_table = {}
-        self.requests = {}
-
         # More parameters for smart contract / p2p info
         self.role = role
         self.rsa_pub_key = get_rsa_pub_key(self.role, True)
@@ -280,6 +251,7 @@ class Smartnode(threading.Thread):
         self.workers = []
         self.users = []
         self.jobs = []
+        self.requests = {}
 
         self.sno_events = {
             name: Web3.keccak(text=sig).hex()
@@ -293,6 +265,9 @@ class Smartnode(threading.Thread):
             self.off_chain_test = True
 
         self.public_key = None
+
+        # DHT Storage
+        self.dht = DHT(self)
 
         if self.upnp:
             self._init_upnp()
@@ -486,7 +461,7 @@ class Smartnode(threading.Thread):
         requester = data[77:141].decode()
 
         # Query local DHT for requested value
-        value = self.query_dht(value_hash, requester)
+        value = self.dht.query(value_hash, requester)
 
         # Send response back to requesting node
         response = (
@@ -542,58 +517,6 @@ class Smartnode(threading.Thread):
 
     """Methods for DHT Query and Storage"""
 
-    def query_dht(self, key_hash, requester: str = None, ids_to_exclude: list = None):
-        """
-        Retrieve stored value from DHT or query the closest nodes to a given key.
-        * should be run in its own thread due to blocking RPC
-        """
-        if isinstance(key_hash, bytes):
-            key_hash = key_hash.decode()
-
-        self.debug_print(f"Querying DHT for {key_hash}", tag="Smartnode")
-        closest_node = None
-        closest_distance = float("inf")
-
-        # Find nearest nodes in our routing table
-        for node_hash, node in self.routing_table.items():
-            # Get XOR distance between keys
-            distance = calculate_xor(key_hash.encode(), node_hash.encode())
-
-            if distance < closest_distance:
-                if not ids_to_exclude or node_hash not in ids_to_exclude:
-                    closest_node = (node_hash, node)
-                    closest_distance = distance
-
-        if requester is None:
-            requester = self.rsa_key_hash
-
-        if closest_node is not None:
-            # The case where the stored value was not properly deleted (ie is None)
-            if closest_node[1] is None:
-                self._delete_item(closest_node[0])
-
-                # Get another closest nodes
-                return self.query_dht(key_hash, requester, ids_to_exclude)
-
-            # The case where we have the stored value
-            elif closest_node[0] == key_hash:
-                # The value is a stored data structure and we can return it
-                return closest_node[1]
-
-            # We don't have the stored value, and must route the request to the nearest nodes
-            else:
-                if closest_node[0] in self.validators:
-                    closest_node_hash = closest_node[1]["id"]
-                    return self.query_node(
-                        key_hash,
-                        self.nodes[closest_node_hash],
-                        requester,
-                        ids_to_exclude,
-                    )
-
-        else:
-            return None
-
     def query_node(
         self,
         key_hash: Union[str, bytes],
@@ -634,7 +557,7 @@ class Smartnode(threading.Thread):
 
                 # Re route request to the next closest nodes
                 self.requests[node.node_id].remove(key_hash)
-                return self.query_dht(key_hash, requester, ids_to_exclude)
+                return self.dht.query(key_hash, requester, ids_to_exclude)
 
             if ids_to_exclude and len(ids_to_exclude) > 1:
                 return None
@@ -642,28 +565,6 @@ class Smartnode(threading.Thread):
         return_val = self.requests[key_hash][-1]
 
         return return_val
-
-    def store_value(self, key: str, value: object, replicate: object = 0) -> object:
-        """Store value in routing table and replicate if specified"""
-        bucket_index = self.calculate_bucket_index(key)
-        bucket = self.buckets[bucket_index]
-
-        if not bucket.is_full() or key in bucket:
-            self.routing_table[key] = value
-            bucket.add_node(key)
-
-        if 5 > replicate > 0:
-            # TODO
-            # n_validators = self.get_validator_count()
-
-            while replicate > 0:
-                # random_id = random.randrange(1, n_validators + 1)
-
-                replicate -= 1
-                pass
-
-    def request_store_value(self):
-        pass
 
     def _store_request(self, node_id: str, key: str):
         """Stores a log of the request we have made to a nodes and for what value"""
@@ -675,38 +576,6 @@ class Smartnode(threading.Thread):
     def _remove_request(self, node_id: str, key: str):
         if node_id in self.requests:
             self.requests[node_id].remove(key)
-
-    def _delete_item(self, key: str):
-        """
-        Delete a key-value pair from the DHT.
-        """
-
-        if key in self.routing_table:
-            bucket_index = self.calculate_bucket_index(key)
-            bucket = self.buckets[bucket_index]
-            bucket.remove_node(key)
-
-            if key in self.nodes or self.jobs:
-                # Do not delete information related to active connections or jobs
-                return
-
-            del self.routing_table[key]
-            self.debug_print(f"Key {key} deleted from DHT.", colour="blue")
-        else:
-            self.debug_print(
-                f"Key {key} not found in DHT.",
-                colour="red",
-                level=logging.ERROR,
-            )
-
-    def calculate_bucket_index(self, key: str):
-        """
-        Find the index of a bucket given the key
-        """
-        key_int = int(key.encode(), 16)
-        bucket_index = key_int % len(self.buckets)
-
-        return bucket_index
 
     """Peer-to-peer methods"""
 
@@ -805,7 +674,7 @@ class Smartnode(threading.Thread):
 
         # Check node reputation from validator nodes
         if len(self.nodes) > 0 and self.off_chain_test is False:
-            dht_info = self.query_dht(
+            dht_info = self.dht.query(
                 node_info['node_id_hash'], ids_to_exclude=[node_info['node_id_hash']]
             )
 
@@ -1141,7 +1010,7 @@ class Smartnode(threading.Thread):
             return False
 
         # Retrieve or generate node information
-        stored_info = self.query_dht(node_info['node_id_hash']) or get_connection_info(
+        stored_info = self.dht.query(node_info['node_id_hash']) or get_connection_info(
             thread_client,
             main_port=thread_client.main_port,
             upnp=False if self.upnp is None else True,
@@ -1149,7 +1018,7 @@ class Smartnode(threading.Thread):
 
         # Store node details
         self.nodes[node_info['node_id_hash']] = thread_client
-        self.store_value(node_info['node_id_hash'], stored_info)
+        self.dht.store(node_info['node_id_hash'], stored_info)
 
         # Categorize node by role
         if node_info["role"] == "V":
@@ -1275,7 +1144,7 @@ class Smartnode(threading.Thread):
                 if connected:
                     candidates.append(id_hash)
                 else:
-                    self._delete_item(id_hash)
+                    self.dht.delete(id_hash)
 
         # Connect to additional randomly selected validators from the network
         n_validators = self.get_validator_count()
@@ -1290,10 +1159,10 @@ class Smartnode(threading.Thread):
             if validator_contract_info is not None:
                 is_active, id_hash = validator_contract_info
                 id_hash = id_hash.hex()
-                validator_p2p_info = self.query_dht(id_hash)
+                validator_p2p_info = self.dht.query(id_hash)
 
                 if validator_p2p_info is None:
-                    self._delete_item(id_hash)
+                    self.dht.delete(id_hash)
                     continue
 
                 # Connect to the validator's node and exchange information
@@ -1303,7 +1172,7 @@ class Smartnode(threading.Thread):
                 )
 
                 if not connected:
-                    self._delete_item(id_hash)
+                    self.dht.delete(id_hash)
                     continue
 
                 candidates.append(validator_id)

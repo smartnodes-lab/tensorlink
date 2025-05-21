@@ -1,6 +1,6 @@
 from tensorlink.ml.utils import get_gpu_memory, handle_output
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torchnode import Torchnode
+from tensorlink.p2p.torch_node import Torchnode
 
 import torch
 import torch.nn as nn
@@ -49,7 +49,7 @@ class Worker(Torchnode):
         self.role = "W"
         self.print_level = print_level
         self.loss = None
-        self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+        self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
         self.debug_print(
             f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
@@ -69,7 +69,7 @@ class Worker(Torchnode):
                 )
                 self.public_key = "0x1Bc3a15dfFa205AA24F6386D959334ac1BF27336"
 
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             if self.local_test is False:
                 attempts = 0
@@ -265,19 +265,19 @@ class Worker(Torchnode):
 
             # Collect current state
             for worker_id in self.workers:
-                worker = self.query_dht(worker_id)
+                worker = self.dht.query(worker_id)
                 current_data["workers"][worker_id] = worker
 
             for validator_id in self.validators:
-                validator = self.query_dht(validator_id)
+                validator = self.dht.query(validator_id)
                 current_data["validators"][validator_id] = validator
 
             for user_id in self.users:
-                user = self.query_dht(user_id)
+                user = self.dht.query(user_id)
                 current_data["users"][user_id] = user
 
             for job_id in self.jobs:
-                job = self.query_dht(job_id)
+                job = self.dht.query(job_id)
                 current_data["jobs"][job_id] = job
 
             # Save to the latest state file (overwriting previous version)
@@ -344,7 +344,7 @@ class Worker(Torchnode):
                         structured_state[category] = {
                             hash_key: data for hash_key, data in items.items()
                         }
-                        self.routing_table.update(items)
+                        self.dht.routing_table.update(items)
 
                 self.debug_print(
                     "DHT state loaded successfully.", level=logging.INFO, tag="Worker"
@@ -381,7 +381,7 @@ class Worker(Torchnode):
                 nodes.remove(node)
 
         for job_id in self.jobs:
-            job_data = self.query_dht(job_id)
+            job_data = self.dht.query(job_id)
 
             if job_data["active"] is False:
                 self.jobs.remove(job_id)

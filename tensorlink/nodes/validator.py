@@ -1,5 +1,5 @@
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torchnode import Torchnode
+from tensorlink.p2p.torch_node import Torchnode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.ml.utils import estimate_hf_model_memory
@@ -79,7 +79,7 @@ class Validator(Torchnode):
             self.contract_manager = ContractManager(
                 self, self.multi_sig_contract, self.chain, self.public_key
             )
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             time.sleep(0.1)
             (is_active, pub_key_hash) = self.contract.functions.getValidatorInfo(
@@ -309,7 +309,7 @@ class Validator(Torchnode):
     # job_data["timestamp"] = time.time()
     # job_data["last_seen"] = time.time()
     #
-    # self.store_value(job_id, job_data)
+    # self.dht.store(job_id, job_data)
     #
     # # Start monitor_job as a background task and store it in the list
     # job_monitor = JobMonitor(self)
@@ -371,7 +371,7 @@ class Validator(Torchnode):
     def _handle_job_req(self, data: bytes, node: Connection):
         job_req = json.loads(data[7:])
         # Get author of job listed on SC and confirm job and roles id TODO to be implemented post-alpha
-        node_info = self.query_dht(node.node_id)
+        node_info = self.dht.query(node.node_id)
 
         self.debug_print(
             f"User: {node.node_id} requested job -> JobRequest({job_req})",
@@ -436,14 +436,14 @@ class Validator(Torchnode):
 
         if user_id and user_id != self.rsa_key_hash:
             # Check that user doesnt have an active job already
-            user_info = self.query_dht(user_id, ids_to_exclude=[self.rsa_key_hash])
+            user_info = self.dht.query(user_id, keys_to_exclude=[self.rsa_key_hash])
 
             # Check for active job
             if user_info:
                 current_user_job_id = user_info.get("job")
 
                 if current_user_job_id:
-                    current_user_job = self.query_dht(current_user_job_id)
+                    current_user_job = self.dht.query(current_user_job_id)
 
                     if current_user_job and current_user_job["active"]:
                         return False
@@ -517,7 +517,7 @@ class Validator(Torchnode):
             )
             return
 
-        self.store_value(job_id, job_data)
+        self.dht.store(job_id, job_data)
         worker_connection_info = self._assign_workers_to_modules(
             modules,
             assigned_workers,
@@ -610,7 +610,7 @@ class Validator(Torchnode):
                     return None
 
             worker_connection_info[module_id] = [
-                (worker_id, self.query_dht(worker_id))
+                (worker_id, self.dht.query(worker_id))
                 for worker_id in worker_assignment
             ]
 
@@ -675,7 +675,7 @@ class Validator(Torchnode):
         job_data["timestamp"] = time.time()
         job_data["last_seen"] = time.time()
 
-        self.store_value(job_id, job_data)
+        self.dht.store(job_id, job_data)
 
         job_monitor = JobMonitor(self)
         t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
@@ -744,7 +744,7 @@ class Validator(Torchnode):
 
         # Worker accepted the job, update stats
         node.stats["gpu_memory"] -= module_size
-        job = self.query_dht(job_id)
+        job = self.dht.query(job_id)
         job["distribution"][module_id]["workers"] = node.node_id
         self.debug_print(
             f"Worker: '{worker_id}' recruited for job '{job_id}'", tag="Validator"
@@ -829,13 +829,13 @@ class Validator(Torchnode):
     #     active: bool = None,
     # ) -> bool:
     #     # Grab user and job information
-    #     job_info = self.query_dht(job_id)
+    #     job_info = self.dht.query(job_id)
     #
     #     if job_info:
     #         user_response = None
     #
     #         if user_id:
-    #             user_info = self.query_dht(user_id)
+    #             user_info = self.dht.query(user_id)
     #
     #             if user_info:
     #                 # Connect to user and cross-validate job info
@@ -966,11 +966,11 @@ class Validator(Torchnode):
             for category in ["workers", "validators", "users", "jobs"]:
                 collection = getattr(self, category)
                 for entity_id in collection:
-                    current_data[category][entity_id] = self.query_dht(entity_id)
+                    current_data[category][entity_id] = self.dht.query(entity_id)
 
             if self.contract_manager:
                 for proposal_id in self.contract_manager.proposals:
-                    current_data["proposals"][proposal_id] = self.query_dht(proposal_id)
+                    current_data["proposals"][proposal_id] = self.dht.query(proposal_id)
 
             # Save to the latest state file (overwriting previous version)
             with open(LATEST_STATE_FILE, "w") as f:
@@ -1038,7 +1038,7 @@ class Validator(Torchnode):
                         structured_state[category] = {
                             hash_key: data for hash_key, data in items.items()
                         }
-                        self.routing_table.update(items)
+                        self.dht.routing_table.update(items)
 
                 self.debug_print(
                     "SmartNode -> DHT state loaded successfully.",

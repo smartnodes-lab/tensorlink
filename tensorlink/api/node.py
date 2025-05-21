@@ -83,7 +83,7 @@ def create_endpoint(smart_node):
 
     @app.get("/stats")
     async def get_network_stats():
-        return smart_node.get_tensorlink_status
+        return smart_node.get_tensorlink_status()
 
     app.include_router(router)
 

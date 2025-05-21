@@ -1,5 +1,5 @@
 from tensorlink.p2p.connection import Connection
-from tensorlink.p2p.torchnode import Torchnode
+from tensorlink.p2p.torch_node import Torchnode
 
 from dotenv import get_key
 import hashlib
@@ -73,7 +73,7 @@ class User(Torchnode):
                 )
                 self.public_key = "0x1Bc3a15dfFa205AA24F6386D959334ac1BF27336"
 
-            self.store_value(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+            self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
             if self.local_test is False:
                 attempts = 0
@@ -191,7 +191,7 @@ class User(Torchnode):
         """
         try:
             job_id = self.jobs[-1]
-            job_data = self.query_dht(job_id)
+            job_data = self.dht.query(job_id)
 
             if job_data and node.node_id in job_data["seed_validators"]:
                 self.debug_print(
@@ -233,7 +233,7 @@ class User(Torchnode):
                             )
 
                 # Update DHT with new worker assignments
-                self.store_value(job_id, job_data)
+                self.dht.store(job_id, job_data)
                 if node.node_id in self.requests:
                     if job_id in self.requests[node.node_id]:
                         self.requests[node.node_id].remove(job_id)
@@ -344,7 +344,7 @@ class User(Torchnode):
         # Get unique job id given current parameters
         job_hash = hashlib.sha256(json.dumps(job_request).encode()).hexdigest()
         job_request["id"] = job_hash
-        self.store_value(job_hash, job_request)
+        self.dht.store(job_hash, job_request)
         self.jobs.append(job_hash)
 
         self.debug_print(
@@ -365,7 +365,7 @@ class User(Torchnode):
             t.join()
 
         # Get updated job info
-        job_request = self.query_dht(job_hash)
+        job_request = self.dht.query(job_hash)
         self.debug_print(f"Received response from validator: {job_request}", tag="User")
         distribution = job_request["distribution"]
 

@@ -112,7 +112,7 @@ class ContractManager:
         )
 
         # Query network for the detailed proposal info
-        proposal_data = self.node.query_dht(proposal_hash)
+        proposal_data = self.node.dht.query(proposal_hash)
 
         # If no proposal is found
         if proposal_data is None:
@@ -142,7 +142,7 @@ class ContractManager:
         #             decode(["address"], call_data)[0]
         #         )
         #         node_hash = self.contract.functions.getValidatorBytes(node_address).call().hex()
-        #         node_info = self.query_dht(node_hash)
+        #         node_info = self.dht.query(node_hash)
         #
         #         if node_info:
         #             node_host, node_port = node_info["host"], node_info["port"]
@@ -256,7 +256,7 @@ class ContractManager:
         validators_to_remove = []
 
         for validator in self.node.validators_to_clear:
-            node_info = self.node.query_dht(validator)
+            node_info = self.node.dht.query(validator)
             if not node_info:
                 continue
 
@@ -282,7 +282,7 @@ class ContractManager:
         job_workers = []
 
         for job_id in self.jobs_to_complete:
-            job = self.node.query_dht(job_id)
+            job = self.node.dht.query(job_id)
             if not job:
                 continue
 
@@ -372,7 +372,7 @@ class ContractManager:
                 "total_workers": total_workers,
             }
             proposal_hash = self._hash_proposal_data(proposal)
-            self.node.store_value(proposal_hash.hex(), proposal)
+            self.node.dht.store(proposal_hash.hex(), proposal)
             self.proposals[proposal_hash.hex()] = proposal
 
             # Submit proposal
@@ -428,7 +428,7 @@ class ContractManager:
 
     def _get_worker_address(self, worker_id: str) -> Optional[str]:
         """Get the blockchain address for a worker."""
-        worker_info = self.node.query_dht(worker_id)
+        worker_info = self.node.dht.query(worker_id)
         if not worker_info:
             return None
 

@@ -173,7 +173,7 @@ class JobMonitor:
                             colour="blue",
                         )
                         job_data["last_seen"] = time.time()
-                        self.node.routing_table[job_id] = job_data
+                        self.node.dht.routing_table[job_id] = job_data
 
                 except Exception as e:
                     self.node.debug_print(
@@ -205,7 +205,7 @@ class JobMonitor:
     def _check_single_worker(self, worker: str, module_id: str) -> bool:
         """Enhanced worker check with ML proof of work verification."""
         try:
-            worker_info = self.node.query_dht(worker)
+            worker_info = self.node.dht.query(worker)
             connected = self.node.connect_node(
                 worker.encode(), worker_info["host"], worker_info["port"]
             )
@@ -354,7 +354,7 @@ class JobMonitor:
     def _get_job_data(self, job_id: str) -> Optional[Dict]:
         """Retrieve and validate job data."""
         try:
-            return self.node.query_dht(job_id)
+            return self.node.dht.query(job_id)
         except Exception as e:
             self.node.debug_print(
                 f"Failed to retrieve job data: {str(e)}",
@@ -367,7 +367,7 @@ class JobMonitor:
         """Verify user connection and job activity status."""
         try:
             if job_data["author"] != self.node.rsa_key_hash:
-                user_data = self.node.query_dht(job_data["author"])
+                user_data = self.node.dht.query(job_data["author"])
                 connected = self.node.connect_node(
                     job_data["author"], user_data["host"], user_data["port"]
                 )
@@ -536,7 +536,7 @@ class JobMonitor:
 
             # Notify job owner
             # try:
-            #     user_data = self.node.query_dht(job_data["author"])
+            #     user_data = self.node.dht.query(job_data["author"])
             #     if user_data:
             #         connected = self.node.connect_node(
             #             job_data["author"].encode(),
