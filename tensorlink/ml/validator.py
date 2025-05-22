@@ -260,6 +260,7 @@ class DistributedValidator(DistributedWorker):
                 self.modules[module_id].distribute_model(distribution)
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
+        # If not, check if we can spin up a model
         else:
             if model_name in self.models:
                 time.sleep(30)
@@ -284,5 +285,4 @@ class DistributedValidator(DistributedWorker):
 
     def main_loop(self):
         self.check_node()
-        super().main_loop()
         time.sleep(0.005)
