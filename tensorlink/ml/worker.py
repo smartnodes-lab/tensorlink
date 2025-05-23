@@ -531,6 +531,7 @@ class DistributedWorker:
         or model update requests, and then processes any outstanding forwards or backwards passes on the loaded modules
         """
         # Check for new modules to load
+
         args = self.send_request("check_module", None)
 
         # If we have received model info now load the model in this process

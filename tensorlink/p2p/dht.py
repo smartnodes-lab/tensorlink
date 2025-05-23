@@ -5,7 +5,6 @@ from typing import Union, Optional, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tensorlink.p2p.smart_node import Smartnode
-    from tensorlink.p2p.connection import Connection
 
 
 class Bucket:
@@ -55,7 +54,7 @@ class DHT:
         key: Union[str, bytes],
         requester: Optional[str] = None,
         keys_to_exclude: Optional[List[str]] = None,
-    ) -> Optional[str]:
+    ) -> Optional[Union[str | dict]]:
         """
         Retrieve stored value from DHT or query the closest nodes to a given key.
 
@@ -114,7 +113,7 @@ class DHT:
                     # Only query values from other validators
                     if node_hash in self.node.validators:
                         closest_node_id = node_value["id"]
-                        return self.query_node(
+                        return self.node.query_node(
                             key,
                             self.node.nodes[closest_node_id],
                             requester,
@@ -157,25 +156,6 @@ class DHT:
             self.node.debug_print(
                 f"Key {key} deleted from DHT.", colour="blue", tag="DHT"
             )
-
-    def query_node(
-        self,
-        key: Union[str, bytes],
-        node: Connection,
-        requester: Union[str, bytes] = None,
-        ids_to_exclude: Optional[List] = None,
-    ):
-        """Query a specific nodes for a value"""
-        if requester is None:
-            requester = self.node.rsa_key_hash
-
-        if node.terminate_flag.is_set():
-            return
-
-        if isinstance(key, bytes):
-            key = key.decode()
-        if isinstance(requester, bytes):
-            requester = requester.decode()
 
     def calculate_bucket_index(self, key: str):
         """Find the index of a bucket in the DHT given the key"""

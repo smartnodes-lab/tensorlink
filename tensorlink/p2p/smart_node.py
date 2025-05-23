@@ -156,6 +156,7 @@ def get_connection_info(node, main_port=None, upnp=True):
         "role": node.role,
         "id": node.node_id,
         "reputation": node.reputation,
+        "last_seen": time.time(),
     }
 
     return info
@@ -525,17 +526,6 @@ class Smartnode(threading.Thread):
         ids_to_exclude: Optional[List] = None,
     ):
         """Query a specific nodes for a value"""
-        if requester is None:
-            requester = self.rsa_key_hash
-
-        if node.terminate_flag.is_set():
-            return
-
-        if isinstance(key_hash, bytes):
-            key_hash = key_hash.decode()
-        if isinstance(requester, bytes):
-            requester = requester.decode()
-
         start_time = time.time()
         message = b"REQUEST-VALUE" + key_hash.encode() + requester.encode()
         self.send_to_node(node, message)
@@ -1427,6 +1417,12 @@ class Smartnode(threading.Thread):
             f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB",
             tag="Smartnode",
         )
+
+        # Update last seen value
+        node_info = self.dht.query(node.node_id)
+        if isinstance(node_info, dict):
+            node_info["last_seen"] = time.time()
+
         self.handle_data(data, node)
 
     def ping_node(self, n: Connection):

@@ -2,6 +2,7 @@ from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import Torchnode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
+from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_hf_model_memory
 from tensorlink.api.node import create_endpoint, GenerationRequest
 
@@ -12,7 +13,6 @@ import logging
 import queue
 import json
 import time
-import os
 
 
 STATE_FILE = "logs/dht_state.json"
@@ -66,6 +66,8 @@ class Validator(Torchnode):
         self.endpoint = None
         self.endpoint_requests = {"generate": []}
 
+        self.keeper = Keeper(self)
+
         if off_chain_test is False:
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if self.public_key is None:
@@ -107,7 +109,7 @@ class Validator(Torchnode):
             self.add_port_mapping(64747, 64747)
 
         # Finally, load up previous saved state if any
-        self.load_dht_state()
+        self.keeper.load_previous_state()
 
     def handle_data(self, data, node: Connection):
         """
@@ -930,9 +932,9 @@ class Validator(Torchnode):
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
             if counter % 300 == 0:
-                self.save_dht_state()
+                self.keeper.write_state()
             if counter % 120 == 0:
-                self.clean_node()
+                self.keeper.clean_node()
                 self.clean_port_mappings()
             if counter % 180 == 0:
                 self.print_status()
@@ -941,153 +943,8 @@ class Validator(Torchnode):
             counter += 1
 
     def stop(self):
-        self.save_dht_state()
+        self.keeper.write_state()
         super().stop()
-
-    def save_dht_state(self, latest_only=False):
-        """
-        Serialize and save the DHT state to a file.
-
-        Args:
-            latest_only (bool): If True, save only to the latest state file.
-                               If False, save to both archive and latest files.
-        """
-        try:
-            # Prepare current state data
-            current_data = {
-                "workers": {},
-                "validators": {},
-                "users": {},
-                "jobs": {},
-                "proposals": {},
-                "timestamp": time.time(),  # Add timestamp
-            }
-
-            for category in ["workers", "validators", "users", "jobs"]:
-                collection = getattr(self, category)
-                for entity_id in collection:
-                    current_data[category][entity_id] = self.dht.query(entity_id)
-
-            if self.contract_manager:
-                for proposal_id in self.contract_manager.proposals:
-                    current_data["proposals"][proposal_id] = self.dht.query(proposal_id)
-
-            # Save to the latest state file (overwriting previous version)
-            with open(LATEST_STATE_FILE, "w") as f:
-                json.dump(current_data, f, indent=4)
-
-            # Archive state file if not latest_only
-            if not latest_only:
-                # Load existing archive data if available
-                os.makedirs(STATE_FILE)
-                existing_data = {
-                    "workers": {},
-                    "validators": {},
-                    "users": {},
-                    "jobs": {},
-                    "proposals": {},
-                }
-
-                if os.path.exists(STATE_FILE):
-                    try:
-                        with open(STATE_FILE, "r") as f:
-                            existing_data = json.load(f)
-                    except json.JSONDecodeError:
-                        self.debug_print(
-                            "SmartNode -> Existing state file read error.",
-                            level=logging.WARNING,
-                            colour="red",
-                            tag="Validator",
-                        )
-
-                # Update the archive with current data
-                for category in ["workers", "validators", "users", "jobs", "proposals"]:
-                    existing_data[category].update(current_data[category])
-
-                # Save updated archive data
-                with open(STATE_FILE, "w") as f:
-                    json.dump(existing_data, f, indent=4)
-
-            self.debug_print(
-                "SmartNode -> DHT state saved successfully to "
-                + f"{'both files' if not latest_only else 'latest file only'}.",
-                level=logging.INFO,
-                colour="green",
-                tag="Validator",
-            )
-
-        except Exception as e:
-            self.debug_print(
-                f"SmartNode -> Error saving DHT state: {e}",
-                colour="bright_red",
-                level=logging.WARNING,
-                tag="Validator",
-            )
-
-    def load_dht_state(self):
-        """Load the DHT state from a file."""
-        if os.path.exists(LATEST_STATE_FILE):
-            try:
-                with open(LATEST_STATE_FILE, "r") as f:
-                    state = json.load(f)
-
-                # Restructure state: list only hash and corresponding data
-                structured_state = {}
-                for category, items in state.items():
-                    if category != "timestamp":
-                        structured_state[category] = {
-                            hash_key: data for hash_key, data in items.items()
-                        }
-                        self.dht.routing_table.update(items)
-
-                self.debug_print(
-                    "SmartNode -> DHT state loaded successfully.",
-                    level=logging.INFO,
-                    tag="Validator",
-                )
-
-            except Exception as e:
-                self.debug_print(
-                    f"SmartNode -> Error loading DHT state: {e}",
-                    colour="bright_red",
-                    level=logging.INFO,
-                    tag="Validator",
-                )
-        else:
-            self.debug_print(
-                "SmartNode -> No DHT state file found.",
-                level=logging.INFO,
-                tag="Validator",
-            )
-
-    def clean_node(self):
-        """Periodically clean up node storage"""
-
-        def clean_nodes(nodes):
-            nodes_to_remove = []
-            for node_id in nodes:
-                # Remove any ghost ids in the list
-                if node_id not in self.nodes:
-                    nodes_to_remove.append(node_id)
-
-                # Remove any terminated connections
-                elif self.nodes[node_id].terminate_flag.is_set():
-                    role = self.nodes[node_id].role
-                    nodes_to_remove.append(node_id)
-                    del self.nodes[node_id]
-
-                    if role == "W":
-                        del self.all_workers[node_id]
-
-            for node in nodes_to_remove:
-                nodes.remove(node)
-
-            # TODO method / request to delete job after certain time or by request of the user.
-            #   Perhaps after a job is finished there is a delete request
-
-        clean_nodes(self.workers)
-        clean_nodes(self.validators)
-        clean_nodes(self.users)
 
     def print_status(self):
         self.print_base_status()
