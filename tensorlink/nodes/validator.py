@@ -931,8 +931,11 @@ class Validator(Torchnode):
         counter = 0
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            if counter % 300 == 0:
+            if counter % 1800 == 0:
                 self.keeper.write_state()
+            elif counter % 300 == 0:
+                self.keeper.write_state(latest_only=True)
+
             if counter % 120 == 0:
                 self.keeper.clean_node()
                 self.clean_port_mappings()
@@ -949,6 +952,7 @@ class Validator(Torchnode):
     def print_status(self):
         self.print_base_status()
         print(f" Current Proposal: {self.current_proposal}")
+        print(f" Network Summy: {self.keeper.network_stats}")
         print("=============================================\n")
 
     def get_tensorlink_status(self):
