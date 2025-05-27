@@ -62,8 +62,8 @@ BACKGROUND_COLOURS = {
     "Worker": "\033[47m",
     "DHT": "\033[100m",
     "bright_red": "\033[101m",
-    "bright_green": "\033[102m",
-    "bright_yellow": "\033[103m",
+    "Job Monitor": "\033[102m",
+    "Keep": "\033[103m",
     "bright_blue": "\033[104m",
     "bright_magenta": "\033[105m",
     "bright_cyan": "\033[106m",
@@ -526,6 +526,13 @@ class Smartnode(threading.Thread):
         ids_to_exclude: Optional[List] = None,
     ):
         """Query a specific nodes for a value"""
+        if requester is None:
+            requester = self.rsa_key_hash
+        if isinstance(key_hash, bytes):
+            key_hash = key_hash.decode()
+        if isinstance(requester, bytes):
+            requester = requester.decode()
+
         start_time = time.time()
         message = b"REQUEST-VALUE" + key_hash.encode() + requester.encode()
         self.send_to_node(node, message)

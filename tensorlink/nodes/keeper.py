@@ -137,11 +137,18 @@ class Keeper:
         current_time = time.time()
         ninety_days_ago = current_time - THIRTY_DAYS_SECONDS * 3
 
-        # Find daily stats that are older than 90 days and not yet archived
+        # Get today's date to avoid archiving current day
+        today = datetime.fromtimestamp(current_time).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        today_timestamp = today.timestamp()
+
+        # Find daily stats that are older than 90 days and not from today
         daily_to_archive = [
             stat
             for stat in self.network_stats["daily"]
             if stat["timestamp"] < ninety_days_ago
+            and stat["timestamp"] < today_timestamp
         ]
 
         if not daily_to_archive:
@@ -189,15 +196,28 @@ class Keeper:
                 / len(daily_stats),
                 "avg_proposals": sum(stat["proposals"] for stat in daily_stats)
                 / len(daily_stats),
+                "avg_available_capacity": sum(
+                    stat.get("available_capacity", 0) for stat in daily_stats
+                )
+                / len(daily_stats),
+                "avg_used_capacity": sum(
+                    stat.get("used_capacity", 0) for stat in daily_stats
+                )
+                / len(daily_stats),
+                "avg_total_capacity": sum(
+                    stat.get("total_capacity", 0) for stat in daily_stats
+                )
+                / len(daily_stats),
             }
 
             self.network_stats["weekly"].append(weekly_stat)
 
-        # Remove archived daily stats
+        # Remove archived daily stats (but preserve today's data)
         self.network_stats["daily"] = [
             stat
             for stat in self.network_stats["daily"]
             if stat["timestamp"] >= ninety_days_ago
+            or stat["timestamp"] >= today_timestamp
         ]
 
         # Sort weekly stats by week_start timestamp
@@ -223,23 +243,15 @@ class Keeper:
 
         # Check if we already have stats for today
         today_str = current_date.strftime("%Y-%m-%d")
-        existing_stat = next(
-            (
-                stat
-                for stat in self.network_stats["daily"]
-                if stat.get("date") == today_str
-            ),
-            None,
-        )
+        existing_stat_index = None
+        existing_stat = None
 
-        # Only update once per day and if we don't already have today's stats
-        if existing_stat is not None:
-            return
-
-        if current_time - self.last_daily_stats_update < ONE_DAY_SECONDS:
-            return
-
-        self.last_daily_stats_update = current_time
+        # Find existing stat for today
+        for i, stat in enumerate(self.network_stats["daily"]):
+            if stat.get("date") == today_str:
+                existing_stat = stat
+                existing_stat_index = i
+                break
 
         try:
             current_data = self._build_current_state()
@@ -263,9 +275,13 @@ class Keeper:
                 },
             }
 
+            # Calculate worker capacities
+            capacity_info = self._calculate_worker_capacities()
+
             daily_stat = {
                 "date": current_date.strftime("%Y-%m-%d"),
                 "timestamp": current_date.timestamp(),
+                "last_updated": current_time,
                 "workers": _count_active_entities_for_date(
                     all_entities["workers"], current_date
                 ),
@@ -281,22 +297,34 @@ class Keeper:
                 "proposals": _count_active_entities_for_date(
                     all_entities["proposals"], current_date
                 ),
+                "available_capacity": capacity_info["available_capacity"],
+                "used_capacity": capacity_info["used_capacity"],
+                "total_capacity": capacity_info["total_capacity"],
             }
 
-            self.network_stats["daily"].append(daily_stat)
-            self.network_stats["daily"].sort(key=lambda x: x["timestamp"])
+            if existing_stat is not None:
+                self.network_stats["daily"][existing_stat_index] = daily_stat
+                action = "Updated"
+            else:
+                self.network_stats["daily"].append(daily_stat)
+                self.network_stats["daily"].sort(key=lambda x: x["timestamp"])
+                action = "Created"
 
             self._archive_daily_to_weekly()
             self._save_network_stats()
 
             self.node.debug_print(
-                f"Daily statistics updated - Workers: {daily_stat['workers']}, "
+                f"{action} daily statistics updated - Workers: {daily_stat['workers']}, "
                 f"Validators: {daily_stat['validators']}, Users: {daily_stat['users']}, "
-                f"Jobs: {daily_stat['jobs']}, Proposals: {daily_stat['proposals']}",
+                f"Jobs: {daily_stat['jobs']}, Proposals: {daily_stat['proposals']}, "
+                f"Available Capacity: {daily_stat['available_capacity']}, "
+                f"Used Capacity: {daily_stat['used_capacity']}",
                 level=logging.INFO,
                 colour="cyan",
                 tag="Keeper",
             )
+
+            self.last_daily_stats_update = current_time
 
         except Exception as e:
             self.node.debug_print(
@@ -306,11 +334,104 @@ class Keeper:
                 tag="Keeper",
             )
 
+    def _calculate_worker_capacities(self) -> Dict:
+        """
+        Calculate total available and used capacity from worker data.
+
+        Args:
+            workers_data: Dictionary of worker_id -> worker_data
+
+        Returns:
+            Dictionary with available_capacity and used_capacity
+        """
+        total_available = 0
+        total_used = 0
+
+        if hasattr(self.node, "all_workers"):
+            for worker_id, worker_data in self.node.all_workers.items():
+                # Get available capacity for this worker
+                total = worker_data.get('total_gpu_memory', 0)
+                used = worker_data.get('gpu_memory', 0)
+                available = total - used
+                total_available += available
+                total_used += used
+
+        return {
+            'available_capacity': total_available,
+            'used_capacity': total_used,
+            'total_capacity': total_available + total_used,
+        }
+
     def _save_network_stats(self):
         """Save network statistics to file."""
         os.makedirs(os.path.dirname(NETWORK_STATS), exist_ok=True)
         with open(NETWORK_STATS, "w") as f:
             json.dump(self.network_stats, f, indent=4)
+
+    def get_current_statistics(self) -> Dict:
+        """
+        Get the most current statistics, including live-updated daily data for today.
+
+        Returns:
+            Dictionary with the most up-to-date statistics
+        """
+        try:
+            # Force update today's statistics first
+            self._update_daily_statistics()
+
+            # Get today's data
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_stats = None
+
+            for stat in self.network_stats["daily"]:
+                if stat.get("date") == today_str:
+                    today_stats = stat
+                    break
+
+            if today_stats:
+                return {
+                    "date": today_stats["date"],
+                    "timestamp": today_stats["timestamp"],
+                    "last_updated": today_stats.get(
+                        "last_updated", today_stats["timestamp"]
+                    ),
+                    "workers": today_stats["workers"],
+                    "validators": today_stats["validators"],
+                    "users": today_stats["users"],
+                    "jobs": today_stats["jobs"],
+                    "proposals": today_stats["proposals"],
+                    "available_capacity": today_stats["available_capacity"],
+                    "used_capacity": today_stats["used_capacity"],
+                    "total_capacity": today_stats["total_capacity"],
+                    "is_live": True,  # Indicates this is live-updating data
+                }
+            else:
+                # Fallback to network summary current data
+                summary = self.get_network_summary()
+                current = summary.get("current", {})
+                return {
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "timestamp": time.time(),
+                    "last_updated": time.time(),
+                    "workers": current.get("workers", 0),
+                    "validators": current.get("validators", 0),
+                    "users": current.get("users", 0),
+                    "jobs": current.get("jobs", 0),
+                    "proposals": current.get("proposals", 0),
+                    "available_capacity": current.get("available_capacity", 0),
+                    "used_capacity": current.get("used_capacity", 0),
+                    "total_capacity": current.get("total_capacity", 0),
+                    "is_live": True,
+                }
+
+        except Exception as e:
+            self.node.debug_print(
+                f"Error getting current statistics: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="Keeper",
+            )
+            return {"error": str(e)}
 
     def get_daily_statistics(self, days: int = 30) -> list:
         """
@@ -398,6 +519,28 @@ class Keeper:
                     all_entities["proposals"], current_date
                 ),
             }
+
+            # Calculate worker capacities for current summary
+            try:
+                capacity_info = self._calculate_worker_capacities()
+                current_counts.update(
+                    {
+                        "available_capacity": capacity_info["available_capacity"],
+                        "used_capacity": capacity_info["used_capacity"],
+                        "total_capacity": capacity_info["total_capacity"],
+                    }
+                )
+            except Exception as e:
+                self.node.debug_print(
+                    f"Error calculating worker capacities for summary: {e}",
+                    colour="bright_yellow",
+                    level=logging.WARNING,
+                    tag="Keeper",
+                )
+                # Provide default values if capacity calculation fails
+                current_counts.update(
+                    {"available_capacity": 0, "used_capacity": 0, "total_capacity": 0}
+                )
 
             # Recent trends (last 7 days and 4 weeks)
             recent_daily = self.get_daily_statistics(7)
@@ -564,6 +707,7 @@ class Keeper:
             "users": {},
             "jobs": {},
             "proposals": {},
+            "capacities": {},
             "timestamp": time.time(),
         }
 
@@ -572,6 +716,29 @@ class Keeper:
 
         # Load proposals if available
         self._load_proposals(current_data)
+
+        # Calculate and add capacity information
+        try:
+            capacity_info = self._calculate_worker_capacities()
+            current_data.update(
+                {
+                    "available_capacity": capacity_info["available_capacity"],
+                    "used_capacity": capacity_info["used_capacity"],
+                    "total_capacity": capacity_info["total_capacity"],
+                }
+            )
+
+        except Exception as e:
+            self.node.debug_print(
+                f"Error calculating worker capacities for current state: {e}",
+                colour="bright_yellow",
+                level=logging.WARNING,
+                tag="Keeper",
+            )
+            # Provide default values if capacity calculation fails
+            current_data.update(
+                {"available_capacity": 0, "used_capacity": 0, "total_capacity": 0}
+            )
 
         return current_data
 
@@ -602,6 +769,12 @@ class Keeper:
         for category in ["workers", "validators", "users", "jobs", "proposals"]:
             existing_data[category].update(current_data[category])
 
+        # Update capacity information
+        existing_data["available_capacity"] = current_data.get("available_capacity", 0)
+        existing_data["used_capacity"] = current_data.get("used_capacity", 0)
+        existing_data["total_capacity"] = current_data.get("total_capacity", 0)
+        existing_data["timestamp"] = current_data.get("timestamp", time.time())
+
         # Save updated archive data
         with open(ALL_STATES, "w") as f:
             json.dump(existing_data, f, indent=4)
@@ -614,6 +787,9 @@ class Keeper:
             "users": {},
             "jobs": {},
             "proposals": {},
+            "available_capacity": 0,
+            "used_capacity": 0,
+            "total_capacity": 0,
         }
 
         if not os.path.exists(ALL_STATES):
@@ -621,7 +797,17 @@ class Keeper:
 
         try:
             with open(ALL_STATES, "r") as f:
-                return json.load(f)
+                archive_data = json.load(f)
+
+            # Ensure capacity fields exist in loaded data (backwards compatibility)
+            if "available_capacity" not in archive_data:
+                archive_data["available_capacity"] = 0
+            if "used_capacity" not in archive_data:
+                archive_data["used_capacity"] = 0
+            if "total_capacity" not in archive_data:
+                archive_data["total_capacity"] = 0
+
+            return archive_data
         except json.JSONDecodeError:
             self.node.debug_print(
                 "Existing state file read error.",

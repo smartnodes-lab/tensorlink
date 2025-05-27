@@ -6,7 +6,9 @@ from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_hf_model_memory
 from tensorlink.api.node import create_endpoint, GenerationRequest
 
+from datetime import datetime
 from dotenv import get_key
+from typing import Dict
 import threading
 import hashlib
 import logging
@@ -952,7 +954,7 @@ class Validator(Torchnode):
     def print_status(self):
         self.print_base_status()
         print(f" Current Proposal: {self.current_proposal}")
-        print(f" Network Summy: {self.keeper.network_stats}")
+        print(f" Network Summary: {self.get_network_status()}")
         print("=============================================\n")
 
     def get_tensorlink_status(self):
@@ -961,7 +963,7 @@ class Validator(Torchnode):
             free_models = models["FREE_MODELS"]
 
         total_capacity = int(
-            sum(worker["total_gpu_memory"] for worker in self.node.all_workers.values())
+            sum(worker["total_gpu_memory"] for worker in self.all_workers.values())
         )
 
         return {
@@ -973,3 +975,260 @@ class Validator(Torchnode):
             "used_capacity": total_capacity - sum(self.worker_memories.values()),
             "models": free_models,
         }
+
+    def get_network_status(
+        self, days: int = 30, include_weekly: bool = False, include_summary: bool = True
+    ) -> Dict:
+        """
+        Get network statistics formatted for API consumption and charting.
+
+        Args:
+            days: Number of days of daily statistics to retrieve (max 90)
+            include_weekly: Whether to include weekly aggregated data
+            include_summary: Whether to include current network summary
+
+        Returns:
+            Dictionary containing network statistics ready for API/charting use
+        """
+        try:
+            if not hasattr(self, 'keeper') or self.keeper is None:
+                return {"error": "Keeper not initialized"}
+
+            result = {}
+
+            # Get daily statistics
+            daily_stats = self.keeper.get_daily_statistics(days)
+            # current_stats = self.keeper.get_current_statistics()
+
+            # Format daily data for charting
+            daily_formatted = {
+                "labels": [stat["date"] for stat in daily_stats],
+                "datasets": {
+                    "workers": [stat["workers"] for stat in daily_stats],
+                    "validators": [stat["validators"] for stat in daily_stats],
+                    "users": [stat["users"] for stat in daily_stats],
+                    "jobs": [stat["jobs"] for stat in daily_stats],
+                    "proposals": [stat["proposals"] for stat in daily_stats],
+                },
+                "timestamps": [stat["timestamp"] for stat in daily_stats],
+            }
+
+            result["daily"] = daily_formatted
+
+            # Include weekly data if requested
+            if include_weekly:
+                weekly_stats = self.keeper.get_weekly_statistics(12)  # Last 12 weeks
+
+                weekly_formatted = {
+                    "labels": [stat["week"] for stat in weekly_stats],
+                    "datasets": {
+                        "avg_workers": [stat["avg_workers"] for stat in weekly_stats],
+                        "avg_validators": [
+                            stat["avg_validators"] for stat in weekly_stats
+                        ],
+                        "avg_users": [stat["avg_users"] for stat in weekly_stats],
+                        "avg_jobs": [stat["avg_jobs"] for stat in weekly_stats],
+                        "avg_proposals": [
+                            stat["avg_proposals"] for stat in weekly_stats
+                        ],
+                    },
+                    "week_starts": [stat["week_start"] for stat in weekly_stats],
+                    "week_ends": [stat["week_end"] for stat in weekly_stats],
+                }
+
+                result["weekly"] = weekly_formatted
+
+            # Include current summary if requested
+            if include_summary:
+                summary = self.keeper.get_network_summary()
+                result["summary"] = summary
+
+            # Add metadata
+            result["metadata"] = {
+                "total_days_available": len(self.keeper.network_stats["daily"]),
+                "total_weeks_available": len(self.keeper.network_stats["weekly"]),
+                "requested_days": days,
+                "generated_at": time.time(),
+                "generated_at_iso": datetime.now().isoformat(),
+            }
+
+            return result
+
+        except Exception as e:
+            self.debug_print(
+                f"Error retrieving network stats for API: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="NetworkStats",
+            )
+            return {"error": str(e)}
+
+    def get_network_chart_data(self, chart_type: str = "daily", days: int = 30) -> Dict:
+        """
+        Get network statistics specifically formatted for Chart.js or similar charting libraries.
+
+        Args:
+            chart_type: Type of chart data ("daily", "weekly", or "trend")
+            days: Number of days to include for daily charts
+
+        Returns:
+            Dictionary formatted for direct use in charting libraries
+        """
+        try:
+            if not hasattr(self, 'keeper') or self.keeper is None:
+                return {"error": "Keeper not initialized"}
+
+            if chart_type == "daily":
+                daily_stats = self.keeper.get_daily_statistics(days)
+
+                return {
+                    "type": "line",
+                    "data": {
+                        "labels": [stat["date"] for stat in daily_stats],
+                        "datasets": [
+                            {
+                                "label": "Workers",
+                                "data": [stat["workers"] for stat in daily_stats],
+                                "borderColor": "rgb(75, 192, 192)",
+                                "backgroundColor": "rgba(75, 192, 192, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Validators",
+                                "data": [stat["validators"] for stat in daily_stats],
+                                "borderColor": "rgb(255, 99, 132)",
+                                "backgroundColor": "rgba(255, 99, 132, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Users",
+                                "data": [stat["users"] for stat in daily_stats],
+                                "borderColor": "rgb(54, 162, 235)",
+                                "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Jobs",
+                                "data": [stat["jobs"] for stat in daily_stats],
+                                "borderColor": "rgb(255, 205, 86)",
+                                "backgroundColor": "rgba(255, 205, 86, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Proposals",
+                                "data": [stat["proposals"] for stat in daily_stats],
+                                "borderColor": "rgb(153, 102, 255)",
+                                "backgroundColor": "rgba(153, 102, 255, 0.2)",
+                                "tension": 0.1,
+                            },
+                        ],
+                    },
+                    "options": {
+                        "responsive": True,
+                        "plugins": {
+                            "title": {
+                                "display": True,
+                                "text": f"Network Activity - Last {days} Days",
+                            }
+                        },
+                        "scales": {"y": {"beginAtZero": True}},
+                    },
+                }
+
+            elif chart_type == "weekly":
+                weekly_stats = self.keeper.get_weekly_statistics(12)
+
+                return {
+                    "type": "bar",
+                    "data": {
+                        "labels": [stat["week"] for stat in weekly_stats],
+                        "datasets": [
+                            {
+                                "label": "Avg Workers",
+                                "data": [
+                                    round(stat["avg_workers"], 1)
+                                    for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(75, 192, 192, 0.6)",
+                            },
+                            {
+                                "label": "Avg Validators",
+                                "data": [
+                                    round(stat["avg_validators"], 1)
+                                    for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(255, 99, 132, 0.6)",
+                            },
+                            {
+                                "label": "Avg Users",
+                                "data": [
+                                    round(stat["avg_users"], 1) for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(54, 162, 235, 0.6)",
+                            },
+                            {
+                                "label": "Avg Jobs",
+                                "data": [
+                                    round(stat["avg_jobs"], 1) for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(255, 205, 86, 0.6)",
+                            },
+                        ],
+                    },
+                    "options": {
+                        "responsive": True,
+                        "plugins": {
+                            "title": {
+                                "display": True,
+                                "text": "Weekly Network Averages - Last 12 Weeks",
+                            }
+                        },
+                        "scales": {"y": {"beginAtZero": True}},
+                    },
+                }
+
+            elif chart_type == "trend":
+                # Get recent data for trend analysis
+                recent_stats = self.keeper.get_daily_statistics(7)
+                summary = self.keeper.get_network_summary()
+
+                if len(recent_stats) >= 2:
+                    current = recent_stats[-1]
+                    previous = recent_stats[-2]
+
+                    trends = {
+                        "workers": current["workers"] - previous["workers"],
+                        "validators": current["validators"] - previous["validators"],
+                        "users": current["users"] - previous["users"],
+                        "jobs": current["jobs"] - previous["jobs"],
+                        "proposals": current["proposals"] - previous["proposals"],
+                    }
+                else:
+                    trends = {
+                        category: 0
+                        for category in [
+                            "workers",
+                            "validators",
+                            "users",
+                            "jobs",
+                            "proposals",
+                        ]
+                    }
+
+                return {
+                    "current": summary.get("current", {}),
+                    "trends": trends,
+                    "recent_data": recent_stats,
+                }
+
+            else:
+                return {"error": f"Unknown chart type: {chart_type}"}
+
+        except Exception as e:
+            self.debug_print(
+                f"Error generating chart data: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ChartData",
+            )
+            return {"error": str(e)}
