@@ -62,8 +62,8 @@ BACKGROUND_COLOURS = {
     "Worker": "\033[47m",
     "DHT": "\033[100m",
     "bright_red": "\033[101m",
-    "bright_green": "\033[102m",
-    "bright_yellow": "\033[103m",
+    "Job Monitor": "\033[102m",
+    "Keep": "\033[103m",
     "bright_blue": "\033[104m",
     "bright_magenta": "\033[105m",
     "bright_cyan": "\033[106m",
@@ -156,6 +156,7 @@ def get_connection_info(node, main_port=None, upnp=True):
         "role": node.role,
         "id": node.node_id,
         "reputation": node.reputation,
+        "last_seen": time.time(),
     }
 
     return info
@@ -527,10 +528,6 @@ class Smartnode(threading.Thread):
         """Query a specific nodes for a value"""
         if requester is None:
             requester = self.rsa_key_hash
-
-        if node.terminate_flag.is_set():
-            return
-
         if isinstance(key_hash, bytes):
             key_hash = key_hash.decode()
         if isinstance(requester, bytes):
@@ -1427,6 +1424,12 @@ class Smartnode(threading.Thread):
             f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB",
             tag="Smartnode",
         )
+
+        # Update last seen value
+        node_info = self.dht.query(node.node_id)
+        if isinstance(node_info, dict):
+            node_info["last_seen"] = time.time()
+
         self.handle_data(data, node)
 
     def ping_node(self, n: Connection):

@@ -2,17 +2,19 @@ from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import Torchnode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
+from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_hf_model_memory
 from tensorlink.api.node import create_endpoint, GenerationRequest
 
+from datetime import datetime
 from dotenv import get_key
+from typing import Dict
 import threading
 import hashlib
 import logging
 import queue
 import json
 import time
-import os
 
 
 STATE_FILE = "logs/dht_state.json"
@@ -66,6 +68,8 @@ class Validator(Torchnode):
         self.endpoint = None
         self.endpoint_requests = {"generate": []}
 
+        self.keeper = Keeper(self)
+
         if off_chain_test is False:
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if self.public_key is None:
@@ -107,7 +111,7 @@ class Validator(Torchnode):
             self.add_port_mapping(64747, 64747)
 
         # Finally, load up previous saved state if any
-        self.load_dht_state()
+        self.keeper.load_previous_state()
 
     def handle_data(self, data, node: Connection):
         """
@@ -929,10 +933,13 @@ class Validator(Torchnode):
         counter = 0
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            if counter % 300 == 0:
-                self.save_dht_state()
+            if counter % 1800 == 0:
+                self.keeper.write_state()
+            elif counter % 300 == 0:
+                self.keeper.write_state(latest_only=True)
+
             if counter % 120 == 0:
-                self.clean_node()
+                self.keeper.clean_node()
                 self.clean_port_mappings()
             if counter % 180 == 0:
                 self.print_status()
@@ -941,157 +948,13 @@ class Validator(Torchnode):
             counter += 1
 
     def stop(self):
-        self.save_dht_state()
+        self.keeper.write_state()
         super().stop()
-
-    def save_dht_state(self, latest_only=False):
-        """
-        Serialize and save the DHT state to a file.
-
-        Args:
-            latest_only (bool): If True, save only to the latest state file.
-                               If False, save to both archive and latest files.
-        """
-        try:
-            # Prepare current state data
-            current_data = {
-                "workers": {},
-                "validators": {},
-                "users": {},
-                "jobs": {},
-                "proposals": {},
-                "timestamp": time.time(),  # Add timestamp
-            }
-
-            for category in ["workers", "validators", "users", "jobs"]:
-                collection = getattr(self, category)
-                for entity_id in collection:
-                    current_data[category][entity_id] = self.dht.query(entity_id)
-
-            if self.contract_manager:
-                for proposal_id in self.contract_manager.proposals:
-                    current_data["proposals"][proposal_id] = self.dht.query(proposal_id)
-
-            # Save to the latest state file (overwriting previous version)
-            with open(LATEST_STATE_FILE, "w") as f:
-                json.dump(current_data, f, indent=4)
-
-            # Archive state file if not latest_only
-            if not latest_only:
-                # Load existing archive data if available
-                os.makedirs(STATE_FILE)
-                existing_data = {
-                    "workers": {},
-                    "validators": {},
-                    "users": {},
-                    "jobs": {},
-                    "proposals": {},
-                }
-
-                if os.path.exists(STATE_FILE):
-                    try:
-                        with open(STATE_FILE, "r") as f:
-                            existing_data = json.load(f)
-                    except json.JSONDecodeError:
-                        self.debug_print(
-                            "SmartNode -> Existing state file read error.",
-                            level=logging.WARNING,
-                            colour="red",
-                            tag="Validator",
-                        )
-
-                # Update the archive with current data
-                for category in ["workers", "validators", "users", "jobs", "proposals"]:
-                    existing_data[category].update(current_data[category])
-
-                # Save updated archive data
-                with open(STATE_FILE, "w") as f:
-                    json.dump(existing_data, f, indent=4)
-
-            self.debug_print(
-                "SmartNode -> DHT state saved successfully to "
-                + f"{'both files' if not latest_only else 'latest file only'}.",
-                level=logging.INFO,
-                colour="green",
-                tag="Validator",
-            )
-
-        except Exception as e:
-            self.debug_print(
-                f"SmartNode -> Error saving DHT state: {e}",
-                colour="bright_red",
-                level=logging.WARNING,
-                tag="Validator",
-            )
-
-    def load_dht_state(self):
-        """Load the DHT state from a file."""
-        if os.path.exists(LATEST_STATE_FILE):
-            try:
-                with open(LATEST_STATE_FILE, "r") as f:
-                    state = json.load(f)
-
-                # Restructure state: list only hash and corresponding data
-                structured_state = {}
-                for category, items in state.items():
-                    if category != "timestamp":
-                        structured_state[category] = {
-                            hash_key: data for hash_key, data in items.items()
-                        }
-                        self.dht.routing_table.update(items)
-
-                self.debug_print(
-                    "SmartNode -> DHT state loaded successfully.",
-                    level=logging.INFO,
-                    tag="Validator",
-                )
-
-            except Exception as e:
-                self.debug_print(
-                    f"SmartNode -> Error loading DHT state: {e}",
-                    colour="bright_red",
-                    level=logging.INFO,
-                    tag="Validator",
-                )
-        else:
-            self.debug_print(
-                "SmartNode -> No DHT state file found.",
-                level=logging.INFO,
-                tag="Validator",
-            )
-
-    def clean_node(self):
-        """Periodically clean up node storage"""
-
-        def clean_nodes(nodes):
-            nodes_to_remove = []
-            for node_id in nodes:
-                # Remove any ghost ids in the list
-                if node_id not in self.nodes:
-                    nodes_to_remove.append(node_id)
-
-                # Remove any terminated connections
-                elif self.nodes[node_id].terminate_flag.is_set():
-                    role = self.nodes[node_id].role
-                    nodes_to_remove.append(node_id)
-                    del self.nodes[node_id]
-
-                    if role == "W":
-                        del self.all_workers[node_id]
-
-            for node in nodes_to_remove:
-                nodes.remove(node)
-
-            # TODO method / request to delete job after certain time or by request of the user.
-            #   Perhaps after a job is finished there is a delete request
-
-        clean_nodes(self.workers)
-        clean_nodes(self.validators)
-        clean_nodes(self.users)
 
     def print_status(self):
         self.print_base_status()
         print(f" Current Proposal: {self.current_proposal}")
+        print(f" Network Summary: {self.get_network_status()}")
         print("=============================================\n")
 
     def get_tensorlink_status(self):
@@ -1100,7 +963,7 @@ class Validator(Torchnode):
             free_models = models["FREE_MODELS"]
 
         total_capacity = int(
-            sum(worker["total_gpu_memory"] for worker in self.node.all_workers.values())
+            sum(worker["total_gpu_memory"] for worker in self.all_workers.values())
         )
 
         return {
@@ -1112,3 +975,260 @@ class Validator(Torchnode):
             "used_capacity": total_capacity - sum(self.worker_memories.values()),
             "models": free_models,
         }
+
+    def get_network_status(
+        self, days: int = 30, include_weekly: bool = False, include_summary: bool = True
+    ) -> Dict:
+        """
+        Get network statistics formatted for API consumption and charting.
+
+        Args:
+            days: Number of days of daily statistics to retrieve (max 90)
+            include_weekly: Whether to include weekly aggregated data
+            include_summary: Whether to include current network summary
+
+        Returns:
+            Dictionary containing network statistics ready for API/charting use
+        """
+        try:
+            if not hasattr(self, 'keeper') or self.keeper is None:
+                return {"error": "Keeper not initialized"}
+
+            result = {}
+
+            # Get daily statistics
+            daily_stats = self.keeper.get_daily_statistics(days)
+            # current_stats = self.keeper.get_current_statistics()
+
+            # Format daily data for charting
+            daily_formatted = {
+                "labels": [stat["date"] for stat in daily_stats],
+                "datasets": {
+                    "workers": [stat["workers"] for stat in daily_stats],
+                    "validators": [stat["validators"] for stat in daily_stats],
+                    "users": [stat["users"] for stat in daily_stats],
+                    "jobs": [stat["jobs"] for stat in daily_stats],
+                    "proposals": [stat["proposals"] for stat in daily_stats],
+                },
+                "timestamps": [stat["timestamp"] for stat in daily_stats],
+            }
+
+            result["daily"] = daily_formatted
+
+            # Include weekly data if requested
+            if include_weekly:
+                weekly_stats = self.keeper.get_weekly_statistics(12)  # Last 12 weeks
+
+                weekly_formatted = {
+                    "labels": [stat["week"] for stat in weekly_stats],
+                    "datasets": {
+                        "avg_workers": [stat["avg_workers"] for stat in weekly_stats],
+                        "avg_validators": [
+                            stat["avg_validators"] for stat in weekly_stats
+                        ],
+                        "avg_users": [stat["avg_users"] for stat in weekly_stats],
+                        "avg_jobs": [stat["avg_jobs"] for stat in weekly_stats],
+                        "avg_proposals": [
+                            stat["avg_proposals"] for stat in weekly_stats
+                        ],
+                    },
+                    "week_starts": [stat["week_start"] for stat in weekly_stats],
+                    "week_ends": [stat["week_end"] for stat in weekly_stats],
+                }
+
+                result["weekly"] = weekly_formatted
+
+            # Include current summary if requested
+            if include_summary:
+                summary = self.keeper.get_network_summary()
+                result["summary"] = summary
+
+            # Add metadata
+            result["metadata"] = {
+                "total_days_available": len(self.keeper.network_stats["daily"]),
+                "total_weeks_available": len(self.keeper.network_stats["weekly"]),
+                "requested_days": days,
+                "generated_at": time.time(),
+                "generated_at_iso": datetime.now().isoformat(),
+            }
+
+            return result
+
+        except Exception as e:
+            self.debug_print(
+                f"Error retrieving network stats for API: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="NetworkStats",
+            )
+            return {"error": str(e)}
+
+    def get_network_chart_data(self, chart_type: str = "daily", days: int = 30) -> Dict:
+        """
+        Get network statistics specifically formatted for Chart.js or similar charting libraries.
+
+        Args:
+            chart_type: Type of chart data ("daily", "weekly", or "trend")
+            days: Number of days to include for daily charts
+
+        Returns:
+            Dictionary formatted for direct use in charting libraries
+        """
+        try:
+            if not hasattr(self, 'keeper') or self.keeper is None:
+                return {"error": "Keeper not initialized"}
+
+            if chart_type == "daily":
+                daily_stats = self.keeper.get_daily_statistics(days)
+
+                return {
+                    "type": "line",
+                    "data": {
+                        "labels": [stat["date"] for stat in daily_stats],
+                        "datasets": [
+                            {
+                                "label": "Workers",
+                                "data": [stat["workers"] for stat in daily_stats],
+                                "borderColor": "rgb(75, 192, 192)",
+                                "backgroundColor": "rgba(75, 192, 192, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Validators",
+                                "data": [stat["validators"] for stat in daily_stats],
+                                "borderColor": "rgb(255, 99, 132)",
+                                "backgroundColor": "rgba(255, 99, 132, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Users",
+                                "data": [stat["users"] for stat in daily_stats],
+                                "borderColor": "rgb(54, 162, 235)",
+                                "backgroundColor": "rgba(54, 162, 235, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Jobs",
+                                "data": [stat["jobs"] for stat in daily_stats],
+                                "borderColor": "rgb(255, 205, 86)",
+                                "backgroundColor": "rgba(255, 205, 86, 0.2)",
+                                "tension": 0.1,
+                            },
+                            {
+                                "label": "Proposals",
+                                "data": [stat["proposals"] for stat in daily_stats],
+                                "borderColor": "rgb(153, 102, 255)",
+                                "backgroundColor": "rgba(153, 102, 255, 0.2)",
+                                "tension": 0.1,
+                            },
+                        ],
+                    },
+                    "options": {
+                        "responsive": True,
+                        "plugins": {
+                            "title": {
+                                "display": True,
+                                "text": f"Network Activity - Last {days} Days",
+                            }
+                        },
+                        "scales": {"y": {"beginAtZero": True}},
+                    },
+                }
+
+            elif chart_type == "weekly":
+                weekly_stats = self.keeper.get_weekly_statistics(12)
+
+                return {
+                    "type": "bar",
+                    "data": {
+                        "labels": [stat["week"] for stat in weekly_stats],
+                        "datasets": [
+                            {
+                                "label": "Avg Workers",
+                                "data": [
+                                    round(stat["avg_workers"], 1)
+                                    for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(75, 192, 192, 0.6)",
+                            },
+                            {
+                                "label": "Avg Validators",
+                                "data": [
+                                    round(stat["avg_validators"], 1)
+                                    for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(255, 99, 132, 0.6)",
+                            },
+                            {
+                                "label": "Avg Users",
+                                "data": [
+                                    round(stat["avg_users"], 1) for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(54, 162, 235, 0.6)",
+                            },
+                            {
+                                "label": "Avg Jobs",
+                                "data": [
+                                    round(stat["avg_jobs"], 1) for stat in weekly_stats
+                                ],
+                                "backgroundColor": "rgba(255, 205, 86, 0.6)",
+                            },
+                        ],
+                    },
+                    "options": {
+                        "responsive": True,
+                        "plugins": {
+                            "title": {
+                                "display": True,
+                                "text": "Weekly Network Averages - Last 12 Weeks",
+                            }
+                        },
+                        "scales": {"y": {"beginAtZero": True}},
+                    },
+                }
+
+            elif chart_type == "trend":
+                # Get recent data for trend analysis
+                recent_stats = self.keeper.get_daily_statistics(7)
+                summary = self.keeper.get_network_summary()
+
+                if len(recent_stats) >= 2:
+                    current = recent_stats[-1]
+                    previous = recent_stats[-2]
+
+                    trends = {
+                        "workers": current["workers"] - previous["workers"],
+                        "validators": current["validators"] - previous["validators"],
+                        "users": current["users"] - previous["users"],
+                        "jobs": current["jobs"] - previous["jobs"],
+                        "proposals": current["proposals"] - previous["proposals"],
+                    }
+                else:
+                    trends = {
+                        category: 0
+                        for category in [
+                            "workers",
+                            "validators",
+                            "users",
+                            "jobs",
+                            "proposals",
+                        ]
+                    }
+
+                return {
+                    "current": summary.get("current", {}),
+                    "trends": trends,
+                    "recent_data": recent_stats,
+                }
+
+            else:
+                return {"error": f"Unknown chart type: {chart_type}"}
+
+        except Exception as e:
+            self.debug_print(
+                f"Error generating chart data: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ChartData",
+            )
+            return {"error": str(e)}

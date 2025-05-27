@@ -2,10 +2,9 @@ from tensorlink.nodes.user import User
 from tensorlink.nodes.validator import Validator
 from tensorlink.nodes.worker import Worker
 
-# from tensorlink.ml.
-
 from multiprocessing import Queue
 import pytest
+import hashlib
 
 
 @pytest.fixture(scope="module")
@@ -46,13 +45,19 @@ def test_node_start(nodes):
     assert validator.is_alive()
 
 
-def test_node_functionality(nodes):
+def test_node_storage(nodes):
     """Basic test of send, receive, and core functionality"""
     worker, user, validator = nodes
 
+    key = hashlib.sha256(b"a").hexdigest()
+    val = {"test": "test"}
+
     # Validator state and environment management
-    validator.save_dht_state()
-    validator.load_dht_state()
+    validator.dht.store(key, val)
+    val1 = validator.dht.query(key)
+    val2 = worker.dht.query(key)
+
+    assert (val1 == val2 and val2 == val, "DHT Storage/Query Error")
 
     # Sending basic data to each other
     # worker.ping_node()

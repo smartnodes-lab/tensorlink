@@ -12,8 +12,8 @@ class ContractManager:
     """
     Manages blockchain contract interactions for validator proposals and job management.
 
-    This class handles the creation, submission, and execution of proposals for
-    validator removal and job completion on the blockchain.
+    This class handles the creation, submission, voting, and execution of proposals for
+    validator removal, job completion, and reward distribution on the blockchain.
     """
 
     def __init__(self, node, multi_sig_contract, chain, public_key: str):
