@@ -23,9 +23,6 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-ansi
 
-      - name: Install tensorlink (editable)
-        run: poetry install -E tensorlink
-
       - name: Install tensorlink
         run: pip install .
 
