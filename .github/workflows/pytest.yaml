@@ -17,10 +17,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install Poetry
+        run: curl -sSL https://install.python-poetry.org | python3 -
+
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Install tensorlink (editable)
+        run: poetry install -E tensorlink
 
       - name: Install tensorlink
         run: pip install .
