@@ -351,8 +351,8 @@ class Keeper:
             for worker_id, worker_data in self.node.all_workers.items():
                 # Get available capacity for this worker
                 total = worker_data.get('total_gpu_memory', 0)
-                used = worker_data.get('gpu_memory', 0)
-                available = total - used
+                available = worker_data.get('gpu_memory', 0)
+                used = total - available
                 total_available += available
                 total_used += used
 
