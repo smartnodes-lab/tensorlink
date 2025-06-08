@@ -295,11 +295,12 @@ class Validator(Torchnode):
     def _handle_check_job(self, request):
         # Check if a job is still active
         model_name = request[0]
-        model = self.modules.get(model_name)
         return_val = False
-        if model:
-            if model.get("activity"):
-                return_val = True
+
+        for job_id in self.jobs:
+            job_data = self.dht.query(job_id)
+            if job_data.get("model_name", "") == model_name:
+                return_val = job_data.get("active", False)
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 

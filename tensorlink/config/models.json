@@ -1,6 +1,5 @@
 {
   "FREE_MODELS": [
-    "Qwen/Qwen2.5-7B-Instruct",
-    "Qwen/Qwen3-8B-Instruct"
+    "Qwen/Qwen2.5-7B-Instruct"
   ]
 }
