@@ -126,7 +126,7 @@ class DistributedValidator(DistributedWorker):
         self.models_initialized = 0
 
     def inspect_model(self, model_name: str, job_data: dict = None):
-        """Inspect a model with proper coordination with other threads"""
+        """Inspect a model to determine network requirements (ie vram, n modules, etc)"""
         parser = ModelParser()
         model_name = job_data.get("model_name", model_name)
 
@@ -134,7 +134,7 @@ class DistributedValidator(DistributedWorker):
             # Load HF model, create and save distribution
             # model, tokenizer = get_hf_model(model_name, tokenizer=True)
             distribution = parser.create_distributed_config(
-                model_name,  # model,
+                model_name,
                 training=job_data.get("training", False),
                 trusted=False,
             )
@@ -161,12 +161,20 @@ class DistributedValidator(DistributedWorker):
                 print(str(e))
 
     def check_node(self):
-        """Check for node updates with efficient scheduling and locking and perform job inspection"""
+        """Check for node requests/updates"""
         try:
+            # When running on the public network, we try to maintain an active set of free API models
             if not self.node.init_kwargs.get("local_test", False):
                 if self.models_initialized < len(FREE_MODELS):
                     time.sleep(10)  # Temporary sleep to allow network bootstrap first
                     self.initialize_hosted_jobs()
+
+                # Check if job is still activity
+                for model_name in self.models:
+                    if model_name in FREE_MODELS:
+                        is_active = self.send_request("check_job", (model_name,))
+                        if not is_active:
+                            self._remove_hosted_job(model_name)
 
             # Get job data for inspection
             job_data = self.send_request("get_jobs", None)
@@ -191,10 +199,15 @@ class DistributedValidator(DistributedWorker):
         """Initialize hosted jobs with proper thread coordination"""
         # Use thread pool to avoid blocking the main thread
         for model_name in FREE_MODELS:
-            self._initialize_hosted_job(model_name)
+            if model_name not in self.models:
+                self._initialize_hosted_job(model_name)
 
     def _handle_generate_request(self, request: GenerationRequest):
-        if request.hf_name in self.models:
+        if request.hf_name not in self.models:
+            request.output = (
+                "Model is currently not available through the Tensorlink API."
+            )
+        else:
             module_id = self.models[request.hf_name]
             model = self.modules[module_id]
             tokenizer = self.tokenizers[request.hf_name]
@@ -235,15 +248,17 @@ class DistributedValidator(DistributedWorker):
 
             # Extract only the assistant's response from the generated text
             clean_response = extract_assistant_response(generated_text, request.hf_name)
+            request.output = clean_response
 
-            # Return the clean response
-            self.send_request(
-                "update_api_request", (request.hf_name, module_id, clean_response)
-            )
+        # Return the clean response
+        self.send_request("update_api_request", (request,))
 
     def _initialize_hosted_job(self, model_name: str):
-        # Check if the model loading is complete across workers and ready to go
+        """Method that can be invoked twice, once to begin setup of the job, and a second
+        time to finalize the job init."""
         args = self.send_request("check_module", None)
+
+        # Check if the model loading is complete across workers and ready to go
         if model_name in self.models and args:
             if isinstance(args, tuple):
                 (
@@ -260,7 +275,7 @@ class DistributedValidator(DistributedWorker):
                 self.modules[module_id].distribute_model(distribution)
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
-        # If not, check if we can spin up a model
+        # If not, check if we can spin up the model
         else:
             if model_name in self.models:
                 time.sleep(30)
@@ -282,6 +297,95 @@ class DistributedValidator(DistributedWorker):
                 "seed_validators": [],
             }
             self.inspect_model(model_name, job_data)
+
+    def _remove_hosted_job(self, model_name: str):
+        """Remove a hosted job and clean up all associated resources"""
+        try:
+            # Get the module_id if the model is tracked
+            module_id = None
+            if model_name in self.models:
+                module_id = self.models[model_name]
+
+            # Clean up tokenizer
+            if model_name in self.tokenizers:
+                del self.tokenizers[model_name]
+                self.send_request(
+                    "debug_print",
+                    (f"Removed tokenizer for {model_name}", "yellow", logging.INFO),
+                )
+
+            # Clean up model reference
+            if model_name in self.models:
+                del self.models[model_name]
+                self.models_initialized = max(0, self.models_initialized - 1)
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Removed model reference for {model_name}",
+                        "yellow",
+                        logging.INFO,
+                    ),
+                )
+
+            # Clean up module if it exists
+            if module_id and module_id in self.modules:
+                # Notify the module to clean up its distributed components
+                try:
+                    if hasattr(self.modules[module_id], 'cleanup_distributed_model'):
+                        self.modules[module_id].cleanup_distributed_model()
+                except Exception as e:
+                    logging.warning(
+                        f"Error during distributed model cleanup for {model_name}: {str(e)}"
+                    )
+
+                del self.modules[module_id]
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Removed module {module_id} for {model_name}",
+                        "yellow",
+                        logging.INFO,
+                    ),
+                )
+
+            # Clean up model cache
+            if model_name in self.model_cache:
+                del self.model_cache[model_name]
+                self.send_request(
+                    "debug_print",
+                    (f"Removed cache entry for {model_name}", "yellow", logging.INFO),
+                )
+
+            # Send cleanup request to coordinator/scheduler
+            try:
+                self.send_request("remove_job", {"model_name": model_name})
+            except Exception as e:
+                logging.warning(
+                    f"Error sending job removal request for {model_name}: {str(e)}"
+                )
+
+            # Force garbage collection to free memory
+            gc.collect()
+
+            self.send_request(
+                "debug_print",
+                (
+                    f"Successfully removed hosted job: {model_name}",
+                    "green",
+                    logging.INFO,
+                ),
+            )
+
+        except Exception as e:
+            logging.error(f"Error removing hosted job {model_name}: {str(e)}")
+            self.send_request(
+                "debug_print",
+                (
+                    f"Failed to remove hosted job {model_name}: {str(e)}",
+                    "red",
+                    logging.ERROR,
+                ),
+            )
 
     def main_loop(self):
         self.check_node()

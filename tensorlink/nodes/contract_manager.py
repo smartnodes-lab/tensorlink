@@ -98,7 +98,7 @@ class ContractManager:
                     f"Error while fetching created proposals: {e}",
                     colour="bright_red",
                     level=logging.ERROR,
-                    tag="Contract Manager",
+                    tag="ContractManager",
                 )
 
             time.sleep(3)
@@ -110,7 +110,7 @@ class ContractManager:
             f"Validation started for proposal: {proposal_hash}",
             colour="bright_blue",
             level=logging.INFO,
-            tag="Contract Manager",
+            tag="ContractManager",
         )
 
         # Query network for the detailed proposal info
@@ -121,7 +121,7 @@ class ContractManager:
             # Perhaps some logic to directly query the node who published the proposal to ensure it is not found TODO
             self.node.debug_print(
                 f"Validating proposal {proposal_hash} not found in DHT!",
-                tag="Contract Manager",
+                tag="ContractManager",
             )
             return
 
@@ -130,7 +130,7 @@ class ContractManager:
         if proposal_data_hash != proposal_hash:
             # Proposal hash must match smart contract listed proposal
             self.node.debug_print(
-                "Invalid proposal hash!", colour="red", tag="Contract Manager"
+                "Invalid proposal hash!", colour="red", tag="ContractManager"
             )
             return
 
@@ -224,7 +224,7 @@ class ContractManager:
                 f"Proposal {proposal_num}: {proposal_hash} approved! ({tx_hash.hex()})",
                 colour="green",
                 level=logging.INFO,
-                tag="Contract Manager",
+                tag="ContractManager",
             )
 
         except Exception as e:
@@ -233,7 +233,7 @@ class ContractManager:
                     f"Have already voted on proposal {proposal_num}, continuing...",
                     colour="green",
                     level=logging.DEBUG,
-                    tag="Contract Manager",
+                    tag="ContractManager",
                 )
                 pass
             else:
@@ -248,7 +248,7 @@ class ContractManager:
         """Add a job to the list of jobs to be completed."""
         # Update job to contract if a certain threshold of work was done
         if (
-            job_data["timestamp"] - job_data["last_seen"] > 180
+            job_data["end_time"] - job_data["timestamp"] > 180
             and job_data["gigabyte_hours"] > 5e8
         ) and job_data["id"] not in self.jobs_to_complete:
             self.jobs_to_complete.append(job_data["id"])
@@ -324,7 +324,7 @@ class ContractManager:
                     f"Error processing new entries: {e}",
                     colour="bright_red",
                     level=logging.ERROR,
-                    tag="Contract Manager",
+                    tag="ContractManager",
                 )
 
             time.sleep(60)
@@ -339,7 +339,7 @@ class ContractManager:
             "Creating proposal...",
             colour="bright_blue",
             level=logging.INFO,
-            tag="Contract Manager",
+            tag="ContractManager",
         )
 
         while True:
@@ -481,7 +481,7 @@ class ContractManager:
                     f"Proposal ({proposal_hash.hex()}) submitted! ({tx_hash.hex()})",
                     colour="green",
                     level=logging.INFO,
-                    tag="Contract Manager",
+                    tag="ContractManager",
                 )
                 return 0
 
@@ -491,7 +491,7 @@ class ContractManager:
                         "Validator has already submitted a proposal this round!",
                         colour="bright_red",
                         level=logging.INFO,
-                        tag="Contract Manager",
+                        tag="ContractManager",
                     )
                     return 0
 
@@ -500,7 +500,7 @@ class ContractManager:
                         "Not enough time since last proposal! Sleeping...",
                         colour="green",
                         level=logging.DEBUG,
-                        tag="Contract Manager",
+                        tag="ContractManager",
                     )
                     time.sleep(60)
                     return 2
@@ -509,7 +509,7 @@ class ContractManager:
                         f"Error creating proposal: {str(e)}",
                         colour="bright_red",
                         level=logging.INFO,
-                        tag="Contract Manager",
+                        tag="ContractManager",
                     )
                     return 1
 
@@ -617,7 +617,7 @@ class ContractManager:
                 f"Proposal executed! ({execute_tx_hash.hex()})",
                 colour="green",
                 level=logging.INFO,
-                tag="Contract Manager",
+                tag="ContractManager",
             )
 
             self._clear_completed_items()
@@ -660,14 +660,14 @@ class ContractManager:
                 "Not enough proposal votes, sleeping...",
                 colour="green",
                 level=logging.DEBUG,
-                tag="Contract Manager",
+                tag="ContractManager",
             )
         else:
             self.node.debug_print(
                 f"Error executing proposal: {error}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Contract Manager",
+                tag="ContractManager",
             )
 
     def _clear_completed_items(self) -> None:

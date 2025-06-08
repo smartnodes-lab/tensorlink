@@ -113,7 +113,7 @@ class JobMonitor:
         # Configuration parameters
         self.WORKER_TIMEOUT_SECONDS = 60
         self.JOB_CREATION_TIMEOUT_SECONDS = 180
-        self.JOB_OFFLINE_THRESHOLD_SECONDS = 120
+        self.JOB_OFFLINE_THRESHOLD_SECONDS = 90
         self.HEALTH_CHECK_INTERVAL_SECONDS = 30
         self.PROOF_OF_WORK_INTERVAL = 5
         self.RESOURCE_UPDATE_INTERVAL_SECONDS = 60
@@ -125,7 +125,7 @@ class JobMonitor:
             f"Job monitor beginning for job: {job_id}",
             colour="blue",
             level=logging.INFO,
-            tag="Job Monitor",
+            tag="JobMonitor",
         )
 
         job_data = self._get_job_data(job_id)
@@ -170,9 +170,9 @@ class JobMonitor:
                             break
                     else:
                         self.node.debug_print(
-                            f"Validator -> Job inspection complete for job: {job_id}",
+                            f"Job inspection complete for job: {job_id}",
                             colour="blue",
-                            tag="Job Monitor",
+                            tag="JobMonitor",
                         )
                         job_data["last_seen"] = time.time()
                         self.node.dht.routing_table[job_id] = job_data
@@ -182,7 +182,7 @@ class JobMonitor:
                         f"Error in health check cycle: {str(e)}",
                         colour="bright_red",
                         level=logging.ERROR,
-                        tag="Job Monitor",
+                        tag="JobMonitor",
                     )
                     break
 
@@ -243,7 +243,7 @@ class JobMonitor:
                 f"Worker health check failed for {worker}: {str(e)}",
                 colour="yellow",
                 level=logging.WARNING,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
             return False
 
@@ -291,7 +291,7 @@ class JobMonitor:
                 f"Error verifying proof of work: {str(e)}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
             return False
 
@@ -327,7 +327,7 @@ class JobMonitor:
             f"Invalid proof of work from worker {worker} for module {module_id}",
             colour="bright_red",
             level=logging.WARNING,
-            tag="Job Monitor",
+            tag="JobMonitor",
         )
 
         # Record violation
@@ -355,7 +355,7 @@ class JobMonitor:
                 f"Error applying worker penalty: {str(e)}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
 
     def _get_job_data(self, job_id: str) -> Optional[Dict]:
@@ -367,7 +367,7 @@ class JobMonitor:
                 f"Failed to retrieve job data: {str(e)}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
             return None
 
@@ -396,7 +396,7 @@ class JobMonitor:
                 f"Error checking user status: {str(e)}",
                 colour="yellow",
                 level=logging.WARNING,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
             return False
 
@@ -420,7 +420,7 @@ class JobMonitor:
             f"Worker {worker} failed for module {module_id}. Initiating recovery...",
             colour="yellow",
             level=logging.WARNING,
-            tag="Job Monitor",
+            tag="JobMonitor",
         )
         # Implement worker recovery strategy
         # TODO: Add worker replacement logic
@@ -447,7 +447,7 @@ class JobMonitor:
                 f"Job {job_data['id']} cleaned up successfully with status: {final_status.value}",
                 colour="green",
                 level=logging.INFO,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
 
             # Pass over job to contract manager
@@ -459,7 +459,7 @@ class JobMonitor:
                 f"Error during job cleanup: {str(e)}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
 
     def _cleanup_workers(self, job_data: Dict):
@@ -479,7 +479,7 @@ class JobMonitor:
                             f"Error shutting down worker {worker}: {str(e)}",
                             colour="yellow",
                             level=logging.WARNING,
-                            tag="Job Monitor",
+                            tag="JobMonitor",
                         )
 
     def _should_terminate_job(self, job_data: Dict, current_status: JobStatus) -> bool:
@@ -538,7 +538,7 @@ class JobMonitor:
                     f"Could not retrieve data for failed job {job_id}",
                     colour="bright_red",
                     level=logging.ERROR,
-                    tag="Job Monitor",
+                    tag="JobMonitor",
                 )
                 return
 
@@ -576,7 +576,7 @@ class JobMonitor:
                 f"Job {job_id} failed: {reason}. Cleaning Up",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
 
         except Exception as e:
@@ -584,5 +584,5 @@ class JobMonitor:
                 f"Error handling job failure: {str(e)}",
                 colour="bright_red",
                 level=logging.ERROR,
-                tag="Job Monitor",
+                tag="JobMonitor",
             )
