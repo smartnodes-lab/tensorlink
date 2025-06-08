@@ -95,9 +95,10 @@ class ContractManager:
 
             except Exception as e:
                 self.node.debug_print(
-                    f"Validator -> Error while fetching created proposals: {e}",
+                    f"Error while fetching created proposals: {e}",
                     colour="bright_red",
                     level=logging.ERROR,
+                    tag="Contract Manager",
                 )
 
             time.sleep(3)
@@ -106,9 +107,10 @@ class ContractManager:
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
         #  We should also use our proposal data to quickly verify matching data
         self.node.debug_print(
-            f"Validator -> Validation started for proposal: {proposal_hash}",
+            f"Validation started for proposal: {proposal_hash}",
             colour="bright_blue",
             level=logging.INFO,
+            tag="Contract Manager",
         )
 
         # Query network for the detailed proposal info
@@ -118,7 +120,8 @@ class ContractManager:
         if proposal_data is None:
             # Perhaps some logic to directly query the node who published the proposal to ensure it is not found TODO
             self.node.debug_print(
-                f"ContractManager -> Validating proposal {proposal_hash} not found in DHT!"
+                f"Validating proposal {proposal_hash} not found in DHT!",
+                tag="Contract Manager",
             )
             return
 
@@ -126,7 +129,9 @@ class ContractManager:
 
         if proposal_data_hash != proposal_hash:
             # Proposal hash must match smart contract listed proposal
-            self.node.debug_print("Validator -> Invalid proposal hash!", colour="red")
+            self.node.debug_print(
+                "Invalid proposal hash!", colour="red", tag="Contract Manager"
+            )
             return
 
         self._approve_transaction(proposal_num, proposal_hash)
@@ -216,17 +221,19 @@ class ContractManager:
             )
             tx_hash = self.chain.eth.send_raw_transaction(signed_tx.raw_transaction)
             self.node.debug_print(
-                f"Validator -> Proposal {proposal_num}: {proposal_hash} approved! ({tx_hash.hex()})",
+                f"Proposal {proposal_num}: {proposal_hash} approved! ({tx_hash.hex()})",
                 colour="green",
                 level=logging.INFO,
+                tag="Contract Manager",
             )
 
         except Exception as e:
             if "Validator has already voted!" in str(e):
                 self.node.debug_print(
-                    f"Validator -> Have already voted on proposal {proposal_num}, continuing...",
+                    f"Have already voted on proposal {proposal_num}, continuing...",
                     colour="green",
                     level=logging.DEBUG,
+                    tag="Contract Manager",
                 )
                 pass
             else:
@@ -314,9 +321,10 @@ class ContractManager:
 
             except Exception as e:
                 self.node.debug_print(
-                    f"Validator -> Error processing new entries: {e}",
+                    f"Error processing new entries: {e}",
                     colour="bright_red",
                     level=logging.ERROR,
+                    tag="Contract Manager",
                 )
 
             time.sleep(60)
@@ -328,9 +336,10 @@ class ContractManager:
         for validator removal and job completion.
         """
         self.node.debug_print(
-            "ContractManager -> Creating proposal...",
+            "Creating proposal...",
             colour="bright_blue",
             level=logging.INFO,
+            tag="Contract Manager",
         )
 
         while True:
@@ -469,34 +478,38 @@ class ContractManager:
                 tx_hash = self._submit_transaction(tx)
 
                 self.node.debug_print(
-                    f"ContractManager -> Proposal ({proposal_hash.hex()}) submitted! ({tx_hash.hex()})",
+                    f"Proposal ({proposal_hash.hex()}) submitted! ({tx_hash.hex()})",
                     colour="green",
                     level=logging.INFO,
+                    tag="Contract Manager",
                 )
                 return 0
 
             except Exception as e:
                 if "Validator has already submitted a proposal this round" in str(e):
                     self.node.debug_print(
-                        "ContractManager -> Validator has already submitted a proposal this round!",
+                        "Validator has already submitted a proposal this round!",
                         colour="bright_red",
                         level=logging.INFO,
+                        tag="Contract Manager",
                     )
                     return 0
 
                 elif "updateTime - 2min" in str(e):
                     self.node.debug_print(
-                        "ContractManager -> Not enough time since last proposal! Sleeping...",
+                        "Not enough time since last proposal! Sleeping...",
                         colour="green",
                         level=logging.DEBUG,
+                        tag="Contract Manager",
                     )
                     time.sleep(60)
                     return 2
                 else:
                     self.node.debug_print(
-                        f"ContractManager -> Error creating proposal: {str(e)}",
+                        f"Error creating proposal: {str(e)}",
                         colour="bright_red",
                         level=logging.INFO,
+                        tag="Contract Manager",
                     )
                     return 1
 
@@ -601,9 +614,10 @@ class ContractManager:
             execute_tx_hash = self._submit_transaction(execute_tx)
 
             self.node.debug_print(
-                f"ContractManager -> Proposal executed! ({execute_tx_hash.hex()})",
+                f"Proposal executed! ({execute_tx_hash.hex()})",
                 colour="green",
                 level=logging.INFO,
+                tag="Contract Manager",
             )
 
             self._clear_completed_items()
@@ -643,15 +657,17 @@ class ContractManager:
         """Handle errors during proposal execution."""
         if "Not enough proposal votes!" in str(error):
             self.node.debug_print(
-                "ContractManager -> Not enough proposal votes, sleeping...",
+                "Not enough proposal votes, sleeping...",
                 colour="green",
                 level=logging.DEBUG,
+                tag="Contract Manager",
             )
         else:
             self.node.debug_print(
-                f"ContractManager -> Error executing proposal: {error}",
+                f"Error executing proposal: {error}",
                 colour="bright_red",
                 level=logging.ERROR,
+                tag="Contract Manager",
             )
 
     def _clear_completed_items(self) -> None:
