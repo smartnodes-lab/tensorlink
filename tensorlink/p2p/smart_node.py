@@ -61,7 +61,7 @@ BACKGROUND_COLOURS = {
     "User": "\033[45m",
     "Worker": "\033[47m",
     "DHT": "\033[100m",
-    "ContractManager": "\033[101m",
+    "ContractManager": "\033[105m",
     "JobMonitor": "\033[102m",
     "Keeper": "\033[103m",
     "bright_blue": "\033[104m",

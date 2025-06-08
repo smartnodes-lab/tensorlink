@@ -124,6 +124,8 @@ class DistributedValidator(DistributedWorker):
         self.models = {}
         self.tokenizers = {}
         self.models_initialized = 0
+        self.GC_CHECK_INTERVAL = 100
+        self.CHECK_COUNTER = 1
 
     def inspect_model(self, model_name: str, job_data: dict = None):
         """Inspect a model to determine network requirements (ie vram, n modules, etc)"""
@@ -170,11 +172,14 @@ class DistributedValidator(DistributedWorker):
                     self.initialize_hosted_jobs()
 
                 # Check if job is still activity
-                for model_name in self.models:
-                    if model_name in FREE_MODELS:
-                        is_active = self.send_request("check_job", (model_name,))
-                        if not is_active:
-                            self._remove_hosted_job(model_name)
+                if self.CHECK_COUNTER % self.GC_CHECK_INTERVAL == 0:
+                    for model_name in self.models:
+                        if model_name in FREE_MODELS:
+                            is_active = self.send_request("check_job", (model_name,))
+                            if not is_active:
+                                self._remove_hosted_job(model_name)
+
+                    self.CHECK_COUNTER = 1
 
             # Get job data for inspection
             job_data = self.send_request("get_jobs", None)
@@ -195,12 +200,13 @@ class DistributedValidator(DistributedWorker):
         except Exception as e:
             logging.error(f"Error checking for jobs: {str(e)}")
 
+        self.CHECK_COUNTER += 1
+
     def initialize_hosted_jobs(self):
         """Initialize hosted jobs with proper thread coordination"""
         # Use thread pool to avoid blocking the main thread
         for model_name in FREE_MODELS:
-            if model_name not in self.models:
-                self._initialize_hosted_job(model_name)
+            self._initialize_hosted_job(model_name)
 
     def _handle_generate_request(self, request: GenerationRequest):
         if request.hf_name not in self.models:
