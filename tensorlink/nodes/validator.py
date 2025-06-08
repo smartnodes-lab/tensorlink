@@ -377,12 +377,11 @@ class Validator(Torchnode):
                 if not api_request.processing and api_request.hf_name == model_name:
                     api_request.processing = True
                     return_val = api_request
-
+        elif len(request) == 1:
             # Responding to request after ml-processing
-            elif len(request) == 1:
-                response = request[0]
-                if response.processing:
-                    self.endpoint_requests["outgoing"].append(response)
+            response = request[0]
+            if response.processing:
+                self.endpoint_requests["outgoing"].append(response)
 
         self.response_queue.put({"STATUS": "SUCCESS", "return": return_val})
 
