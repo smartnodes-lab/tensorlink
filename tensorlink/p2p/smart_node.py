@@ -61,9 +61,9 @@ BACKGROUND_COLOURS = {
     "User": "\033[45m",
     "Worker": "\033[47m",
     "DHT": "\033[100m",
-    "bright_red": "\033[101m",
-    "Job Monitor": "\033[102m",
-    "Keep": "\033[103m",
+    "ContractManager": "\033[101m",
+    "JobMonitor": "\033[102m",
+    "Keeper": "\033[103m",
     "bright_blue": "\033[104m",
     "bright_magenta": "\033[105m",
     "bright_cyan": "\033[106m",
@@ -504,7 +504,7 @@ class Smartnode(threading.Thread):
             colour_code = COLOURS.get(colour, "\033[37m")
             reset_colour = "\033[0m"
 
-            tag_width = 12  # Adjust as needed
+            tag_width = 15  # Adjust as needed
             if tag:
                 centered_tag = tag.center(tag_width)
                 background_colour = BACKGROUND_COLOURS.get(tag.strip(), "\033[40m")
@@ -1491,10 +1491,10 @@ class Smartnode(threading.Thread):
                 tag="Smartnode",
             )
 
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
             node.stop()
 
-        for node in self.nodes.values():
+        for node in list(self.nodes.values()):
             node.join()
 
         self._stop_upnp()
