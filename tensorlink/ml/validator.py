@@ -124,7 +124,7 @@ class DistributedValidator(DistributedWorker):
         self.models = {}
         self.tokenizers = {}
         self.models_initialized = 0
-        self.GC_CHECK_INTERVAL = 100
+        self.GC_CHECK_INTERVAL = 1000
         self.CHECK_COUNTER = 1
 
     def inspect_model(self, model_name: str, job_data: dict = None):
