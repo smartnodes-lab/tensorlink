@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, APIRouter
+from fastapi import FastAPI, HTTPException, APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional, List
 import threading
@@ -57,6 +57,18 @@ class TensorlinkAPI:
         @self.app.get("/stats")
         async def get_network_stats():
             return self.smart_node.get_tensorlink_status()
+
+        @self.app.get("/network-history")
+        async def get_network_history(
+            days: int = Query(30, ge=1, le=90),
+            include_weekly: bool = False,
+            include_summary: bool = True,
+        ):
+            return self.smart_node.get_network_status(
+                days=days,
+                include_weekly=include_weekly,
+                include_summary=include_summary,
+            )
 
         self.app.include_router(self.router)
 
