@@ -947,6 +947,8 @@ class Validator(Torchnode):
                     "users": [stat["users"] for stat in daily_stats],
                     "jobs": [stat["jobs"] for stat in daily_stats],
                     "proposals": [stat["proposals"] for stat in daily_stats],
+                    "total_capacity": [stat["total_capacity"] for stat in daily_stats],
+                    "used_capacity": [stat["used_capacity"] for stat in daily_stats],
                 },
                 "timestamps": [stat["timestamp"] for stat in daily_stats],
             }
