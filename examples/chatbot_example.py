@@ -5,7 +5,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from tensorlink import DistributedModel
 
 
-# model_name = "microsoft/Phi-4-mini-instruct"
+# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 model_name = "Qwen/Qwen2.5-7B-Instruct"
 
 # Parameters for distributed model request.
