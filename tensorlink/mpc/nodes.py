@@ -6,7 +6,6 @@ import time
 import torch.multiprocessing as mp
 
 from tensorlink.ml.worker import DistributedWorker
-from tensorlink.ml.validator import DistributedValidator
 from tensorlink.nodes.user import User
 from tensorlink.nodes.validator import Validator
 from tensorlink.nodes.worker import Worker
@@ -197,6 +196,8 @@ class ValidatorNode(BaseNode):
             node_instance.stop()
 
     def start(self):
+        from tensorlink.ml.validator import DistributedValidator
+
         super().start()
         distributed_validator = DistributedValidator(self, trusted=self.trusted)
         if self.utilization:
