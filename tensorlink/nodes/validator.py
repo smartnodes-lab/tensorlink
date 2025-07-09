@@ -4,7 +4,7 @@ from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_hf_model_memory
-from tensorlink.api.node import create_endpoint, GenerationRequest
+from tensorlink.api.node import TensorlinkAPI, GenerationRequest
 
 from datetime import datetime
 from dotenv import get_key
@@ -66,7 +66,7 @@ class Validator(Torchnode):
         self.proposal_listener = None
         self.execution_listener = None
         self.endpoint = None
-        self.endpoint_requests = {"generate": []}
+        self.endpoint_requests = {"incoming": [], "outgoing": []}
 
         self.keeper = Keeper(self)
 
@@ -106,7 +106,7 @@ class Validator(Torchnode):
                 self.terminate_flag.set()
 
         # Start up the API for handling public jobs
-        self.endpoint = create_endpoint(self)
+        self.endpoint = TensorlinkAPI(self)
         if not local_test:
             self.add_port_mapping(64747, 64747)
 
@@ -242,6 +242,7 @@ class Validator(Torchnode):
 
             handlers = {
                 "get_jobs": self._handle_get_jobs,
+                "check_job": self._handle_check_job,
                 "send_job_request": self.create_base_job,
                 "update_api_request": self._handle_update_api,
             }
@@ -290,6 +291,18 @@ class Validator(Torchnode):
             print(e)
             # Handle any unexpected errors
             self.response_queue.put({"status": "FAILURE", "error": str(e)})
+
+    def _handle_check_job(self, request):
+        # Check if a job is still active
+        model_name = request[0]
+        return_val = False
+
+        for job_id in self.jobs:
+            job_data = self.dht.query(job_id)
+            if job_data.get("model_name", "") == model_name:
+                return_val = job_data.get("active", False)
+
+        self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     # def _handle_send_job(self, job_data: dict):
     #     distribution = job_data.get("distribution", {})
@@ -352,23 +365,23 @@ class Validator(Torchnode):
         self._store_request(self.rsa_key_hash, request_value)
 
     def _handle_update_api(self, request: tuple):
-        """Receives and responds to API requests"""
+        """Checks for and handles any API requests received"""
         return_val = None
-        if self.endpoint_requests["generate"]:
+        if self.endpoint_requests["incoming"]:
             # Incoming request triggers ml-process
             if len(request) == 2:
                 model_name, model_id = request
-                api_request: GenerationRequest = self.endpoint_requests["generate"][0]
+                api_request: GenerationRequest = self.endpoint_requests["incoming"].pop(
+                    0
+                )
                 if not api_request.processing and api_request.hf_name == model_name:
-                    return_val = api_request
                     api_request.processing = True
-
+                    return_val = api_request
+        elif len(request) == 1:
             # Responding to request after ml-processing
-            elif len(request) == 3:
-                model_name, model_id, generated_text = request
-                api_request: GenerationRequest = self.endpoint_requests["generate"][0]
-                if model_name == api_request.hf_name and api_request.processing:
-                    self.endpoint_requests["generate"][0].output = generated_text
+            response = request[0]
+            if response.processing:
+                self.endpoint_requests["outgoing"].append(response)
 
         self.response_queue.put({"STATUS": "SUCCESS", "return": return_val})
 
@@ -402,6 +415,7 @@ class Validator(Torchnode):
             level=logging.INFO,
             tag="Validator",
         )
+        # Ensure the request has come in a valid from
         if node.node_id in self.requests and b"JOB-REQ" in self.requests[node.node_id]:
             self.requests[node.node_id].remove(b"JOB-REQ")
         else:
@@ -798,58 +812,6 @@ class Validator(Torchnode):
             pass
         pass
 
-    # def update_job(self, job_bytes: bytes):
-    #     """Update non-seed validators, loss, accuracy, other info"""
-    #     job = json.loads(job_bytes)
-    #
-    # def get_jobs(self):
-    #     """For more intensive, paid jobs that are requested directly from SmartnodesCore"""
-    #     current_block = self.chain.eth.block_number
-    #     event_filter = self.chain.eth.filter({
-    #         "fromBlock": self.last_loaded_job,
-    #         "toBlock": current_block,
-    #         "address": self.contract_address,
-    #         "topics": [
-    #             self.sno_events["JobRequest"],
-    #             self.sno_events["JobComplete"],
-    #         ]
-    #     })
-    #
-    #     self.last_loaded_job = current_block
-    #
-    #     events = event_filter.get_all_entries()
-    #     for event in events:
-    #         print(event)
-    #
-    # def complete_job(self, job_data: dict):
-    #     """Decide whether to remove the job or add it to the next state update"""
-    #     pass
-    #
-    # def validate_job(
-    #     self,
-    #     job_id: bytes,
-    #     user_id: bytes = None,
-    #     capacities: list = None,
-    #     active: bool = None,
-    # ) -> bool:
-    #     # Grab user and job information
-    #     job_info = self.dht.query(job_id)
-    #
-    #     if job_info:
-    #         user_response = None
-    #
-    #         if user_id:
-    #             user_info = self.dht.query(user_id)
-    #
-    #             if user_info:
-    #                 # Connect to user and cross-validate job info
-    #                 user_host, user_port = user_info["host"], user_info["port"]
-    #                 connected = self.connect_node(user_id, user_host, user_port)
-    #
-    #                 if connected:
-    #                     # Query job information from the user
-    #                     user_response = self.query_node(job_id, self.nodes[user_id])
-    #
     #         # Query job information from seed validators
     #         job_responses = [
     #             self.query_node(job_id, validator)
@@ -892,29 +854,6 @@ class Validator(Torchnode):
     #                     )
     #                     == most_common
     #                 ]
-    #
-    #                 # Validate capacities and state if specified
-    #                 if capacities is not None or active is not None:
-    #                     for response in matching_responses:
-    #                         # Check capacities if provided
-    #                         if (
-    #                             capacities is not None
-    #                             and response.get("capacities") != capacities
-    #                         ):
-    #                             return False
-    #
-    #                         # Check state if provided
-    #                         if active is not None and response.get("active") != active:
-    #                             return False
-    #
-    #                 # If all checks passed or no capacities/state checks were specified
-    #                 return True
-    #
-    #     return False
-
-    def send_state_updates(self, validators):
-        for job in self.jobs:
-            pass
 
     def run(self):
         super().run()
@@ -954,7 +893,6 @@ class Validator(Torchnode):
     def print_status(self):
         self.print_base_status()
         print(f" Current Proposal: {self.current_proposal}")
-        print(f" Network Summary: {self.get_network_status()}")
         print("=============================================\n")
 
     def get_tensorlink_status(self):
@@ -1009,6 +947,8 @@ class Validator(Torchnode):
                     "users": [stat["users"] for stat in daily_stats],
                     "jobs": [stat["jobs"] for stat in daily_stats],
                     "proposals": [stat["proposals"] for stat in daily_stats],
+                    "total_capacity": [stat["total_capacity"] for stat in daily_stats],
+                    "used_capacity": [stat["used_capacity"] for stat in daily_stats],
                 },
                 "timestamps": [stat["timestamp"] for stat in daily_stats],
             }

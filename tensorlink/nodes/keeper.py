@@ -287,7 +287,8 @@ class Keeper:
                 ),
                 "validators": _count_active_entities_for_date(
                     all_entities["validators"], current_date
-                ),
+                )
+                + 1,
                 "users": _count_active_entities_for_date(
                     all_entities["users"], current_date
                 ),
@@ -414,7 +415,7 @@ class Keeper:
                     "timestamp": time.time(),
                     "last_updated": time.time(),
                     "workers": current.get("workers", 0),
-                    "validators": current.get("validators", 0),
+                    "validators": current.get("validators", 1),
                     "users": current.get("users", 0),
                     "jobs": current.get("jobs", 0),
                     "proposals": current.get("proposals", 0),
@@ -837,7 +838,7 @@ class Keeper:
                 # Restructure state: list only hash and corresponding data
                 structured_state = {}
                 for category, items in state.items():
-                    if category != "timestamp":
+                    if category != "timestamp" and "capacity" not in category:
                         # Filter old entities during load as well
                         filtered_items = self._filter_old_entities(items)
                         structured_state[category] = {

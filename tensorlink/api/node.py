@@ -1,16 +1,13 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from fastapi import FastAPI, HTTPException, APIRouter, Depends, Body, Request
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, APIRouter, Query
 from pydantic import BaseModel
 from typing import Optional, List
 import threading
 import uvicorn
 import asyncio
-import torch
+import random
 import time
 
 
-# For long term inference model requests
 class JobRequest(BaseModel):
     _model_name: str
     time: int
@@ -28,77 +25,73 @@ class GenerationRequest(BaseModel):
     history: Optional[List[dict]] = None
     output: str = None
     processing: bool = False
+    id: int = None
 
 
-def create_endpoint(smart_node):
-    app = FastAPI()
-    router = APIRouter()
+class TensorlinkAPI:
+    def __init__(self, smart_node, host="0.0.0.0", port=64747):
+        self.smart_node = smart_node
+        self.host = host
+        self.port = port
+        self.app = FastAPI()
+        self.router = APIRouter()
+        self._define_routes()
+        self._start_server()
 
-    @router.post("/generate")
-    async def generate(request: GenerationRequest):
-        print("Incoming request:", request)
-        try:
-            setattr(request, "output", None)
-            smart_node.endpoint_requests["generate"].append(request)
-            start_time = time.time()
+    def _define_routes(self):
+        @self.router.post("/generate")
+        async def generate(request: GenerationRequest):
+            print("Incoming request:", request)
+            try:
+                request.output = None
+                request.id = hash(random.random())
+                self.smart_node.endpoint_requests["incoming"].append(request)
 
-            while not request.output:
-                await asyncio.sleep(0.5)
+                request = await self._wait_for_result(request)
+                return_val = request.output
+                return {"response": return_val}
 
-                if time.time() - start_time > 30:
-                    raise HTTPException(status_code=504, detail="Request timed out.")
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
 
-            return_val = request.output
-            if return_val:
-                smart_node.endpoint_requests["generate"].pop(0)
+        @self.app.get("/stats")
+        async def get_network_stats():
+            return self.smart_node.get_tensorlink_status()
 
-            return {"response": return_val}
+        @self.app.get("/network-history")
+        async def get_network_history(
+            days: int = Query(30, ge=1, le=90),
+            include_weekly: bool = False,
+            include_summary: bool = True,
+        ):
+            return self.smart_node.get_network_status(
+                days=days,
+                include_weekly=include_weekly,
+                include_summary=include_summary,
+            )
 
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        self.app.include_router(self.router)
 
-    # @app.get("/api/status")
-    # async def get_status():
-    #     """Get current model status"""
-    #     model_loaded = model is not None and tokenizer is not None
-    #     node_active = node is not None
-    #
-    #     device_info = {}
-    #     if torch.cuda.is_available():
-    #         device_info = {
-    #             "gpu_available": True,
-    #             "device_name": torch.cuda.get_device_name(0),
-    #             "memory_allocated": f"{torch.cuda.memory_allocated(0) / 1024 ** 2:.2f} MB",
-    #             "memory_reserved": f"{torch.cuda.memory_reserved(0) / 1024 ** 2:.2f} MB"
-    #         }
-    #     else:
-    #         device_info = {"gpu_available": False}
-    #
-    #     return {
-    #         "model_loaded": model_loaded,
-    #         "model_name": getattr(model, "name_or_path", None) if model else None,
-    #         "tensorlink_active": node_active,
-    #         "device_info": device_info
-    #     }
+    async def _wait_for_result(self, request: GenerationRequest) -> GenerationRequest:
+        start_time = time.time()
+        while True:
+            if self.smart_node.endpoint_requests["outgoing"]:
+                for response in self.smart_node.endpoint_requests["outgoing"]:
+                    if request.id == response.id:
+                        return response
 
-    @app.get("/stats")
-    async def get_network_stats():
-        return smart_node.get_tensorlink_status()
+            await asyncio.sleep(0.25)
+            if time.time() - start_time > 30:
+                raise HTTPException(status_code=504, detail="Request timed out.")
 
-    app.include_router(router)
-
-    thread = threading.Thread(
-        target=uvicorn.run,
-        args=(app,),
-        kwargs={
-            "host": "0.0.0.0",
-            "port": 64747,
-        },
-    )
-    thread.daemon = True
-    thread.start()
-
-    return thread
+    def _start_server(self):
+        thread = threading.Thread(
+            target=uvicorn.run,
+            args=(self.app,),
+            kwargs={"host": self.host, "port": self.port},
+        )
+        thread.daemon = True
+        thread.start()
 
     # @app.post("/api/load_model")
     # async def load_model(request: JobRequest):
