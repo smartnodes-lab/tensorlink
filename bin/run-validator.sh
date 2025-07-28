@@ -110,11 +110,6 @@ else
             fi
         else
             echo "Tensorlink is already at the latest version ($installed_version)."
-            # Force reinstall to ensure clean state
-            echo "Reinstalling to ensure clean state..."
-            if ! pip install --force-reinstall tensorlink==$latest_version; then
-                handle_error "Failed to reinstall Tensorlink"
-            fi
         fi
     fi
 fi

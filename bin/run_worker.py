@@ -5,7 +5,6 @@ import subprocess
 import sys
 import time
 
-import dotenv
 import torch.cuda as cuda
 
 from tensorlink.mpc.nodes import WorkerNode
@@ -20,7 +19,7 @@ def get_root_dir():
 
 def create_env_file(_env_path, _config):
     """
-    Create a default .env file at the specified path if it doesn't exist.
+    Create a default .tensorlink.env file at the specified path if it doesn't exist.
     """
     if not os.path.exists(_env_path):
         with open(_env_path, "w") as env_file:
@@ -31,9 +30,11 @@ def load_config(config_path="config.json"):
     try:
         with open(config_path, "r") as f:
             return json.load(f)
-
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logging.error(f"Error loading config: {e}")
+    except FileNotFoundError:
+        logging.warning(f"Config file {config_path} not found, using defaults")
+        return {}
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in config file: {e}")
         return {}
 
 
@@ -94,18 +95,18 @@ def _confirm_action():
 
 def main():
     root_dir = get_root_dir()
-    env_path = os.path.join(root_dir, ".env")
+    env_path = os.path.join(root_dir, ".tensorlink.env")
 
     # Load config if needed
     config = load_config(os.path.join(root_dir, "config.json"))
     create_env_file(env_path, config)
 
     mining_process = None
-    mining_enabled = config.get("mining", "false").lower() == "true"
     mining_script = config.get("mining-script")
     use_sudo = True if os.geteuid() == 0 else False
-    local = True if config.get("local", "false") == "true" else False
-    trusted = True if config.get("local", "false") == "true" else False
+    local = config.get("local", False)
+    trusted = config.get("trusted", False)
+    mining_enabled = config.get("mining", False)
     upnp = True if local == "false" else False
 
     if trusted:

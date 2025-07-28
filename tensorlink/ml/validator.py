@@ -11,11 +11,16 @@ import json
 import time
 import gc
 import re
+import os
 
 
 MODELS_CACHE_PATH = "logs/models.json"
-SUPPORTED_MODELS_PATH = "tensorlink/config/models.json"
 
+# Path to package root (where this file lives)
+base_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Path to config/models.json relative to this script
+SUPPORTED_MODELS_PATH = os.path.join(base_dir, "..", "config", "models.json")
 
 with open(SUPPORTED_MODELS_PATH, "rb") as f:
     MODELS = json.load(f)

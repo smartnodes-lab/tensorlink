@@ -17,10 +17,6 @@ import json
 import time
 
 
-STATE_FILE = "logs/dht_state.json"
-LATEST_STATE_FILE = "logs/latest_state.json"
-
-
 class Validator(Torchnode):
     def __init__(
         self,
@@ -78,7 +74,7 @@ class Validator(Torchnode):
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
             if self.public_key is None:
                 self.debug_print(
-                    "Public key not found in .env file, terminating...",
+                    "Public key not found in .tensorlink.env file, terminating...",
                     tag="Validator",
                     level=logging.CRITICAL,
                 )
