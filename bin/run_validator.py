@@ -23,22 +23,26 @@ def check_env_file(_env_path, _config):
     Create a default .env file at the specified path if it doesn't exist.
     """
     if not os.path.exists(_env_path):
-        raise ".env does not exist! Create a .env file with PUBLIC_KEY and PRIVATE_KEY as per the documentation."
+        raise FileNotFoundError(
+            ".tensorlink.env does not exist! Create a .env file with PUBLIC_KEY and PRIVATE_KEY as per the documentation."
+        )
 
 
 def load_config(config_path="config.json"):
     try:
         with open(config_path, "r") as f:
             return json.load(f)
-
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        logging.error(f"Error loading config: {e}")
+    except FileNotFoundError:
+        logging.warning(f"Config file {config_path} not found, using defaults")
+        return {}
+    except json.JSONDecodeError as e:
+        logging.error(f"Invalid JSON in config file: {e}")
         return {}
 
 
 def main():
     root_dir = get_root_dir()
-    env_path = os.path.join(root_dir, ".env")
+    env_path = os.path.join(root_dir, ".tensorlink.env")
 
     # Load config if needed
     config = load_config(os.path.join(root_dir, "config.json"))
