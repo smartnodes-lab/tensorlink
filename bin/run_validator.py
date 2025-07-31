@@ -48,7 +48,7 @@ def main():
     config = load_config(os.path.join(root_dir, "config.json"))
     check_env_file(env_path, config)
 
-    local = config.get("local", "false")
+    local = config.get("local", False)
     upnp = True
     if local == "true":
         upnp = False

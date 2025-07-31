@@ -15,6 +15,7 @@ import logging
 import queue
 import json
 import time
+import os
 
 
 class Validator(Torchnode):
@@ -896,21 +897,24 @@ class Validator(Torchnode):
         print("=============================================\n")
 
     def get_tensorlink_status(self):
-        with open("tensorlink/config/models.json", "rb") as f:
+        # Path to package root (where this file lives)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        models_path = os.path.join(base_dir, "..", "config", "models.json")
+
+        with open(models_path, "rb") as f:
             models = json.load(f)
             free_models = models["FREE_MODELS"]
 
-        total_capacity = int(
-            sum(worker["total_gpu_memory"] for worker in self.all_workers.values())
-        )
+        summary = self.keeper.get_network_summary()["current"]
 
         return {
-            "validators": len(self.validators) + 1,
-            "workers": len(self.all_workers),
-            "users": len(self.users),
+            "validators": summary["validators"] + 1,
+            "workers": summary["workers"],
+            "users": summary["users"],
+            "jobs": summary["jobs"],
             "proposal": self.current_proposal,
-            "available_capacity": sum(self.worker_memories.values()),
-            "used_capacity": total_capacity - sum(self.worker_memories.values()),
+            "available_capacity": summary["available_capacity"],
+            "used_capacity": summary["used_capacity"],
             "models": free_models,
         }
 
@@ -919,6 +923,8 @@ class Validator(Torchnode):
     ) -> Dict:
         """
         Get network statistics formatted for API consumption and charting.
+        Stores recent network stats and only re-renders them after a certain
+        time has passed
 
         Args:
             days: Number of days of daily statistics to retrieve (max 90)

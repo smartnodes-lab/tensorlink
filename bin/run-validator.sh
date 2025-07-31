@@ -117,7 +117,7 @@ fi
 # Verify installation
 final_version=$(pip show tensorlink 2>/dev/null | grep Version | awk '{print $2}')
 if [ -n "$final_version" ]; then
-    echo "Tensorlink is now installed at version: $final_version"
+    echo "Tensorlink verified at version: $final_version"
 else
     handle_error "Tensorlink installation verification failed"
 fi

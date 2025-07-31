@@ -81,7 +81,7 @@ def _save_latest_state(current_data):
 def _is_entity_current(entity_data):
     """Check if entity should be included based on last_seen timestamp."""
     if not entity_data or not isinstance(entity_data, dict):
-        return True  # Include if no data or not a dict
+        return True  # Include if no data or not a dict (ie a node)
 
     last_seen = entity_data.get("last_seen")
     if last_seen is None:
