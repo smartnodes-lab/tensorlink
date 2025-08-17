@@ -75,14 +75,14 @@ BACKGROUND_COLOURS = {
 base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(base_dir, "../config")
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCore.json")
-MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesMultiSig.json")
+MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCoordinator.json")
 API = get_key(".tensorlink.env", "API")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
     CHAIN_URL = config["api"]["chain-url"]
-    if API:
-        CHAIN_URL = API
+    # if API:
+    #     CHAIN_URL = API
 
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
@@ -218,6 +218,7 @@ class Smartnode(threading.Thread):
         # Get private ip
         if not local_test:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # s.connect(("8.8.8.8", 80))
             s.connect(("8.8.8.8", 80))
             self.host = s.getsockname()[0]
             s.close()
@@ -263,7 +264,7 @@ class Smartnode(threading.Thread):
 
         if local_test:
             self.upnp = False
-            self.off_chain_test = True
+            # self.off_chain_test = True
 
         self.public_key = None
 
@@ -1144,7 +1145,7 @@ class Smartnode(threading.Thread):
                     self.dht.delete(id_hash)
 
         # Connect to additional randomly selected validators from the network
-        n_validators = self.get_validator_count()
+        n_validators = 1
         sample_size = min(n_validators, 0)
         for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
             # Random validator id
@@ -1536,11 +1537,6 @@ class Smartnode(threading.Thread):
                 port += random.randint(1, 50)
 
     """Methods for Smart Contract Interactions"""
-
-    def get_validator_count(self):
-        """Get number of listed validators on Smart Nodes"""
-        num_validators = self.contract.functions.validatorCounter().call()
-        return num_validators - 1
 
     def get_validator_info(self, validator_ind: int):
         """Get validator info from Smart Nodes"""
