@@ -673,7 +673,7 @@ class Smartnode(threading.Thread):
         # Check node reputation from validator nodes
         if len(self.nodes) > 0 and self.off_chain_test is False:
             dht_info = self.dht.query(
-                node_info['node_id_hash'], ids_to_exclude=[node_info['node_id_hash']]
+                node_info['node_id_hash'], keys_to_exclude=[node_info['node_id_hash']]
             )
 
             if dht_info and dht_info.get("reputation", 0) < 40:

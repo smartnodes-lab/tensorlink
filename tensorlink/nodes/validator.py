@@ -583,7 +583,7 @@ class Validator(Torchnode):
         self.debug_print(f"Declining job '{job_data['id']}': {reason}", tag="Validator")
         self.response_queue.put({"status": "SUCCESS", "return": False})
         if requesting_node:
-            self.decline_job(requesting_node)
+            self.decline_job(requesting_node, reason)
 
     def _assign_workers_to_modules(
         self,
@@ -700,9 +700,12 @@ class Validator(Torchnode):
         t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
         t.start()
 
-    def decline_job(self, node):
+    def decline_job(self, node, reason: str = None):
         if node:
-            self.send_to_node(node, b"DECLINE-JOB")
+            if reason is None:
+                reason = b""
+
+            self.send_to_node(node, b"DECLINE-JOB" + reason.encode())
 
     def recruit_worker(
         self,
