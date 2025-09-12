@@ -1144,36 +1144,36 @@ class Smartnode(threading.Thread):
                 else:
                     self.dht.delete(id_hash)
 
-        # Connect to additional randomly selected validators from the network
-        n_validators = 1
-        sample_size = min(n_validators, 0)
-        for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
-            # Random validator id
-            validator_id = random.randrange(1, n_validators + 1)
-
-            # Get key validator information from smart contract
-            validator_contract_info = self.get_validator_info(validator_id)
-
-            if validator_contract_info is not None:
-                is_active, id_hash = validator_contract_info
-                id_hash = id_hash.hex()
-                validator_p2p_info = self.dht.query(id_hash)
-
-                if validator_p2p_info is None:
-                    self.dht.delete(id_hash)
-                    continue
-
-                # Connect to the validator's node and exchange information
-                # TODO what if we receive false connection info from validator: how to report?
-                connected = self.connect_node(
-                    id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
-                )
-
-                if not connected:
-                    self.dht.delete(id_hash)
-                    continue
-
-                candidates.append(validator_id)
+        # # Connect to additional randomly selected validators from the network
+        # n_validators = 1
+        # sample_size = min(n_validators, 0)
+        # for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
+        #     # Random validator id
+        #     validator_id = random.randrange(1, n_validators + 1)
+        #
+        #     # Get key validator information from smart contract
+        #     validator_contract_info = self.get_validator_info(validator_id)
+        #
+        #     if validator_contract_info is not None:
+        #         is_active, id_hash = validator_contract_info
+        #         id_hash = id_hash.hex()
+        #         validator_p2p_info = self.dht.query(id_hash)
+        #
+        #         if validator_p2p_info is None:
+        #             self.dht.delete(id_hash)
+        #             continue
+        #
+        #         # Connect to the validator's node and exchange information
+        #         # TODO what if we receive false connection info from validator: how to report?
+        #         connected = self.connect_node(
+        #             id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
+        #         )
+        #
+        #         if not connected:
+        #             self.dht.delete(id_hash)
+        #             continue
+        #
+        #         candidates.append(validator_id)
 
         return candidates
 
@@ -1537,16 +1537,3 @@ class Smartnode(threading.Thread):
                 port += random.randint(1, 50)
 
     """Methods for Smart Contract Interactions"""
-
-    def get_validator_info(self, validator_ind: int):
-        """Get validator info from Smart Nodes"""
-        try:
-            (is_active, pub_key_hash) = self.contract.functions.getValidatorInfo(
-                validator_ind
-            ).call()
-            return is_active, pub_key_hash
-
-        except Exception as e:
-            self.debug_print(
-                f"Validator with the ID {validator_ind} not found!.\nException: {e}"
-            )
