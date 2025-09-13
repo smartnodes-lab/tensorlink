@@ -4,7 +4,9 @@ from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.module import DistributedModel
 from tensorlink.api.node import GenerationRequest
 
+from collections import defaultdict
 from transformers import AutoTokenizer
+import heapq
 import torch
 import logging
 import json
@@ -132,6 +134,17 @@ class DistributedValidator(DistributedWorker):
         self.GC_CHECK_INTERVAL = 1000
         self.CHECK_COUNTER = 1
 
+        self.model_demand_history = defaultdict(list)
+        self.loading_queue = []
+        self.model_load_timestamps = {}
+        self.demand_check_interval = 50
+        self.max_concurrent_models = 3
+        self.min_demand_threshold = 1
+        self.demand_window_size = 100  # Number of recent demand samples to consider
+        self.pending_requests = defaultdict(list)  # Queue requests waiting for models
+        self.preload_candidates = set()  # Models to preload based on patterns
+        self.request_urgency_threshold = 3  # Auto-load if this many requests queue up
+
     def inspect_model(self, model_name: str, job_data: dict = None):
         """Inspect a model to determine network requirements (ie vram, n modules, etc)"""
         parser = ModelParser()
@@ -167,16 +180,252 @@ class DistributedValidator(DistributedWorker):
             except Exception as e:
                 print(str(e))
 
+    def model_manager(self):
+        """Enhanced model management with urgency handling"""
+        try:
+            # Get real-time demand from API layer
+            current_api_demand = self.send_request("get_api_demand_stats", None) or {}
+
+            # Merge with coordinator demand stats
+            coordinator_demand = self.send_request("get_model_demand_stats", None) or {}
+
+            # Combine demand sources (API requests + coordinator stats)
+            total_demand = defaultdict(int)
+            for source in [current_api_demand, coordinator_demand]:
+                for model, count in source.items():
+                    total_demand[model] += count
+
+            self.update_demand_history(total_demand)
+
+            # URGENT: Handle queued requests that need immediate model loading
+            self.handle_urgent_requests()
+
+            # Regular demand-based loading
+            self.update_loading_queue()
+
+            # Try to load highest priority model if we have capacity
+            if self.loading_queue and len(self.models) < self.max_concurrent_models:
+                model_name, priority = self.loading_queue[0]
+
+                # Check if this is an urgent request
+                is_urgent = (
+                    len(self.pending_requests[model_name])
+                    >= self.request_urgency_threshold
+                )
+
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Loading model: {model_name} (priority: {priority:.1f}, urgent: {is_urgent})",
+                        "green" if not is_urgent else "red",
+                        logging.INFO,
+                    ),
+                )
+
+                self.loading_queue.pop(0)
+                self._initialize_hosted_job(model_name)
+                self.model_load_timestamps[model_name] = time.time()
+
+            # Unload low-demand models
+            self.manage_model_unloading()
+
+        except Exception as e:
+            logging.error(f"Error in enhanced model management: {str(e)}")
+
+    def manage_model_unloading(self):
+        """Smart model unloading with better heuristics"""
+        if len(self.models) <= 1:
+            return  # Keep at least one model
+
+        models_to_unload = []
+        for model_name in list(self.models.keys()):
+            if self.should_unload_model(model_name):
+                # Calculate unload score (higher = more likely to unload)
+                time_since_use = time.time() - self.model_load_timestamps.get(
+                    model_name, time.time()
+                )
+                recent_demand = sum(
+                    count for ts, count in self.model_demand_history[model_name][-3:]
+                )
+
+                unload_score = time_since_use / (
+                    recent_demand + 1
+                )  # Avoid division by zero
+                models_to_unload.append((model_name, unload_score))
+
+        if models_to_unload:
+            # Sort by unload score and unload the highest scoring model
+            models_to_unload.sort(key=lambda x: x[1], reverse=True)
+            model_to_unload = models_to_unload[0][0]
+
+            self.send_request(
+                "debug_print",
+                (
+                    f"Smart unload: {model_to_unload} (score: {models_to_unload[0][1]:.1f})",
+                    "yellow",
+                    logging.INFO,
+                ),
+            )
+            self._remove_hosted_job(model_to_unload)
+
+    def handle_urgent_requests(self):
+        """Handle requests that have been waiting for unavailable models"""
+        for model_name, requests in self.pending_requests.items():
+            if (
+                len(requests) >= self.request_urgency_threshold
+                and model_name not in self.models
+            ):
+                # Force-load model for urgent requests
+                if len(self.models) >= self.max_concurrent_models:
+                    # Free up space by unloading least recently used model
+                    lru_model = min(
+                        self.model_load_timestamps.keys(),
+                        key=lambda m: self.model_load_timestamps[m],
+                    )
+                    if lru_model != model_name:  # Don't unload what we're about to load
+                        self.send_request(
+                            "debug_print",
+                            (
+                                f"Emergency unload of {lru_model} for urgent {model_name}",
+                                "yellow",
+                                logging.WARNING,
+                            ),
+                        )
+                        self._remove_hosted_job(lru_model)
+
+                # Prioritize this model for immediate loading
+                self.loading_queue.insert(0, (model_name, 999))  # Max priority
+
+    def update_loading_queue(self):
+        """Update the priority queue of models to load based on current demand"""
+        current_demand = self.get_model_demand_stats()
+        self.update_demand_history(current_demand)
+
+        # Clear existing queue
+        self.loading_queue.clear()
+
+        # Calculate priorities for all free models
+        model_priorities = []
+        for model_name in FREE_MODELS:
+            if model_name not in self.models:  # Only queue unloaded models
+                priority = self.calculate_model_priority(model_name)
+                if priority >= self.min_demand_threshold:
+                    # Use negative priority for max-heap behavior
+                    heapq.heappush(model_priorities, (-priority, model_name))
+
+        # Convert to loading queue (keep top models within resource limits)
+        available_slots = self.max_concurrent_models - len(self.models)
+        while model_priorities and len(self.loading_queue) < available_slots:
+            neg_priority, model_name = heapq.heappop(model_priorities)
+            self.loading_queue.append((model_name, -neg_priority))
+
+        # Sort by priority (highest first)
+        self.loading_queue.sort(key=lambda x: x[1], reverse=True)
+
+        if self.loading_queue:
+            self.send_request(
+                "debug_print",
+                (
+                    f"Updated loading queue: {[(name, f'{priority:.1f}') for name, priority in self.loading_queue]}",
+                    "cyan",
+                    logging.INFO,
+                ),
+            )
+
+    def should_unload_model(self, model_name):
+        """Determine if a model should be unloaded due to low demand or expiration"""
+        if len(self.pending_requests[model_name]) > 0:
+            return False
+
+        if model_name not in FREE_MODELS or model_name not in self.models:
+            return False
+
+        # Don't unload if recently loaded (give it time to be used)
+        if model_name in self.model_load_timestamps:
+            time_since_load = time.time() - self.model_load_timestamps[model_name]
+            if time_since_load < 600:  # 10 minutes minimum runtime
+                return False
+
+        # Check recent demand
+        if model_name in self.model_demand_history:
+            recent_history = self.model_demand_history[model_name][
+                -3:
+            ]  # Last 3 samples
+            if recent_history:
+                recent_demand = sum(count for ts, count in recent_history)
+                if recent_demand < 2:  # Very low recent demand
+                    return True
+
+        return False
+
+    def calculate_model_priority(self, model_name):
+        """Calculate priority score for loading a model based on demand patterns"""
+        if model_name not in self.model_demand_history:
+            return 0
+
+        history = self.model_demand_history[model_name]
+        if len(history) < 2:
+            return 0
+
+        # Recent demand (higher weight for recent requests)
+        recent_demand = sum(count for ts, count in history[-self.demand_window_size :])
+
+        # Demand trend (is it increasing?)
+        if len(history) >= 4:
+            recent_avg = sum(count for ts, count in history[-2:]) / 2
+            older_avg = sum(count for ts, count in history[-4:-2]) / 2
+            trend_multiplier = max(1.0, recent_avg / max(older_avg, 1))
+        else:
+            trend_multiplier = 1.0
+
+        # Penalty if model is already loaded
+        load_penalty = 0.1 if model_name in self.models else 1.0
+
+        # Priority score (higher = more priority)
+        priority = recent_demand * trend_multiplier * load_penalty
+
+        return priority
+
+    def update_demand_history(self, current_demand):
+        """Update rolling window of demand history for each model"""
+        current_time = time.time()
+
+        for model_name, request_count in current_demand.items():
+            if model_name in FREE_MODELS:
+                # Add current demand sample with timestamp
+                self.model_demand_history[model_name].append(
+                    (current_time, request_count)
+                )
+
+                # Keep only recent samples within the window
+                cutoff_time = current_time - 300  # 5 minutes window
+                self.model_demand_history[model_name] = [
+                    (ts, count)
+                    for ts, count in self.model_demand_history[model_name]
+                    if ts > cutoff_time
+                ]
+
+    def get_model_demand_stats(self):
+        """Get hashmap of model_names to num generate requests from the coordinator"""
+        try:
+            # This would be your API call to get current demand stats
+            demand_stats = self.send_request("get_model_demand_stats", None)
+            if isinstance(demand_stats, dict):
+                return demand_stats
+            return {}
+        except Exception as e:
+            logging.error(f"Error getting demand stats: {str(e)}")
+            return {}
+
     def check_node(self):
         """Check for node requests/updates"""
         try:
-            # When running on the public network, we try to maintain an active set of free API models
+            # When running on the public network, we maintain an active set of self-hosted API-accessible models
             if not self.node.init_kwargs.get("local_test", False):
-                if self.models_initialized < len(FREE_MODELS):
-                    time.sleep(10)  # Temporary sleep to allow network bootstrap first
-                    self.initialize_hosted_jobs()
+                if self.CHECK_COUNTER % self.demand_check_interval == 0:
+                    self.model_manager()
 
-                # Check if job is still activity
+                # Check if job is still active
                 if self.CHECK_COUNTER % self.GC_CHECK_INTERVAL == 0:
                     for model_name in self.models:
                         if model_name in FREE_MODELS:
@@ -215,13 +464,33 @@ class DistributedValidator(DistributedWorker):
 
     def _handle_generate_request(self, request: GenerationRequest):
         if request.hf_name not in self.models:
-            request.output = (
-                "Model is currently not available through the Tensorlink API."
-            )
+            # Queue the request and trigger urgent loading if needed
+            self.pending_requests[request.hf_name].append(request)
+
+            # Trigger model loading if urgency threshold reached
+            if (
+                len(self.pending_requests[request.hf_name])
+                >= self.request_urgency_threshold
+            ):
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Urgent loading triggered for {request.hf_name}",
+                        "red",
+                        logging.WARNING,
+                    ),
+                )
+
+            request.output = f"Model {request.hf_name} is loading due to demand. Please retry in 30-60 seconds."
+
         else:
             module_id = self.models[request.hf_name]
             model = self.modules[module_id]
             tokenizer = self.tokenizers[request.hf_name]
+
+            # Remove from pending queue if it was there
+            if request in self.pending_requests[request.hf_name]:
+                self.pending_requests[request.hf_name].remove(request)
 
             # Format chat history into a standardized prompt
             formatted_prompt = format_chat_prompt(

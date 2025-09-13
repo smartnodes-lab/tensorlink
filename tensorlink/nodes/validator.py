@@ -246,6 +246,7 @@ class Validator(Torchnode):
                 "check_job": self._handle_check_job,
                 "send_job_request": self.create_base_job,
                 "update_api_request": self._handle_update_api,
+                "get_model_demand_stats": self._get_api_demand,
             }
 
             handler = handlers.get(req_type)
@@ -257,6 +258,11 @@ class Validator(Torchnode):
 
         except Exception as e:
             self.response_queue.put({"status": "FAILURE", "error": str(e)})
+
+    def _get_api_demand(self):
+        self.response_queue.put(
+            {"status": "SUCCESS", "return": self.endpoint.model_name_to_request}
+        )
 
     def _handle_get_jobs(self, request):
         """Check if we have received any job requests for huggingface models and fully hosted or api jobs, then relay
@@ -454,7 +460,7 @@ class Validator(Torchnode):
         self.request_worker_stats()
 
         if user_id and user_id != self.rsa_key_hash:
-            # Check that user doesnt have an active job already
+            # Check that user doesn't have an active job already
             user_info = self.dht.query(user_id, keys_to_exclude=[self.rsa_key_hash])
 
             # Check for active job

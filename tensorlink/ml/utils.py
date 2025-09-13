@@ -1,19 +1,13 @@
-import ast
-import base64
-import importlib
-import inspect
-import io
 import json
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 from transformers.utils import ModelOutput
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 
@@ -319,41 +313,119 @@ def format_memory_size(number: int) -> str:
 def estimate_hf_model_memory(
     model_name: str,
     batch_size: int = 32,
+    seq_length: int = 256,
     dtype: torch.dtype = torch.float32,
     optimizer_type: str = "adam",
-    precision: str = "fp32",
-    seq_length: int = 256,
     training: bool = True,
 ) -> Tuple[float, float]:
-    api = HfApi()
+    """
+    Estimate memory requirements for a HuggingFace transformer model.
+
+    Returns:
+        Tuple[float, float]: (vram_memory_gb, ram_memory_gb)
+    """
+
+    def get_dtype_size(dtype_str_or_obj):
+        """Convert dtype to bytes per element"""
+        if isinstance(dtype_str_or_obj, str):
+            dtype_map = {
+                "float32": 4,
+                "fp32": 4,
+                "float16": 2,
+                "fp16": 2,
+                "half": 2,
+                "bfloat16": 2,
+                "bf16": 2,
+                "int8": 1,
+                "int16": 2,
+                "int32": 4,
+            }
+            return dtype_map.get(dtype_str_or_obj.lower(), 4)
+        else:
+            return (
+                dtype_str_or_obj.element_size()
+                if hasattr(dtype_str_or_obj, 'element_size')
+                else 4
+            )
 
     try:
-        training_multiplier = 4 if training else 1
-        model_info = api.model_info(repo_id=model_name)
-        total_ram = model_info.usedStorage * training_multiplier
-        total_vram = total_ram
+        # Get model config
+        config_path = hf_hub_download(repo_id=model_name, filename="config.json")
+        with open(config_path, "r") as f:
+            config = json.load(f)
 
-        # Extract model size (if available)
-        # num_params = model_info.safetensors.get("parameters", {}).get("F16", 0) // 2
-        # dtype_size = {"fp32": 4, "fp16": 2, "int8": 1}.get(precision, 4)
-        # param_memory = num_params * dtype_size
-        # activation_memory = batch_size * seq_length * dtype_size * 4
-        # total_vram = param_memory + activation_memory
-        #
-        # if training:
-        #     optimizer_memory = param_memory * 2
-        #     total_vram += optimizer_memory
-        # total_ram = 1.2 * num_params * dtype_size
+        # Extract architecture parameters
+        hidden_size = config.get("hidden_size", config.get("d_model", 768))
+        num_layers = config.get("num_hidden_layers", config.get("num_layers", 12))
+        vocab_size = config.get("vocab_size", 30000)
+        intermediate_size = config.get("intermediate_size", hidden_size * 4)
+        num_attention_heads = config.get("num_attention_heads", 12)
 
-        return total_vram, total_ram
+        # Get dtype size in bytes
+        dtype_size = get_dtype_size(dtype)
+
+        # Calculate parameter counts
+        # Embedding layers
+        token_embeddings = vocab_size * hidden_size
+        position_embeddings = seq_length * hidden_size  # Approximate
+        embedding_params = token_embeddings + position_embeddings
+
+        # Per layer parameters
+        # Self-attention: Q, K, V projections + output projection
+        attention_params = 4 * hidden_size * hidden_size
+
+        # Feed-forward: two linear layers
+        ff_params = hidden_size * intermediate_size + intermediate_size * hidden_size
+
+        # Layer norms (2 per layer typically)
+        ln_params = 2 * hidden_size
+
+        layer_params = attention_params + ff_params + ln_params
+        total_layer_params = num_layers * layer_params
+
+        # Final layer norm and output head
+        final_params = hidden_size + vocab_size * hidden_size
+
+        total_params = embedding_params + total_layer_params + final_params
+
+        # Parameter memory
+        param_memory = total_params * dtype_size
+
+        # Training memory multipliers
+        optimizer_multiplier = {"adam": 2, "adamw": 2, "sgd": 1}.get(
+            optimizer_type.lower(), 2
+        )
+
+        if training:
+            # Parameters + Gradients + Optimizer states
+            param_memory_training = param_memory * (1 + 1 + optimizer_multiplier)
+        else:
+            param_memory_training = param_memory
+
+        # Activation memory (approximate)
+        # This is a rough estimate - actual activation memory depends heavily on implementation
+        activation_memory_per_token = (
+            batch_size
+            * seq_length
+            * hidden_size
+            * num_layers
+            * dtype_size
+            * 2  # Forward + backward
+        )
+
+        if not training:
+            activation_memory_per_token //= 2  # Only forward pass
+
+        total_memory = param_memory_training + activation_memory_per_token
+
+        return total_memory, param_memory
 
     except Exception as e:
-        print(f"Error fetching model info: {e}")
-        return 0, 0
+        print(f"Error estimating memory for {model_name}: {e}")
+        return 0.0, 0.0
 
 
 def get_hf_model(model_name: str, tokenizer: bool = False):
-    api = HfApi()
     try:
         # Get model information from Hugging Face api
         model = AutoModelForCausalLM.from_pretrained(model_name)
