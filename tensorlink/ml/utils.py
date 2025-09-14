@@ -2,7 +2,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -312,22 +312,23 @@ def format_memory_size(number: int) -> str:
 
 def estimate_hf_model_memory(
     model_name: str,
-    batch_size: int = 32,
-    seq_length: int = 256,
-    dtype: torch.dtype = torch.float32,
+    batch_size: int = 1,  # Default to 1 for inference
+    seq_length: int = 2048,  # More realistic default
+    dtype: Union[torch.dtype, str] = torch.float16,  # More common for inference
     optimizer_type: str = "adam",
-    training: bool = True,
-) -> Tuple[float, float]:
+    training: bool = False,  # Default to inference
+    include_kv_cache: bool = True,  # Important for inference
+) -> Tuple[float, dict]:
     """
     Estimate memory requirements for a HuggingFace transformer model.
 
     Returns:
-        Tuple[float, float]: (vram_memory_gb, ram_memory_gb)
+        Tuple[float, dict]: (total_memory_gb, breakdown_dict)
     """
 
-    def get_dtype_size(dtype_str_or_obj):
+    def get_dtype_size(dtype_input):
         """Convert dtype to bytes per element"""
-        if isinstance(dtype_str_or_obj, str):
+        if isinstance(dtype_input, str):
             dtype_map = {
                 "float32": 4,
                 "fp32": 4,
@@ -337,16 +338,18 @@ def estimate_hf_model_memory(
                 "bfloat16": 2,
                 "bf16": 2,
                 "int8": 1,
-                "int16": 2,
-                "int32": 4,
+                "uint8": 1,
+                "int4": 0.5,
+                "uint4": 0.5,  # For quantized models
             }
-            return dtype_map.get(dtype_str_or_obj.lower(), 4)
+            return dtype_map.get(dtype_input.lower(), 4)
         else:
-            return (
-                dtype_str_or_obj.element_size()
-                if hasattr(dtype_str_or_obj, 'element_size')
-                else 4
-            )
+            if hasattr(dtype_input, 'element_size'):
+                return dtype_input.element_size()
+            elif hasattr(dtype_input, 'itemsize'):
+                return dtype_input.itemsize
+            else:
+                return 4
 
     try:
         # Get model config
@@ -354,75 +357,121 @@ def estimate_hf_model_memory(
         with open(config_path, "r") as f:
             config = json.load(f)
 
-        # Extract architecture parameters
-        hidden_size = config.get("hidden_size", config.get("d_model", 768))
-        num_layers = config.get("num_hidden_layers", config.get("num_layers", 12))
-        vocab_size = config.get("vocab_size", 30000)
+        # Extract architecture parameters with better fallbacks
+        hidden_size = config.get("hidden_size", config.get("d_model", 4096))
+        num_layers = config.get("num_hidden_layers", config.get("num_layers", 32))
+        vocab_size = config.get("vocab_size", 32000)
         intermediate_size = config.get("intermediate_size", hidden_size * 4)
-        num_attention_heads = config.get("num_attention_heads", 12)
+        num_attention_heads = config.get("num_attention_heads", 32)
+        num_key_value_heads = config.get(
+            "num_key_value_heads", num_attention_heads
+        )  # For GQA/MQA
 
         # Get dtype size in bytes
         dtype_size = get_dtype_size(dtype)
 
-        # Calculate parameter counts
-        # Embedding layers
+        # More accurate parameter calculation
+        # Token embeddings
         token_embeddings = vocab_size * hidden_size
-        position_embeddings = seq_length * hidden_size  # Approximate
-        embedding_params = token_embeddings + position_embeddings
 
         # Per layer parameters
         # Self-attention: Q, K, V projections + output projection
-        attention_params = 4 * hidden_size * hidden_size
+        # Account for grouped query attention
+        q_params = hidden_size * hidden_size
+        kv_params = (
+            2 * hidden_size * (hidden_size * num_key_value_heads // num_attention_heads)
+        )
+        attn_output_params = hidden_size * hidden_size
+        attention_params = q_params + kv_params + attn_output_params
 
-        # Feed-forward: two linear layers
-        ff_params = hidden_size * intermediate_size + intermediate_size * hidden_size
+        # Feed-forward network (typically gate, up, down projections for modern models)
+        ff_params = (
+            2 * hidden_size * intermediate_size + intermediate_size * hidden_size
+        )
 
-        # Layer norms (2 per layer typically)
-        ln_params = 2 * hidden_size
+        # RMS norm parameters (more common than LayerNorm in modern models)
+        norm_params = hidden_size  # One norm per layer typically
 
-        layer_params = attention_params + ff_params + ln_params
+        layer_params = attention_params + ff_params + norm_params
         total_layer_params = num_layers * layer_params
 
-        # Final layer norm and output head
-        final_params = hidden_size + vocab_size * hidden_size
+        # Final norm and output projection (often tied to embeddings)
+        final_norm = hidden_size
+        # Many models tie output projection to input embeddings, so don't double count
+        output_projection = 0  # vocab_size * hidden_size if not tied
 
-        total_params = embedding_params + total_layer_params + final_params
-
-        # Parameter memory
-        param_memory = total_params * dtype_size
-
-        # Training memory multipliers
-        optimizer_multiplier = {"adam": 2, "adamw": 2, "sgd": 1}.get(
-            optimizer_type.lower(), 2
+        total_params = (
+            token_embeddings + total_layer_params + final_norm + output_projection
         )
 
+        # Base parameter memory
+        param_memory_bytes = total_params * dtype_size
+
+        breakdown = {
+            "parameters_gb": param_memory_bytes / (1024**3),
+            "activations_gb": 0,
+            "kv_cache_gb": 0,
+            "optimizer_gb": 0,
+            "gradients_gb": 0,
+        }
+
+        # Activation memory (much smaller for inference, larger for training)
         if training:
-            # Parameters + Gradients + Optimizer states
-            param_memory_training = param_memory * (1 + 1 + optimizer_multiplier)
+            # Rough estimate: activations scale with batch_size * seq_length * hidden_size * num_layers
+            # Include attention matrices and intermediate activations
+            activation_memory = (
+                batch_size
+                * seq_length
+                * hidden_size
+                * num_layers
+                * dtype_size
+                * 4  # Rough multiplier
+            )
+            breakdown["activations_gb"] = activation_memory / (1024**3)
+
+            # Gradients memory (same size as parameters)
+            gradient_memory = param_memory_bytes
+            breakdown["gradients_gb"] = gradient_memory / (1024**3)
+
+            # Optimizer states
+            optimizer_multiplier = {
+                "adam": 2,
+                "adamw": 2,
+                "sgd": 1,
+                "adafactor": 1,
+            }.get(optimizer_type.lower(), 2)
+            optimizer_memory = param_memory_bytes * optimizer_multiplier
+            breakdown["optimizer_gb"] = optimizer_memory / (1024**3)
+
         else:
-            param_memory_training = param_memory
+            # Inference activations are much smaller
+            # Mainly just the current layer's activations
+            activation_memory = batch_size * seq_length * hidden_size * dtype_size * 2
+            breakdown["activations_gb"] = activation_memory / (1024**3)
 
-        # Activation memory (approximate)
-        # This is a rough estimate - actual activation memory depends heavily on implementation
-        activation_memory_per_token = (
-            batch_size
-            * seq_length
-            * hidden_size
-            * num_layers
-            * dtype_size
-            * 2  # Forward + backward
-        )
+        # KV cache for inference (can be significant for long sequences)
+        if include_kv_cache and not training:
+            # KV cache: 2 (K,V) * num_layers * num_kv_heads * head_dim * seq_length * batch_size
+            head_dim = hidden_size // num_attention_heads
+            kv_cache_memory = (
+                2
+                * num_layers
+                * num_key_value_heads
+                * head_dim
+                * seq_length
+                * batch_size
+                * dtype_size
+            )
+            breakdown["kv_cache_gb"] = kv_cache_memory / (1024**3)
 
-        if not training:
-            activation_memory_per_token //= 2  # Only forward pass
+        total_memory_bytes = sum(v * (1024**3) for v in breakdown.values())
+        total_memory_gb = total_memory_bytes / (1024**3)
 
-        total_memory = param_memory_training + activation_memory_per_token
-
-        return total_memory, param_memory
+        return total_memory_gb, breakdown
 
     except Exception as e:
         print(f"Error estimating memory for {model_name}: {e}")
-        return 0.0, 0.0
+        return 0.0, {}
 
 
 def get_hf_model(model_name: str, tokenizer: bool = False):

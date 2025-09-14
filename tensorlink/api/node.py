@@ -61,7 +61,7 @@ class TensorlinkAPI:
 
                 # Update request counter
                 if request.hf_name not in self.model_name_to_request:
-                    self.model_name_to_request[request.hf_name] = 0
+                    self.model_name_to_request[request.hf_name] = 1
                 self.model_name_to_request[request.hf_name] += 1
 
                 request.output = None
@@ -125,7 +125,7 @@ class TensorlinkAPI:
                     if request.id == response.id:
                         return response
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.01)
             if time.time() - start_time > 30:
                 raise HTTPException(status_code=504, detail="Request timed out.")
 
