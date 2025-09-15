@@ -116,15 +116,17 @@ class DistributedWorker:
             response = self.node_responses.get(
                 timeout=timeout
             )  # Blocking call, waits for response
-        except TimeoutError as e:
+            if isinstance(response, dict):
+                return response["return"]
+            else:
+                return response
+
+        except TimeoutError:
             self.terminate = True
         except Exception as e:
-            response = {"return": str(e)}
+            return {"return": str(e)}
         finally:
             self.mpc_lock.release()
-
-        if response:
-            return response["return"]
 
     def handle_backward(self, module_id, tag, loss_relay):
         """Handle backward pass with mixed precision support"""
@@ -616,7 +618,7 @@ class DistributedWorker:
                     self.handle_backward(module_id, tag, loss_relay)
 
         # Small sleep to prevent CPU hogging
-        time.sleep(0.1)
+        time.sleep(0.01)
 
     def run(self):
         """Main execution thread"""

@@ -161,6 +161,10 @@ class JobMonitor:
         try:
             while not self.terminate_flag.is_set():
                 time.sleep(self.HEALTH_CHECK_INTERVAL_SECONDS)
+                job_data = self._get_job_data(job_id)
+                if not job_data:
+                    self._handle_job_failure(job_id, "Failed to retrieve job data")
+                    return
 
                 try:
                     job_status = self._check_job_health(job_id, job_data)
@@ -191,6 +195,12 @@ class JobMonitor:
 
     def _check_job_health(self, job_id: str, job_data: Dict) -> JobStatus:
         """Comprehensive health check of the job and its components."""
+        # Check if job is expired
+        if job_data.get("last_seen", 15) - job_data.get("timestamp", 0) > job_data.get(
+            "time", 0
+        ):
+            return JobStatus.COMPLETED
+
         # Check user connection
         user_status = self._check_user_status(job_data)
         if not user_status:
@@ -468,12 +478,13 @@ class JobMonitor:
             if module_info["type"] == "offloaded":
                 for worker in module_info["workers"]:
                     try:
-                        node = self.node.nodes[worker]
+                        worker_id, worker_info = worker
+                        node = self.node.nodes[worker_id]
                         self.node.send_to_node(
                             node, b"SHUTDOWN-JOB" + module_id.encode()
                         )
                         # Clear worker health data
-                        self.worker_health_checks.pop(worker, None)
+                        self.worker_health_checks.pop(worker_id, None)
                     except Exception as e:
                         self.node.debug_print(
                             f"Error shutting down worker {worker}: {str(e)}",

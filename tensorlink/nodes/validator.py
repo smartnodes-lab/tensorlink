@@ -366,7 +366,6 @@ class Validator(Torchnode):
         job_data["ram"] = ram
         job_data["vram"] = vram
         job_data["time"] = _time
-
         # Hand off model dissection and worker assignment to DistributedValidator process
         request_value = "HF-JOB-REQ" + json.dumps(job_data)
         self._store_request(self.rsa_key_hash, request_value)
@@ -535,6 +534,13 @@ class Validator(Torchnode):
 
         requesting_node = self._get_requesting_node(job_data, author)
         assigned_workers = self.check_job_availability(job_data)
+
+        if job_data.get("payment", 0) == 0:
+            _time = 15 * 60
+        else:
+            _time = job_data.get("time")
+
+        job_data["time"] = _time
 
         if not assigned_workers:
             self._decline_job(

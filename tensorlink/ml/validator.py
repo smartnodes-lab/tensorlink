@@ -135,6 +135,9 @@ class DistributedValidator(DistributedWorker):
             lambda: deque(maxlen=5000)
         )  # Cap to prevent memory issues
 
+        # Track models that are in the process of being initialized
+        self.models_initializing = set()
+
         # Configuration
         self.TRACKING_DAYS = 7  # Track requests for past 7 days
         self.MIN_REQUESTS_THRESHOLD = 10  # Minimum requests to consider auto-loading
@@ -204,15 +207,46 @@ class DistributedValidator(DistributedWorker):
 
         # Load models up to the limit
         for model_name in models_to_load:
-            if model_name not in self.models:
+            if (
+                model_name not in self.models
+                and model_name not in self.models_initializing
+            ):
                 self.send_request(
                     "debug_print",
                     (f"Auto-loading model: {model_name}", "green", logging.INFO),
                 )
+                self.models_initializing.add(model_name)
                 self._initialize_hosted_job(model_name)
 
+        # Continue initialization for models that are in progress
+        for model_name in list(self.models_initializing):
+            if model_name in models_to_load:  # Still wanted
+                # Try second initialization call
+                self._initialize_hosted_job(model_name)
+                # Check if initialization is complete
+                if model_name in self.models and isinstance(
+                    self.models[model_name], str
+                ):
+                    # Model is fully initialized (module_id is now a string)
+                    self.models_initializing.discard(model_name)
+                    self.send_request(
+                        "debug_print",
+                        (
+                            f"Completed auto-loading model: {model_name}",
+                            "green",
+                            logging.INFO,
+                        ),
+                    )
+            else:
+                # Model no longer wanted, cancel initialization
+                self.models_initializing.discard(model_name)
+                if model_name in self.models:
+                    self._remove_hosted_job(model_name)
+
         # Remove models not in the current priority list
-        currently_loaded = list(self.models.keys())
+        currently_loaded = [
+            name for name in self.models.keys() if isinstance(self.models[name], str)
+        ]
         for model_name in currently_loaded:
             if model_name not in models_to_load:
                 recent_requests = self._get_recent_request_count(
@@ -275,11 +309,17 @@ class DistributedValidator(DistributedWorker):
 
                     # Check if jobs are still active
                     for model_name in list(self.models.keys()):
-                        is_active = self.send_request("check_job", (model_name,))
-                        if not is_active:
-                            self._remove_hosted_job(model_name)
+                        if isinstance(
+                            self.models[model_name], str
+                        ):  # Only check fully loaded models
+                            is_active = self.send_request("check_job", (model_name,))
+                            if not is_active:
+                                self._remove_hosted_job(model_name)
 
                     self.CHECK_COUNTER = 1
+                elif self.models_initializing:
+                    # Only call model management if we have models actively initializing
+                    self._manage_auto_loaded_models()
 
             # Get job data for inspection
             job_data = self.send_request("get_jobs", None)
@@ -290,7 +330,9 @@ class DistributedValidator(DistributedWorker):
 
             # Check for inference generate calls
             for model_name, module_id in self.models.items():
-                if module_id in self.modules:
+                if (
+                    isinstance(module_id, str) and module_id in self.modules
+                ):  # Only process fully loaded models
                     generate_request = self.send_request(
                         "update_api_request", (model_name, module_id)
                     )
@@ -306,7 +348,9 @@ class DistributedValidator(DistributedWorker):
         # Record the request for tracking
         self._record_request(request.hf_name)
 
-        if request.hf_name not in self.models:
+        if request.hf_name not in self.models or not isinstance(
+            self.models[request.hf_name], str
+        ):
             request.output = (
                 "Model is currently not available through the Tensorlink API."
             )
@@ -403,6 +447,9 @@ class DistributedValidator(DistributedWorker):
     def _remove_hosted_job(self, model_name: str):
         """Remove a hosted job and clean up all associated resources"""
         try:
+            # Remove from initializing set if present
+            self.models_initializing.discard(model_name)
+
             # Get the module_id if the model is tracked
             module_id = None
             if model_name in self.models:
@@ -429,7 +476,7 @@ class DistributedValidator(DistributedWorker):
                 )
 
             # Clean up module if it exists
-            if module_id and module_id in self.modules:
+            if isinstance(module_id, str) and module_id in self.modules:
                 # Notify the module to clean up its distributed components
                 try:
                     if hasattr(self.modules[module_id], 'cleanup_distributed_model'):
