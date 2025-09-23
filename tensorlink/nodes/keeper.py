@@ -12,7 +12,6 @@ if TYPE_CHECKING:
 NETWORK_STATS = "logs/network_stats.json"
 ALL_STATES = "logs/dht_state.json"
 LATEST_STATE = "logs/latest_state.json"
-PROPOSALS = "logs/proposals.json"
 
 CATEGORIES = ["workers", "validators", "users", "jobs", "proposals"]
 
@@ -855,26 +854,6 @@ class Keeper:
                 level=logging.INFO,
                 tag="Keeper",
             )
-
-        if os.path.exists(ALL_STATES):
-            try:
-                with open(ALL_STATES, "r") as f:
-                    dht_state = json.load(f)
-                    proposals = dht_state.get("proposals", {})
-
-                    self.node.proposals = list(proposals.keys())
-
-                    # Also insert into routing table for lookup
-                    if proposals:
-                        self.node.dht.routing_table.update(proposals)
-
-            except Exception as e:
-                self.node.debug_print(
-                    f"Error loading proposals: {e}",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                    tag="Keeper",
-                )
 
     def clean_node(self):
         """Clean up inactive nodes"""
