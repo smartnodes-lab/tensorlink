@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 NETWORK_STATS = "logs/network_stats.json"
 ALL_STATES = "logs/dht_state.json"
 LATEST_STATE = "logs/latest_state.json"
+PROPOSALS = "logs/proposals.json"
 
 CATEGORIES = ["workers", "validators", "users", "jobs", "proposals"]
 
@@ -715,9 +716,6 @@ class Keeper:
         # Load network entities
         self._load_network_entities(current_data)
 
-        # Load proposals if available
-        self._load_proposals(current_data)
-
         # Calculate and add capacity information
         try:
             capacity_info = self._calculate_worker_capacities()
@@ -746,19 +744,11 @@ class Keeper:
     def _load_network_entities(self, current_data):
         """Load workers, validators, users, and jobs into current_data."""
         for category in CATEGORIES:
-            if category != "proposals":
-                collection = getattr(self.node, category)
-                for entity_id in collection:
-                    entity_data = self.node.dht.query(entity_id)
-                    if _is_entity_current(entity_data):
-                        current_data[category][entity_id] = entity_data
-
-    def _load_proposals(self, current_data):
-        """Load proposals into current_data if contract_manager exists."""
-        if hasattr(self.node, "contract_manager") and self.node.contract_manager:
-            for proposal_id in self.node.contract_manager.proposals:
-                proposal_data = self.node.dht.query(proposal_id)
-                current_data["proposals"][proposal_id] = proposal_data
+            collection = getattr(self.node, category)
+            for entity_id in collection:
+                entity_data = self.node.dht.query(entity_id)
+                if _is_entity_current(entity_data):
+                    current_data[category][entity_id] = entity_data
 
     def _update_historical_archive(self, current_data):
         """Update historical archive with current snapshot."""
@@ -865,6 +855,26 @@ class Keeper:
                 level=logging.INFO,
                 tag="Keeper",
             )
+
+        if os.path.exists(ALL_STATES):
+            try:
+                with open(ALL_STATES, "r") as f:
+                    dht_state = json.load(f)
+                    proposals = dht_state.get("proposals", {})
+
+                    self.node.proposals = list(proposals.keys())
+
+                    # Also insert into routing table for lookup
+                    if proposals:
+                        self.node.dht.routing_table.update(proposals)
+
+            except Exception as e:
+                self.node.debug_print(
+                    f"Error loading proposals: {e}",
+                    colour="bright_red",
+                    level=logging.ERROR,
+                    tag="Keeper",
+                )
 
     def clean_node(self):
         """Clean up inactive nodes"""

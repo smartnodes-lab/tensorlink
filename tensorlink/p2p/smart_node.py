@@ -76,16 +76,17 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(base_dir, "../config")
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCore.json")
 MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCoordinator.json")
+TOKEN_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesERC20.json")
+
 API = get_key(".tensorlink.env", "API")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
-    CHAIN_URL = config["api"]["chain-url"]
-    # if API:
-    #     CHAIN_URL = API
+    CHAIN_URL = API if API else config["api"]["chain-url"]
 
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
+    TOKEN = config["api"]["token"]
 
 with open(SM_CONFIG_PATH, "r") as f:
     METADATA = json.load(f)
@@ -94,6 +95,10 @@ ABI = METADATA["abi"]
 with open(MS_CONFIG_PATH, "r") as f:
     MS_METADATA = json.load(f)
 MULTI_SIG_ABI = MS_METADATA["abi"]
+
+with open(TOKEN_CONFIG_PATH, "r") as f:
+    TOKEN_METADATA = json.load(f)
+TOKEN_ABI = TOKEN_METADATA["abi"]
 
 SNO_EVENT_SIGNATURES = {
     "JobRequest": "JobRequested(uint256,uint256,address[])",
@@ -156,6 +161,7 @@ def get_connection_info(node, main_port=None, upnp=True):
         "role": node.role,
         "id": node.node_id,
         "reputation": node.reputation,
+        "address": node.node_address,
         "last_seen": time.time(),
     }
 
@@ -218,7 +224,6 @@ class Smartnode(threading.Thread):
         # Get private ip
         if not local_test:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # s.connect(("8.8.8.8", 80))
             s.connect(("8.8.8.8", 80))
             self.host = s.getsockname()[0]
             s.close()
@@ -290,6 +295,7 @@ class Smartnode(threading.Thread):
                 self.multi_sig_contract = self.chain.eth.contract(
                     address=MULTI_SIG_CONTRACT, abi=MULTI_SIG_ABI
                 )
+                self.token = self.chain.eth.contract(address=TOKEN, abi=TOKEN_ABI)
 
             except Exception as e:
                 self.debug_print(
@@ -872,6 +878,7 @@ class Smartnode(threading.Thread):
                 main_port=main_port,
                 node_id=node_info['node_id'],
                 role=node_info['role'],
+                node_address=node_info['node_address'],
             )
             thread_client.start()
 
@@ -1366,9 +1373,12 @@ class Smartnode(threading.Thread):
         main_port: int,
         node_id: bytes,
         role: int,
+        node_address: str,
     ) -> Connection:
         """Creates a connection thread object from connection.py for individual connections"""
-        return Connection(self, connection, host, port, main_port, node_id, role)
+        return Connection(
+            self, connection, host, port, main_port, node_id, role, node_address
+        )
 
     def _can_connect(self, host: str, port: int):
         """Makes sure we are not trying to connect to ourselves or a connected nodes"""

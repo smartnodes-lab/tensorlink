@@ -443,12 +443,6 @@ class JobMonitor:
             job_data["active"] = False
             job_data["end_time"] = time.time()
             job_data["final_status"] = final_status.value
-            job_data["gigabyte_hours"] = (
-                job_data["capacity"]
-                * (job_data["end_time"] - job_data["timestamp"])
-                / 60
-                / 60
-            )  # Capacity in Gb hours
 
             # Clean up worker resources
             self._cleanup_workers(job_data)

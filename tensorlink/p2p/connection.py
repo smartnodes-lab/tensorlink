@@ -20,6 +20,7 @@ class Connection(threading.Thread):
         main_port: int,
         node_key: bytes,
         role: int,
+        node_address: str,
     ):
         """
         Initialize a network connection thread with peer and connection details.
@@ -45,6 +46,7 @@ class Connection(threading.Thread):
         self.node_key = node_key
         self.node_id = hashlib.sha256(node_key).hexdigest()
         self.role = role
+        self.node_address = node_address
 
         # Node and connection settings
         self.main_port = main_port

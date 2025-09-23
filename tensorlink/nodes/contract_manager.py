@@ -2,8 +2,8 @@ from typing import List, Tuple, Optional, Dict, Any
 from web3.exceptions import ContractLogicError
 from dotenv import get_key
 from eth_abi import encode
+from hexbytes import HexBytes
 import logging
-import hashlib
 import threading
 import time
 
@@ -32,8 +32,8 @@ class ContractManager:
         self.public_key = public_key
 
         # State tracking
-        self.validators_to_clear: List[str] = self.node.validators_to_clear
-        self.jobs_to_complete: List[str] = self.node.jobs_to_complete
+        self.validators_to_clear: List[str] = []
+        self.jobs_to_complete: List[str] = []
         self.current_proposal: Optional[int] = (
             self.coordinator_contract.functions.nextProposalId.call()
         )
@@ -119,9 +119,7 @@ class ContractManager:
             )
             return
 
-        proposal_data_hash = self._hash_proposal_data(
-            proposal_data, proposal_number=1
-        ).hex()
+        proposal_data_hash = self._hash_proposal_data(proposal_data).hex()
 
         if proposal_data_hash != proposal_hash:
             # Proposal hash must match smart contract listed proposal
@@ -242,11 +240,11 @@ class ContractManager:
 
     def add_job_to_complete(self, job_data: dict) -> None:
         """Add a job to the list of jobs to be completed."""
-        # Update job to contract if a certain threshold of work was done
+        # Update job to contract if a certain threshold of time passed
         if (
-            job_data["end_time"] - job_data["timestamp"] > 180
-            and job_data["gigabyte_hours"] > 5e8
-        ) and job_data["id"] not in self.jobs_to_complete:
+            job_data["end_time"] - job_data["timestamp"] > 1
+            and job_data["id"] not in self.jobs_to_complete
+        ):
             self.jobs_to_complete.append(job_data["id"])
 
     def verify_and_remove_validators(self) -> List[str]:
@@ -258,7 +256,7 @@ class ContractManager:
         """
         validators_to_remove = []
 
-        for validator in self.node.validators_to_clear:
+        for validator in self.validators_to_clear:
             node_info = self.node.dht.query(validator)
             if not node_info:
                 continue
@@ -268,7 +266,11 @@ class ContractManager:
                 if node_address:
                     validators_to_remove.append(node_address)
 
-        return validators_to_remove
+        formatted_validators = [
+            self.chain.to_checksum_address(v) for v in validators_to_remove
+        ]
+
+        return formatted_validators
 
     def process_jobs(self) -> Tuple[List[bytes], List[int], List[str]]:
         """
@@ -280,23 +282,22 @@ class ContractManager:
             - List[int]: Job capacities
             - List[str]: Worker addresses
         """
-        job_hashes = []
-        job_capacities = []
-        job_workers = []
+        all_job_ids = []
+        all_capacities = []
+        all_workers = []
 
         for job_id in self.jobs_to_complete:
             job = self.node.dht.query(job_id)
             if not job:
                 continue
 
-            job_data = self._process_single_job(job, job_id)
-            if job_data:
-                job_hash, capacity, workers = job_data
-                job_hashes.append(job_hash)
-                job_capacities.append(capacity)
-                job_workers.extend(workers)
+            job_hash, capacities, workers = self._process_single_job(job, job_id)
 
-        return job_hashes, job_capacities, job_workers
+            all_job_ids.append(job_hash)
+            all_capacities.extend(capacities)
+            all_workers.extend(workers)
+
+        return all_job_ids, all_capacities, all_workers
 
     def proposal_creator(self):
         while not self.terminate_flag.is_set():
@@ -369,15 +370,28 @@ class ContractManager:
             # Create and store proposal
             proposal = {
                 "validators": validators_to_remove,
-                "jobs": job_hashes,
+                "job_hashes": [j.hex() for j in job_hashes],
                 "job_capacities": job_capacities,
                 "workers": job_workers,
                 "total_capacity": total_capacities,
                 "total_workers": total_workers,
+                "distribution_id": self.current_proposal,
             }
-            proposal_hash = self._hash_proposal_data(proposal, proposal_number=1)
-            self.node.dht.store(proposal_hash.hex(), proposal)
-            self.proposals[proposal_hash.hex()] = proposal
+
+            # Build participants for merkle tree
+            participants = self._build_participants(proposal)
+            proposal["merkle_root"] = self._build_merkle_tree_from_participants(
+                participants
+            ).hex()
+            proposal["workers_hash"] = self.chain.keccak(
+                encode(["address[]"], [job_workers])
+            ).hex()
+            proposal["capacities_hash"] = self.chain.keccak(
+                encode(["uint256[]"], [job_capacities])
+            ).hex()
+
+            proposal_hash = self._hash_proposal_data(proposal)
+            self.node.dht.store(proposal_hash.hex(), proposal.copy())
 
             # Submit proposal
             code = self._submit_proposal(proposal_hash)
@@ -394,9 +408,7 @@ class ContractManager:
         self._wait_for_next_block()
 
         # Monitor and execute proposal
-        self._monitor_and_execute_proposal(
-            validators_to_remove, job_hashes, job_capacities, job_workers
-        )
+        self._monitor_and_execute_proposal(proposal_hash.hex())
 
     def _is_validator_online(self, node_info: Dict[str, Any]) -> bool:
         """Check if a validator is online and connected to the network."""
@@ -409,83 +421,60 @@ class ContractManager:
 
     def _process_single_job(
         self, job: Dict[str, Any], job_id: str
-    ) -> Optional[Tuple[bytes, int, List[str]]]:
+    ) -> Tuple[bytes, List[int], List[str]]:
         """Process a single job and return its data."""
         job_hash = bytes.fromhex(job_id)
-        capacities = job["capacity"]
         workers = []
+        capacities = []
 
         for module_info in job["distribution"].values():
-            for worker_id in module_info["workers"]:
-                worker_address = self._get_worker_address(worker_id)
-                if worker_address:
-                    workers.append(worker_address)
-                else:
-                    workers.append(self.public_key)
+            for worker_id, worker_info in module_info["workers"]:
+                worker_address = self.chain.to_checksum_address(worker_info["address"])
+                capacity = round(
+                    module_info["size"]
+                    * 1e9
+                    * (job["end_time"] - job["timestamp"])
+                    / 3600
+                )  # Capacity measured in Gbh
+                workers.append(worker_address)
+                capacities.append(capacity)
 
         return job_hash, capacities, workers
 
-    def _get_worker_address(self, worker_id: str) -> Optional[str]:
+    def _get_worker_address(self, worker_info: dict) -> Optional[str]:
         """Get the blockchain address for a worker."""
-        worker_info = self.node.dht.query(worker_id)
         if not worker_info:
             return None
 
         if not self._is_validator_online(worker_info):
             return None
 
-        worker_node = self.node.nodes[worker_id]
-        return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
+        # worker_node = self.node.nodes[worker_id]
+        # return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
 
-    def _hash_proposal_data(self, proposal_data: dict, proposal_number: int):
-        """Hash proposal data according to coordinator contract structure."""
-        validators_to_remove = proposal_data.get('validators', [])
-        job_hashes = proposal_data.get('jobs', [])
-        job_capacities = proposal_data.get('job_capacities', [])
-        job_workers = proposal_data.get('workers', [])
+    def _build_participants(self, proposal_data: dict):
+        job_workers = [
+            self.chain.to_checksum_address(w) for w in proposal_data.get("workers", [])
+        ]
+        job_capacities = proposal_data.get("job_capacities", [])
 
-        # Build participants list for merkle tree
         participants = []
         for i, worker in enumerate(job_workers):
             capacity = job_capacities[i] if i < len(job_capacities) else 0
-            participants.append(
-                {'addr': self.chain.to_checksum_address(worker), 'capacity': capacity}
-            )
+            participants.append({"addr": worker, "capacity": capacity})
 
-        # Generate merkle root
-        merkle_root = self._build_merkle_tree_from_participants(participants)
+        return participants
 
-        # Ensure validators are checksummed
-        validators_checksummed = [
-            self.chain.to_checksum_address(validator)
-            for validator in validators_to_remove
-        ]
-
-        # Convert job hashes to bytes32 format
-        job_hashes_bytes = []
-        for job_hash in job_hashes:
-            if isinstance(job_hash, str):
-                job_hashes_bytes.append(bytes.fromhex(job_hash.replace('0x', '')))
-            else:
-                job_hashes_bytes.append(job_hash)
-
-        # Hash the workers and capacities lists
-        workers_checksummed = [
-            self.chain.to_checksum_address(worker) for worker in job_workers
-        ]
-        workers_hash = self.chain.keccak(encode(["address[]"], [workers_checksummed]))
-        capacities_hash = self.chain.keccak(encode(["uint256[]"], [job_capacities]))
-
-        # Encode with hashed workers and capacities
+    def _hash_proposal_data(self, proposal_data: dict):
+        """Hash proposal data according to coordinator contract structure."""
         encoded_data = encode(
-            ["uint256", "bytes32", "address[]", "bytes32[]", "bytes32", "bytes32"],
+            ["bytes32", "address[]", "bytes32[]", "bytes32", "bytes32"],
             [
-                proposal_number,
-                merkle_root,
-                validators_checksummed,
-                job_hashes_bytes,
-                workers_hash,
-                capacities_hash,
+                HexBytes(proposal_data["merkle_root"]),
+                proposal_data["validators"],
+                [HexBytes(j) for j in proposal_data["job_hashes"]],
+                HexBytes(proposal_data["workers_hash"]),
+                HexBytes(proposal_data["capacities_hash"]),
             ],
         )
 
@@ -579,13 +568,7 @@ class ContractManager:
                 break
             time.sleep(5)
 
-    def _monitor_and_execute_proposal(
-        self,
-        validators_to_remove: List[str],
-        job_hashes: List[bytes],
-        job_capacities: List[int],
-        job_workers: List[str],
-    ) -> None:
+    def _monitor_and_execute_proposal(self, proposal_hash: str) -> None:
         """Monitor proposal status and execute when ready."""
         while not self.terminate_flag.is_set():
             if not self._is_proposal_valid():
@@ -593,16 +576,11 @@ class ContractManager:
 
             proposal_number, is_ready = self._is_proposal_ready()
             if is_ready:
-                self._execute_proposal(
-                    proposal_number,
-                    validators_to_remove,
-                    job_hashes,
-                    job_capacities,
-                    job_workers,
-                )
+                self._execute_proposal(proposal_number, proposal_hash)
+                self.node.proposals.append(proposal_hash.hex())
                 return
 
-            time.sleep(15)
+            time.sleep(10)
 
     def _is_proposal_valid(self) -> bool:
         """Check if the current proposal is still valid."""
@@ -621,61 +599,24 @@ class ContractManager:
             self.coordinator_contract.functions.isProposalReady(proposal_number).call(),
         )
 
-    def _execute_proposal(
-        self,
-        proposal_number: int,
-        validators_to_remove: List[str],
-        job_hashes: List[bytes],
-        job_capacities: List[int],
-        job_workers: List[str],
-    ) -> bool:
+    def _execute_proposal(self, proposal_number: int, proposal_hash: str) -> bool:
         """Execute the proposal with correct merkle proof generation."""
         try:
-            # Build participants exactly like in the tests
-            participants = []
-            for i, worker in enumerate(job_workers):
-                capacity = job_capacities[i] if i < len(job_capacities) else 0
-                participants.append(
-                    {
-                        'addr': self.chain.to_checksum_address(worker),
-                        'capacity': capacity,
-                    }
-                )
-
-            # Calculate merkle root
-            merkle_root = self._build_merkle_tree_from_participants(participants)
-            total_capacity = sum(job_capacities)
-
-            # Prepare checksummed addresses
-            validators_checksummed = [
-                self.chain.to_checksum_address(validator)
-                for validator in validators_to_remove
-            ]
-            workers_checksummed = [
-                self.chain.to_checksum_address(worker) for worker in job_workers
-            ]
-
-            # Convert job hashes to proper format
-            job_hashes_bytes = []
-            for job_hash in job_hashes:
-                if isinstance(job_hash, str):
-                    job_hashes_bytes.append(bytes.fromhex(job_hash.replace('0x', '')))
-                else:
-                    job_hashes_bytes.append(job_hash)
-
-            # Hash the workers and capacities lists
-            workers_hash = self.chain.keccak(
-                encode(["address[]"], [workers_checksummed])
-            )
-            capacities_hash = self.chain.keccak(encode(["uint256[]"], [job_capacities]))
+            proposal = self.node.dht.query(proposal_hash)
+            merkle_root = HexBytes(proposal["merkle_root"])
+            total_capacity = proposal["total_capacity"][0]
+            validators = proposal["validators"]
+            job_hashes = [HexBytes(j) for j in proposal["job_hashes"]]
+            workers_hash = HexBytes(proposal["workers_hash"])
+            capacities_hash = HexBytes(proposal["capacities_hash"])
 
             # Test execution first
             self.coordinator_contract.functions.executeProposal(
                 proposal_number,
                 merkle_root,
                 total_capacity,
-                validators_checksummed,
-                job_hashes_bytes,
+                validators,
+                job_hashes,
                 workers_hash,
                 capacities_hash,
             ).call({"from": self.public_key})
@@ -685,8 +626,8 @@ class ContractManager:
                 proposal_number,
                 merkle_root,
                 total_capacity,
-                validators_checksummed,
-                job_hashes_bytes,
+                validators,
+                job_hashes,
                 workers_hash,
                 capacities_hash,
             ).build_transaction(
@@ -885,3 +826,94 @@ class ContractManager:
             current_index = current_index // 2
 
         return proof
+
+    def get_worker_claim_data(self, worker_address: str) -> List[Dict[str, Any]]:
+        """
+        Get all available claim data for a worker across all proposals.
+        Returns a list of claim objects, each containing the data needed to claim rewards.
+
+        Args:
+            worker_address: The blockchain address of the worker
+
+        Returns:
+            List of dictionaries containing claim data, each with:
+            - distribution_id: The distribution/proposal ID
+            - worker: Checksummed worker address
+            - capacity: Worker's capacity for this distribution
+            - merkle_proof: Proof array for Merkle tree verification
+            - total_capacity: Total capacity for the distribution
+            - is_claimed: Whether rewards have already been claimed
+        """
+        claims = []
+        worker_address = self.chain.to_checksum_address(worker_address)
+
+        try:
+            # Iterate through all stored proposals
+            for proposal_hash in self.node.proposals:
+                proposal_data = self.node.dht.query(proposal_hash)
+                # Check if worker participated in this proposal
+                if worker_address not in proposal_data.get("workers", []):
+                    continue
+
+                # Get the distribution ID
+                distribution_id = proposal_data.get("distribution_id")
+                if distribution_id is None:
+                    continue
+
+                # Prepare proposal payload to get participants
+                participants = self._build_participants(proposal_data)
+
+                # Find the worker's participation data
+                worker_participant = None
+                for participant in participants:
+                    if (
+                        self.chain.to_checksum_address(participant["addr"])
+                        == worker_address
+                    ):
+                        worker_participant = participant
+                        break
+
+                if not worker_participant:
+                    continue
+
+                # Generate Merkle proof for this worker
+                try:
+                    merkle_proof = self._generate_merkle_proof(
+                        participants, worker_address
+                    )
+                except Exception as e:
+                    self.node.debug_print(
+                        f"Failed to generate merkle proof for {worker_address} in distribution {distribution_id}: {e}",
+                        colour="yellow",
+                        level=logging.WARNING,
+                        tag="ContractManager",
+                    )
+                    continue
+
+                # Calculate total capacity
+                total_capacity = sum(p["capacity"] for p in participants)
+
+                # Create claim data object
+                claim_data = {
+                    "distribution_id": distribution_id,
+                    "worker": worker_address,
+                    "capacity": worker_participant["capacity"],
+                    "merkle_proof": [
+                        proof.hex() for proof in merkle_proof
+                    ],  # Convert bytes to hex strings
+                    "total_capacity": total_capacity,
+                    "proposal_hash": proposal_hash,
+                    "merkle_root": proposal_data["merkle_root"].hex(),
+                }
+
+                claims.append(claim_data)
+
+        except Exception as e:
+            self.node.debug_print(
+                f"Error getting claim data for worker {worker_address}: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ContractManager",
+            )
+
+        return claims

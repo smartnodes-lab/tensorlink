@@ -51,10 +51,6 @@ class Validator(Torchnode):
         self.worker_memories = {}
         self.all_workers = {}
 
-        # Job monitoring and storage
-        self.jobs_to_complete = []
-        self.validators_to_clear = []
-
         # Params for smart contract state aggregation
         self.proposal_flag = threading.Event()
         self.current_proposal = 0
@@ -69,6 +65,7 @@ class Validator(Torchnode):
         self.keeper = Keeper(self)
         self.latest_network_status = {}
         self.latest_network_status_time = 0
+        self.proposals = []
 
         if off_chain_test is False:
             # Ensure validator is activated on smartnodes first
@@ -536,7 +533,7 @@ class Validator(Torchnode):
         assigned_workers = self.check_job_availability(job_data)
 
         if job_data.get("payment", 0) == 0:
-            _time = 15 * 60
+            _time = 1 * 20 + 1
         else:
             _time = job_data.get("time")
 
