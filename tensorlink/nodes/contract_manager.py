@@ -435,7 +435,7 @@ class ContractManager:
                     * 1e9
                     * (job["end_time"] - job["timestamp"])
                     / 3600
-                )  # Capacity measured in Gbh
+                )  # Capacity measured in byte hours
                 workers.append(worker_address)
                 capacities.append(capacity)
 
@@ -903,7 +903,7 @@ class ContractManager:
                     ],  # Convert bytes to hex strings
                     "total_capacity": total_capacity,
                     "proposal_hash": proposal_hash,
-                    "merkle_root": proposal_data["merkle_root"].hex(),
+                    "merkle_root": proposal_data["merkle_root"],
                 }
 
                 claims.append(claim_data)

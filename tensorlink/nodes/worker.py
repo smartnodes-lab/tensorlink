@@ -224,6 +224,8 @@ class Worker(Torchnode):
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
+        self.available_gpu_memory = get_gpu_memory()
+
         stats = {
             "id": self.rsa_key_hash,
             "gpu_memory": self.available_gpu_memory,

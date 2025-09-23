@@ -345,7 +345,6 @@ class DistributedWorker:
 
             # Cleanup file
             os.remove(file_name)
-            print("Cleaning Model...")
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -366,7 +365,6 @@ class DistributedWorker:
 
         self.modules[module_id] = module
         if training:
-            print("Creating Optimizer")
             optimizer_cls = get_optimizer_from_name(optimizer_name)
             # Placeholder - actual initialization happens in state_update
             self.optimizers[module_id] = optimizer_cls

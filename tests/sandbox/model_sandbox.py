@@ -5,7 +5,7 @@ import logging
 import torch
 import time
 
-OFFCHAIN = False
+OFFCHAIN = True
 LOCAL = True
 UPNP = False
 
@@ -38,9 +38,14 @@ if __name__ == "__main__":
 
     outputs = distributed_model.forward(torch.zeros((1, 1), dtype=torch.long))
 
-    while True:
-        time.sleep(3)
-
+    time.sleep(20)
     user.cleanup()
+
+    while True:
+        try:
+            time.sleep(3)
+        except KeyboardInterrupt:
+            break
+
     worker.cleanup()
     validator.cleanup()
