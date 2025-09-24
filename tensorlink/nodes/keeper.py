@@ -567,7 +567,7 @@ class Keeper:
 
     def _filter_old_entities(self, entities_data: Dict) -> Dict:
         """
-        Filter out entities that haven't been seen in the last 30 days.
+        Filter out entities that haven't been seen in the last 30 days (eg. jobs, workers, users)
 
         Args:
             entities_data: Dictionary of entity_id -> entity_data
@@ -789,7 +789,7 @@ class Keeper:
             with open(ALL_STATES, "r") as f:
                 archive_data = json.load(f)
 
-            # Ensure capacity fields exist in loaded data (backwards compatibility)
+            # Ensure capacity fields exist in loaded data
             if "available_capacity" not in archive_data:
                 archive_data["available_capacity"] = 0
             if "used_capacity" not in archive_data:
@@ -834,6 +834,8 @@ class Keeper:
                             hash_key: data for hash_key, data in filtered_items.items()
                         }
                         self.node.dht.routing_table.update(filtered_items)
+                        if category == "proposals":
+                            self.node.proposals = list(filtered_items.keys())
 
                 self.node.debug_print(
                     "DHT state loaded successfully.",

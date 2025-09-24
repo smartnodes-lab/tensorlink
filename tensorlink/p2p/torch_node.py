@@ -229,17 +229,9 @@ class Torchnode(Smartnode):
             else:
                 module_id = None
                 for module in self.modules:
-                    # Validators store worker info as workers instead so must be conditional
-                    if self.role == "V":
-                        if node.node_id in [
-                            w[0] for w in self.modules[module]["workers"]
-                        ]:
-                            module_id = module
-                            break
-                    else:
-                        if node.node_id in self.modules[module]["workers"]:
-                            module_id = module
-                            break
+                    if node.node_id in self.modules[module]["workers"]:
+                        module_id = module
+                        break
 
                 shm = shared_memory.SharedMemory(create=True, size=size)
                 buffer = shm.buf[:size]

@@ -638,8 +638,7 @@ class Validator(Torchnode):
                     return None
 
             worker_connection_info[module_id] = [
-                (worker_id, self.dht.query(worker_id))
-                for worker_id in worker_assignment
+                worker_id for worker_id in worker_assignment
             ]
 
         return worker_connection_info
@@ -792,7 +791,7 @@ class Validator(Torchnode):
                 self.send_to_node(node, b"REQUEST-WORKERS")
                 self._store_request(node_id, "ALL-WORKER-STATS")
 
-        time.sleep(6)
+        time.sleep(5)
 
         for worker in self.workers:
             if self.nodes[worker].stats:

@@ -538,7 +538,7 @@ class DistributedModel(nn.Module):
         for mod_info in config.values():
             mod_id = mod_info["mod_id"]
             module_hash = mod_info["id_hash"]
-            worker_id, worker_info = mod_info["workers"][0]
+            worker_id = mod_info["workers"][0]
             if isinstance(self.model, str):
                 self.wrap_hf_model(module_hash, worker_id)
             else:

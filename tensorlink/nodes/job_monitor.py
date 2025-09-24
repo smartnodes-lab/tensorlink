@@ -418,7 +418,7 @@ class JobMonitor:
             if module_info["type"] != "offloaded":
                 continue
 
-            for worker_id, worker_info in module_info["workers"]:
+            for worker_id in module_info["workers"]:
                 worker_healthy = self._check_single_worker(worker_id, module_id)
                 all_workers_healthy = all_workers_healthy and worker_healthy
 
@@ -470,9 +470,8 @@ class JobMonitor:
         """Clean up worker resources and send shutdown signals."""
         for module_id, module_info in job_data["distribution"].items():
             if module_info["type"] == "offloaded":
-                for worker in module_info["workers"]:
+                for worker_id in module_info["workers"]:
                     try:
-                        worker_id, worker_info = worker
                         node = self.node.nodes[worker_id]
                         self.node.send_to_node(
                             node, b"SHUTDOWN-JOB" + module_id.encode()
@@ -481,7 +480,7 @@ class JobMonitor:
                         self.worker_health_checks.pop(worker_id, None)
                     except Exception as e:
                         self.node.debug_print(
-                            f"Error shutting down worker {worker}: {str(e)}",
+                            f"Error shutting down worker {worker_id}: {str(e)}",
                             colour="yellow",
                             level=logging.WARNING,
                             tag="JobMonitor",

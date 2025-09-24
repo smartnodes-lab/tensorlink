@@ -16,7 +16,7 @@ import os
 
 MODELS_CACHE_PATH = "logs/models.json"
 
-# Path to package root (where this file lives)
+# Path to package root
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Path to config/models.json relative to this script

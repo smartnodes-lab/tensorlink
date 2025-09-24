@@ -428,7 +428,8 @@ class ContractManager:
         capacities = []
 
         for module_info in job["distribution"].values():
-            for worker_id, worker_info in module_info["workers"]:
+            for worker_id in module_info["workers"]:
+                worker_info = self.node.dht.query(worker_id)
                 worker_address = self.chain.to_checksum_address(worker_info["address"])
                 capacity = round(
                     module_info["size"]
@@ -577,7 +578,7 @@ class ContractManager:
             proposal_number, is_ready = self._is_proposal_ready()
             if is_ready:
                 self._execute_proposal(proposal_number, proposal_hash)
-                self.node.proposals.append(proposal_hash.hex())
+                self.node.proposals.append(proposal_hash)
                 return
 
             time.sleep(10)

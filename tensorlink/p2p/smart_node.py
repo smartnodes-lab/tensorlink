@@ -47,7 +47,7 @@ COLOURS = {
 # Map logging levels to colors
 LEVEL_COLOURS = {
     logging.DEBUG: "blue",
-    logging.INFO: "green",
+    logging.INFO: "gray",
     logging.WARNING: "yellow",
     logging.ERROR: "red",
     logging.CRITICAL: "bright_red",
