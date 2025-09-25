@@ -15,6 +15,7 @@ import logging
 import queue
 import json
 import time
+import os
 
 
 class Validator(Torchnode):
@@ -50,10 +51,6 @@ class Validator(Torchnode):
         self.worker_memories = {}
         self.all_workers = {}
 
-        # Job monitoring and storage
-        self.jobs_to_complete = []
-        self.validators_to_clear = []
-
         # Params for smart contract state aggregation
         self.proposal_flag = threading.Event()
         self.current_proposal = 0
@@ -68,6 +65,7 @@ class Validator(Torchnode):
         self.keeper = Keeper(self)
         self.latest_network_status = {}
         self.latest_network_status_time = 0
+        self.proposals = []
 
         if off_chain_test is False:
             # Ensure validator is activated on smartnodes first
@@ -245,6 +243,7 @@ class Validator(Torchnode):
                 "check_job": self._handle_check_job,
                 "send_job_request": self.create_base_job,
                 "update_api_request": self._handle_update_api,
+                "get_model_demand_stats": self._get_api_demand,
             }
 
             handler = handlers.get(req_type)
@@ -256,6 +255,11 @@ class Validator(Torchnode):
 
         except Exception as e:
             self.response_queue.put({"status": "FAILURE", "error": str(e)})
+
+    def _get_api_demand(self):
+        self.response_queue.put(
+            {"status": "SUCCESS", "return": self.endpoint.model_name_to_request}
+        )
 
     def _handle_get_jobs(self, request):
         """Check if we have received any job requests for huggingface models and fully hosted or api jobs, then relay
@@ -359,7 +363,6 @@ class Validator(Torchnode):
         job_data["ram"] = ram
         job_data["vram"] = vram
         job_data["time"] = _time
-
         # Hand off model dissection and worker assignment to DistributedValidator process
         request_value = "HF-JOB-REQ" + json.dumps(job_data)
         self._store_request(self.rsa_key_hash, request_value)
@@ -453,7 +456,7 @@ class Validator(Torchnode):
         self.request_worker_stats()
 
         if user_id and user_id != self.rsa_key_hash:
-            # Check that user doesnt have an active job already
+            # Check that user doesn't have an active job already
             user_info = self.dht.query(user_id, keys_to_exclude=[self.rsa_key_hash])
 
             # Check for active job
@@ -529,6 +532,13 @@ class Validator(Torchnode):
         requesting_node = self._get_requesting_node(job_data, author)
         assigned_workers = self.check_job_availability(job_data)
 
+        if job_data.get("payment", 0) == 0:
+            _time = 10 * 60 + 1
+        else:
+            _time = job_data.get("time")
+
+        job_data["time"] = _time
+
         if not assigned_workers:
             self._decline_job(
                 job_data, requesting_node, "Could not find enough workers."
@@ -582,7 +592,7 @@ class Validator(Torchnode):
         self.debug_print(f"Declining job '{job_data['id']}': {reason}", tag="Validator")
         self.response_queue.put({"status": "SUCCESS", "return": False})
         if requesting_node:
-            self.decline_job(requesting_node)
+            self.decline_job(requesting_node, reason)
 
     def _assign_workers_to_modules(
         self,
@@ -628,8 +638,7 @@ class Validator(Torchnode):
                     return None
 
             worker_connection_info[module_id] = [
-                (worker_id, self.dht.query(worker_id))
-                for worker_id in worker_assignment
+                worker_id for worker_id in worker_assignment
             ]
 
         return worker_connection_info
@@ -699,9 +708,12 @@ class Validator(Torchnode):
         t = threading.Thread(target=job_monitor.monitor_job, args=(job_id,))
         t.start()
 
-    def decline_job(self, node):
+    def decline_job(self, node, reason: str = None):
         if node:
-            self.send_to_node(node, b"DECLINE-JOB")
+            if reason is None:
+                reason = b""
+
+            self.send_to_node(node, b"DECLINE-JOB" + reason.encode())
 
     def recruit_worker(
         self,
@@ -779,7 +791,7 @@ class Validator(Torchnode):
                 self.send_to_node(node, b"REQUEST-WORKERS")
                 self._store_request(node_id, "ALL-WORKER-STATS")
 
-        time.sleep(6)
+        time.sleep(5)
 
         for worker in self.workers:
             if self.nodes[worker].stats:
@@ -896,21 +908,24 @@ class Validator(Torchnode):
         print("=============================================\n")
 
     def get_tensorlink_status(self):
-        with open("tensorlink/config/models.json", "rb") as f:
-            models = json.load(f)
-            free_models = models["FREE_MODELS"]
+        # Path to package root (where this file lives)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        models_path = os.path.join(base_dir, "..", "config", "models.json")
 
-        total_capacity = int(
-            sum(worker["total_gpu_memory"] for worker in self.all_workers.values())
-        )
+        with open(models_path, "rb") as f:
+            models = json.load(f)
+            free_models = models["DEFAULT_MODELS"]
+
+        summary = self.keeper.get_network_summary()["current"]
 
         return {
-            "validators": len(self.validators) + 1,
-            "workers": len(self.all_workers),
-            "users": len(self.users),
+            "validators": summary["validators"] + 1,
+            "workers": summary["workers"],
+            "users": summary["users"],
+            "jobs": summary["jobs"],
             "proposal": self.current_proposal,
-            "available_capacity": sum(self.worker_memories.values()),
-            "used_capacity": total_capacity - sum(self.worker_memories.values()),
+            "available_capacity": summary["available_capacity"],
+            "used_capacity": summary["used_capacity"],
             "models": free_models,
         }
 
@@ -919,6 +934,8 @@ class Validator(Torchnode):
     ) -> Dict:
         """
         Get network statistics formatted for API consumption and charting.
+        Stores recent network stats and only re-renders them after a certain
+        time has passed
 
         Args:
             days: Number of days of daily statistics to retrieve (max 90)

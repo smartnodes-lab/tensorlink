@@ -11,7 +11,7 @@ LOCAL = False
 
 
 if __name__ == "__main__":
-    node = WorkerNode(
+    node = ValidatorNode(
         upnp=UPNP,
         off_chain_test=OFFCHAIN,
         local_test=LOCAL,

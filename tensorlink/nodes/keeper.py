@@ -81,7 +81,7 @@ def _save_latest_state(current_data):
 def _is_entity_current(entity_data):
     """Check if entity should be included based on last_seen timestamp."""
     if not entity_data or not isinstance(entity_data, dict):
-        return True  # Include if no data or not a dict
+        return True  # Include if no data or not a dict (ie a node)
 
     last_seen = entity_data.get("last_seen")
     if last_seen is None:
@@ -567,7 +567,7 @@ class Keeper:
 
     def _filter_old_entities(self, entities_data: Dict) -> Dict:
         """
-        Filter out entities that haven't been seen in the last 30 days.
+        Filter out entities that haven't been seen in the last 30 days (eg. jobs, workers, users)
 
         Args:
             entities_data: Dictionary of entity_id -> entity_data
@@ -715,9 +715,6 @@ class Keeper:
         # Load network entities
         self._load_network_entities(current_data)
 
-        # Load proposals if available
-        self._load_proposals(current_data)
-
         # Calculate and add capacity information
         try:
             capacity_info = self._calculate_worker_capacities()
@@ -746,19 +743,11 @@ class Keeper:
     def _load_network_entities(self, current_data):
         """Load workers, validators, users, and jobs into current_data."""
         for category in CATEGORIES:
-            if category != "proposals":
-                collection = getattr(self.node, category)
-                for entity_id in collection:
-                    entity_data = self.node.dht.query(entity_id)
-                    if _is_entity_current(entity_data):
-                        current_data[category][entity_id] = entity_data
-
-    def _load_proposals(self, current_data):
-        """Load proposals into current_data if contract_manager exists."""
-        if hasattr(self.node, "contract_manager") and self.node.contract_manager:
-            for proposal_id in self.node.contract_manager.proposals:
-                proposal_data = self.node.dht.query(proposal_id)
-                current_data["proposals"][proposal_id] = proposal_data
+            collection = getattr(self.node, category)
+            for entity_id in collection:
+                entity_data = self.node.dht.query(entity_id)
+                if _is_entity_current(entity_data):
+                    current_data[category][entity_id] = entity_data
 
     def _update_historical_archive(self, current_data):
         """Update historical archive with current snapshot."""
@@ -800,7 +789,7 @@ class Keeper:
             with open(ALL_STATES, "r") as f:
                 archive_data = json.load(f)
 
-            # Ensure capacity fields exist in loaded data (backwards compatibility)
+            # Ensure capacity fields exist in loaded data
             if "available_capacity" not in archive_data:
                 archive_data["available_capacity"] = 0
             if "used_capacity" not in archive_data:
@@ -845,6 +834,8 @@ class Keeper:
                             hash_key: data for hash_key, data in filtered_items.items()
                         }
                         self.node.dht.routing_table.update(filtered_items)
+                        if category == "proposals":
+                            self.node.proposals = list(filtered_items.keys())
 
                 self.node.debug_print(
                     "DHT state loaded successfully.",

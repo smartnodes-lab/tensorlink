@@ -47,7 +47,7 @@ COLOURS = {
 # Map logging levels to colors
 LEVEL_COLOURS = {
     logging.DEBUG: "blue",
-    logging.INFO: "green",
+    logging.INFO: "gray",
     logging.WARNING: "yellow",
     logging.ERROR: "red",
     logging.CRITICAL: "bright_red",
@@ -75,17 +75,18 @@ BACKGROUND_COLOURS = {
 base_dir = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(base_dir, "../config")
 SM_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCore.json")
-MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesMultiSig.json")
+MS_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesCoordinator.json")
+TOKEN_CONFIG_PATH = os.path.join(CONFIG_PATH, "SmartnodesERC20.json")
+
 API = get_key(".tensorlink.env", "API")
 
 with open(os.path.join(CONFIG_PATH, "config.json"), "r") as f:
     config = json.load(f)
-    CHAIN_URL = config["api"]["chain-url"]
-    if API:
-        CHAIN_URL = API
+    CHAIN_URL = API if API else config["api"]["chain-url"]
 
     CONTRACT = config["api"]["core"]
     MULTI_SIG_CONTRACT = config["api"]["multi-sig"]
+    TOKEN = config["api"]["token"]
 
 with open(SM_CONFIG_PATH, "r") as f:
     METADATA = json.load(f)
@@ -94,6 +95,10 @@ ABI = METADATA["abi"]
 with open(MS_CONFIG_PATH, "r") as f:
     MS_METADATA = json.load(f)
 MULTI_SIG_ABI = MS_METADATA["abi"]
+
+with open(TOKEN_CONFIG_PATH, "r") as f:
+    TOKEN_METADATA = json.load(f)
+TOKEN_ABI = TOKEN_METADATA["abi"]
 
 SNO_EVENT_SIGNATURES = {
     "JobRequest": "JobRequested(uint256,uint256,address[])",
@@ -156,6 +161,7 @@ def get_connection_info(node, main_port=None, upnp=True):
         "role": node.role,
         "id": node.node_id,
         "reputation": node.reputation,
+        "address": node.node_address,
         "last_seen": time.time(),
     }
 
@@ -263,7 +269,7 @@ class Smartnode(threading.Thread):
 
         if local_test:
             self.upnp = False
-            self.off_chain_test = True
+            # self.off_chain_test = True
 
         self.public_key = None
 
@@ -289,6 +295,7 @@ class Smartnode(threading.Thread):
                 self.multi_sig_contract = self.chain.eth.contract(
                     address=MULTI_SIG_CONTRACT, abi=MULTI_SIG_ABI
                 )
+                self.token = self.chain.eth.contract(address=TOKEN, abi=TOKEN_ABI)
 
             except Exception as e:
                 self.debug_print(
@@ -672,7 +679,7 @@ class Smartnode(threading.Thread):
         # Check node reputation from validator nodes
         if len(self.nodes) > 0 and self.off_chain_test is False:
             dht_info = self.dht.query(
-                node_info['node_id_hash'], ids_to_exclude=[node_info['node_id_hash']]
+                node_info['node_id_hash'], keys_to_exclude=[node_info['node_id_hash']]
             )
 
             if dht_info and dht_info.get("reputation", 0) < 40:
@@ -871,6 +878,7 @@ class Smartnode(threading.Thread):
                 main_port=main_port,
                 node_id=node_info['node_id'],
                 role=node_info['role'],
+                node_address=node_info['node_address'],
             )
             thread_client.start()
 
@@ -1143,36 +1151,36 @@ class Smartnode(threading.Thread):
                 else:
                     self.dht.delete(id_hash)
 
-        # Connect to additional randomly selected validators from the network
-        n_validators = self.get_validator_count()
-        sample_size = min(n_validators, 0)
-        for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
-            # Random validator id
-            validator_id = random.randrange(1, n_validators + 1)
-
-            # Get key validator information from smart contract
-            validator_contract_info = self.get_validator_info(validator_id)
-
-            if validator_contract_info is not None:
-                is_active, id_hash = validator_contract_info
-                id_hash = id_hash.hex()
-                validator_p2p_info = self.dht.query(id_hash)
-
-                if validator_p2p_info is None:
-                    self.dht.delete(id_hash)
-                    continue
-
-                # Connect to the validator's node and exchange information
-                # TODO what if we receive false connection info from validator: how to report?
-                connected = self.connect_node(
-                    id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
-                )
-
-                if not connected:
-                    self.dht.delete(id_hash)
-                    continue
-
-                candidates.append(validator_id)
+        # # Connect to additional randomly selected validators from the network
+        # n_validators = 1
+        # sample_size = min(n_validators, 0)
+        # for i in [random.randint(1, n_validators) for _ in range(sample_size)]:
+        #     # Random validator id
+        #     validator_id = random.randrange(1, n_validators + 1)
+        #
+        #     # Get key validator information from smart contract
+        #     validator_contract_info = self.get_validator_info(validator_id)
+        #
+        #     if validator_contract_info is not None:
+        #         is_active, id_hash = validator_contract_info
+        #         id_hash = id_hash.hex()
+        #         validator_p2p_info = self.dht.query(id_hash)
+        #
+        #         if validator_p2p_info is None:
+        #             self.dht.delete(id_hash)
+        #             continue
+        #
+        #         # Connect to the validator's node and exchange information
+        #         # TODO what if we receive false connection info from validator: how to report?
+        #         connected = self.connect_node(
+        #             id_hash, validator_p2p_info["host"], validator_p2p_info["port"]
+        #         )
+        #
+        #         if not connected:
+        #             self.dht.delete(id_hash)
+        #             continue
+        #
+        #         candidates.append(validator_id)
 
         return candidates
 
@@ -1365,9 +1373,12 @@ class Smartnode(threading.Thread):
         main_port: int,
         node_id: bytes,
         role: int,
+        node_address: str,
     ) -> Connection:
         """Creates a connection thread object from connection.py for individual connections"""
-        return Connection(self, connection, host, port, main_port, node_id, role)
+        return Connection(
+            self, connection, host, port, main_port, node_id, role, node_address
+        )
 
     def _can_connect(self, host: str, port: int):
         """Makes sure we are not trying to connect to ourselves or a connected nodes"""
@@ -1536,21 +1547,3 @@ class Smartnode(threading.Thread):
                 port += random.randint(1, 50)
 
     """Methods for Smart Contract Interactions"""
-
-    def get_validator_count(self):
-        """Get number of listed validators on Smart Nodes"""
-        num_validators = self.contract.functions.validatorCounter().call()
-        return num_validators - 1
-
-    def get_validator_info(self, validator_ind: int):
-        """Get validator info from Smart Nodes"""
-        try:
-            (is_active, pub_key_hash) = self.contract.functions.getValidatorInfo(
-                validator_ind
-            ).call()
-            return is_active, pub_key_hash
-
-        except Exception as e:
-            self.debug_print(
-                f"Validator with the ID {validator_ind} not found!.\nException: {e}"
-            )

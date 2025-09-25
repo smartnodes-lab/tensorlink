@@ -116,15 +116,17 @@ class DistributedWorker:
             response = self.node_responses.get(
                 timeout=timeout
             )  # Blocking call, waits for response
-        except TimeoutError as e:
+            if isinstance(response, dict):
+                return response["return"]
+            else:
+                return response
+
+        except TimeoutError:
             self.terminate = True
         except Exception as e:
-            response = {"return": str(e)}
+            return {"return": str(e)}
         finally:
             self.mpc_lock.release()
-
-        if response:
-            return response["return"]
 
     def handle_backward(self, module_id, tag, loss_relay):
         """Handle backward pass with mixed precision support"""
@@ -343,7 +345,6 @@ class DistributedWorker:
 
             # Cleanup file
             os.remove(file_name)
-            print("Cleaning Model...")
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -364,7 +365,6 @@ class DistributedWorker:
 
         self.modules[module_id] = module
         if training:
-            print("Creating Optimizer")
             optimizer_cls = get_optimizer_from_name(optimizer_name)
             # Placeholder - actual initialization happens in state_update
             self.optimizers[module_id] = optimizer_cls
@@ -616,7 +616,7 @@ class DistributedWorker:
                     self.handle_backward(module_id, tag, loss_relay)
 
         # Small sleep to prevent CPU hogging
-        time.sleep(0.1)
+        time.sleep(0.01)
 
     def run(self):
         """Main execution thread"""

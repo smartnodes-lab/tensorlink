@@ -161,6 +161,10 @@ class JobMonitor:
         try:
             while not self.terminate_flag.is_set():
                 time.sleep(self.HEALTH_CHECK_INTERVAL_SECONDS)
+                job_data = self._get_job_data(job_id)
+                if not job_data:
+                    self._handle_job_failure(job_id, "Failed to retrieve job data")
+                    return
 
                 try:
                     job_status = self._check_job_health(job_id, job_data)
@@ -191,6 +195,12 @@ class JobMonitor:
 
     def _check_job_health(self, job_id: str, job_data: Dict) -> JobStatus:
         """Comprehensive health check of the job and its components."""
+        # Check if job is expired
+        if job_data.get("last_seen", 15) - job_data.get("timestamp", 0) > job_data.get(
+            "time", 0
+        ):
+            return JobStatus.COMPLETED
+
         # Check user connection
         user_status = self._check_user_status(job_data)
         if not user_status:
@@ -408,7 +418,7 @@ class JobMonitor:
             if module_info["type"] != "offloaded":
                 continue
 
-            for worker_id, worker_info in module_info["workers"]:
+            for worker_id in module_info["workers"]:
                 worker_healthy = self._check_single_worker(worker_id, module_id)
                 all_workers_healthy = all_workers_healthy and worker_healthy
 
@@ -433,12 +443,6 @@ class JobMonitor:
             job_data["active"] = False
             job_data["end_time"] = time.time()
             job_data["final_status"] = final_status.value
-            job_data["gigabyte_hours"] = (
-                job_data["capacity"]
-                * (job_data["end_time"] - job_data["timestamp"])
-                / 60
-                / 60
-            )  # Capacity in Gb hours
 
             # Clean up worker resources
             self._cleanup_workers(job_data)
@@ -466,17 +470,17 @@ class JobMonitor:
         """Clean up worker resources and send shutdown signals."""
         for module_id, module_info in job_data["distribution"].items():
             if module_info["type"] == "offloaded":
-                for worker in module_info["workers"]:
+                for worker_id in module_info["workers"]:
                     try:
-                        node = self.node.nodes[worker]
+                        node = self.node.nodes[worker_id]
                         self.node.send_to_node(
                             node, b"SHUTDOWN-JOB" + module_id.encode()
                         )
                         # Clear worker health data
-                        self.worker_health_checks.pop(worker, None)
+                        self.worker_health_checks.pop(worker_id, None)
                     except Exception as e:
                         self.node.debug_print(
-                            f"Error shutting down worker {worker}: {str(e)}",
+                            f"Error shutting down worker {worker_id}: {str(e)}",
                             colour="yellow",
                             level=logging.WARNING,
                             tag="JobMonitor",

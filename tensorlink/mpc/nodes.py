@@ -44,7 +44,7 @@ class BaseNode:
         max_connections: int = 0,
         off_chain_test=False,
         local_test=False,
-        print_level=logging.WARNING,
+        print_level=logging.INFO,
         trusted=False,
         utilization=True,
     ):

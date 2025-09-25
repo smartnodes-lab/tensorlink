@@ -2,8 +2,8 @@ from typing import List, Tuple, Optional, Dict, Any
 from web3.exceptions import ContractLogicError
 from dotenv import get_key
 from eth_abi import encode
+from hexbytes import HexBytes
 import logging
-import hashlib
 import threading
 import time
 
@@ -27,50 +27,46 @@ class ContractManager:
             public_key: Public key of the node
         """
         self.node = node
-        self.multi_sig_contract = multi_sig_contract
+        self.coordinator_contract = multi_sig_contract
         self.chain = chain
         self.public_key = public_key
 
         # State tracking
-        self.validators_to_clear: List[str] = self.node.validators_to_clear
-        self.jobs_to_complete: List[str] = self.node.jobs_to_complete
+        self.validators_to_clear: List[str] = []
+        self.jobs_to_complete: List[str] = []
         self.current_proposal: Optional[int] = (
-            self.multi_sig_contract.functions.nextProposalId.call()
+            self.coordinator_contract.functions.nextProposalId.call()
         )
         self.terminate_flag = node.terminate_flag
 
         self.proposals = {}
 
     def proposal_validator(self):
-        """Listen for new proposals created on SmartnodesMultiSig and validate them."""
+        """Listen for new proposals created on SmartnodesCoordinator and validate them."""
         current_proposal_num = 1
 
-        # Initialize last_execution_block from existing proposals
         while not self.terminate_flag.is_set():
             try:
                 # Check if a new round of proposals has started
                 current_proposal_id = (
-                    self.multi_sig_contract.functions.nextProposalId().call()
+                    self.coordinator_contract.functions.nextProposalId().call()
                 )
                 time.sleep(1)
+                current_proposal_num = 1
 
                 # Update variables for new round of proposals
                 if current_proposal_id != self.current_proposal:
                     self.current_proposal = current_proposal_id
                     self.proposals = {}
-                    current_proposal_num = 1
 
                 # Get ID for next proposal in round
                 try:
-                    # If proposal exists, get its hash
-                    proposal_hash = (
-                        self.multi_sig_contract.functions.currentProposals(
-                            current_proposal_num
-                            - 1  # index for querying next proposal candidate
-                        )
-                        .call()
-                        .hex()
-                    )
+                    # Get proposal data - updated structure
+                    proposal_data = self.coordinator_contract.functions.getProposal(
+                        current_proposal_num
+                    ).call()
+                    proposal_hash = proposal_data[-1].hex()  # hash is at index -1
+                    author = proposal_data[0]  # author is at index 0
                     time.sleep(1)
 
                 except ContractLogicError:
@@ -81,17 +77,15 @@ class ContractManager:
                 # Validator proposal
                 t = threading.Thread(
                     target=self.validate_proposal,
-                    args=(proposal_hash, current_proposal_num),
+                    args=(author, proposal_hash, current_proposal_num),
                     name=f"proposal_validator_{current_proposal_num}",
                     daemon=True,
                 )
                 self.proposals[proposal_hash] = t
                 t.start()
-                current_proposal_num += 1
                 time.sleep(1)
 
-                if current_proposal_num > 1:
-                    time.sleep(3000)
+                time.sleep(3000)  # Temp fix for current 1 validator testnet setup
 
             except Exception as e:
                 self.node.debug_print(
@@ -103,7 +97,7 @@ class ContractManager:
 
             time.sleep(3)
 
-    def validate_proposal(self, proposal_hash, proposal_num):
+    def validate_proposal(self, author, proposal_hash, proposal_num):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
         #  We should also use our proposal data to quickly verify matching data
         self.node.debug_print(
@@ -204,9 +198,9 @@ class ContractManager:
         #         break
 
     def _approve_transaction(self, proposal_num: int, proposal_hash: str):
+        """Vote for a proposal instead of approving transaction."""
         try:
-            # Determine if proposal can be submitted
-            tx = self.multi_sig_contract.functions.approveTransaction(
+            tx = self.coordinator_contract.functions.voteForProposal(
                 proposal_num
             ).build_transaction(
                 {
@@ -246,11 +240,11 @@ class ContractManager:
 
     def add_job_to_complete(self, job_data: dict) -> None:
         """Add a job to the list of jobs to be completed."""
-        # Update job to contract if a certain threshold of work was done
+        # Update job to contract if a certain threshold of time passed
         if (
-            job_data["end_time"] - job_data["timestamp"] > 180
-            and job_data["gigabyte_hours"] > 5e8
-        ) and job_data["id"] not in self.jobs_to_complete:
+            job_data["end_time"] - job_data["timestamp"] > 1
+            and job_data["id"] not in self.jobs_to_complete
+        ):
             self.jobs_to_complete.append(job_data["id"])
 
     def verify_and_remove_validators(self) -> List[str]:
@@ -262,7 +256,7 @@ class ContractManager:
         """
         validators_to_remove = []
 
-        for validator in self.node.validators_to_clear:
+        for validator in self.validators_to_clear:
             node_info = self.node.dht.query(validator)
             if not node_info:
                 continue
@@ -272,7 +266,11 @@ class ContractManager:
                 if node_address:
                     validators_to_remove.append(node_address)
 
-        return validators_to_remove
+        formatted_validators = [
+            self.chain.to_checksum_address(v) for v in validators_to_remove
+        ]
+
+        return formatted_validators
 
     def process_jobs(self) -> Tuple[List[bytes], List[int], List[str]]:
         """
@@ -284,40 +282,38 @@ class ContractManager:
             - List[int]: Job capacities
             - List[str]: Worker addresses
         """
-        job_hashes = []
-        job_capacities = []
-        job_workers = []
+        all_job_ids = []
+        all_capacities = []
+        all_workers = []
 
         for job_id in self.jobs_to_complete:
             job = self.node.dht.query(job_id)
             if not job:
                 continue
 
-            job_data = self._process_single_job(job, job_id)
-            if job_data:
-                job_hash, capacity, workers = job_data
-                job_hashes.append(job_hash)
-                job_capacities.append(capacity)
-                job_workers.extend(workers)
+            job_hash, capacities, workers = self._process_single_job(job, job_id)
 
-        return job_hashes, job_capacities, job_workers
+            all_job_ids.append(job_hash)
+            all_capacities.extend(capacities)
+            all_workers.extend(workers)
+
+        return all_job_ids, all_capacities, all_workers
 
     def proposal_creator(self):
         while not self.terminate_flag.is_set():
             try:
                 # Fetch state from the contract
-                (
-                    next_proposal_id,
-                    round_validators,
-                ) = self.multi_sig_contract.functions.getState().call()
+                (next_proposal_id, execution_time, round_validators) = (
+                    self.coordinator_contract.functions.getState().call()
+                )
                 time.sleep(1)
-                is_expired = self.multi_sig_contract.functions.isRoundExpired().call()
+                is_expired = self.coordinator_contract.functions.isRoundExpired().call()
                 time.sleep(1)
 
                 if self.public_key in round_validators or is_expired:
                     # Wait a bit before creating the proposal
                     self.create_and_submit_proposal()
-                    time.sleep(3000)
+                    time.sleep(30)
 
             except Exception as e:
                 self.node.debug_print(
@@ -345,14 +341,14 @@ class ContractManager:
         while True:
             # Verify proposal can be submitted
             try:
-                self.multi_sig_contract.functions.createProposal(
+                self.coordinator_contract.functions.createProposal(
                     encode(["uint256"], [12345])
                 ).call({"from": self.public_key})
 
             except Exception:
                 # If the proposal couldnt be created, we must wait
                 time.sleep(120)
-                pass
+                continue
 
             # Request all workers connected to the network
             self.node.get_workers()
@@ -374,15 +370,28 @@ class ContractManager:
             # Create and store proposal
             proposal = {
                 "validators": validators_to_remove,
-                "jobs": job_hashes,
+                "job_hashes": [j.hex() for j in job_hashes],
                 "job_capacities": job_capacities,
                 "workers": job_workers,
                 "total_capacity": total_capacities,
                 "total_workers": total_workers,
+                "distribution_id": self.current_proposal,
             }
+
+            # Build participants for merkle tree
+            participants = self._build_participants(proposal)
+            proposal["merkle_root"] = self._build_merkle_tree_from_participants(
+                participants
+            ).hex()
+            proposal["workers_hash"] = self.chain.keccak(
+                encode(["address[]"], [job_workers])
+            ).hex()
+            proposal["capacities_hash"] = self.chain.keccak(
+                encode(["uint256[]"], [job_capacities])
+            ).hex()
+
             proposal_hash = self._hash_proposal_data(proposal)
-            self.node.dht.store(proposal_hash.hex(), proposal)
-            self.proposals[proposal_hash.hex()] = proposal
+            self.node.dht.store(proposal_hash.hex(), proposal.copy())
 
             # Submit proposal
             code = self._submit_proposal(proposal_hash)
@@ -399,14 +408,7 @@ class ContractManager:
         self._wait_for_next_block()
 
         # Monitor and execute proposal
-        self._monitor_and_execute_proposal(
-            validators_to_remove,
-            job_hashes,
-            job_capacities,
-            job_workers,
-            total_capacities,
-            total_workers,
-        )
+        self._monitor_and_execute_proposal(proposal_hash.hex())
 
     def _is_validator_online(self, node_info: Dict[str, Any]) -> bool:
         """Check if a validator is online and connected to the network."""
@@ -419,47 +421,62 @@ class ContractManager:
 
     def _process_single_job(
         self, job: Dict[str, Any], job_id: str
-    ) -> Optional[Tuple[bytes, int, List[str]]]:
+    ) -> Tuple[bytes, List[int], List[str]]:
         """Process a single job and return its data."""
         job_hash = bytes.fromhex(job_id)
-        capacities = job["capacity"]
         workers = []
+        capacities = []
 
         for module_info in job["distribution"].values():
             for worker_id in module_info["workers"]:
-                worker_address = self._get_worker_address(worker_id)
-                if worker_address:
-                    workers.append(worker_address)
-                else:
-                    workers.append(self.public_key)
+                worker_info = self.node.dht.query(worker_id)
+                worker_address = self.chain.to_checksum_address(worker_info["address"])
+                capacity = round(
+                    module_info["size"]
+                    * 1e9
+                    * (job["end_time"] - job["timestamp"])
+                    / 3600
+                )  # Capacity measured in byte hours
+                workers.append(worker_address)
+                capacities.append(capacity)
 
         return job_hash, capacities, workers
 
-    def _get_worker_address(self, worker_id: str) -> Optional[str]:
+    def _get_worker_address(self, worker_info: dict) -> Optional[str]:
         """Get the blockchain address for a worker."""
-        worker_info = self.node.dht.query(worker_id)
         if not worker_info:
             return None
 
         if not self._is_validator_online(worker_info):
             return None
 
-        worker_node = self.node.nodes[worker_id]
-        return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
+        # worker_node = self.node.nodes[worker_id]
+        # return self.node.query_node(hashlib.sha256(b"ADDRESS").hexdigest(), worker_node)
+
+    def _build_participants(self, proposal_data: dict):
+        job_workers = [
+            self.chain.to_checksum_address(w) for w in proposal_data.get("workers", [])
+        ]
+        job_capacities = proposal_data.get("job_capacities", [])
+
+        participants = []
+        for i, worker in enumerate(job_workers):
+            capacity = job_capacities[i] if i < len(job_capacities) else 0
+            participants.append({"addr": worker, "capacity": capacity})
+
+        return participants
 
     def _hash_proposal_data(self, proposal_data: dict):
-        (validators_to_remove, job_hashes, job_capacities, job_workers, _, _) = (
-            proposal_data.values()
-        )
-
-        validators_to_remove = [
-            self.chain.to_checksum_address(validator)
-            for validator in validators_to_remove
-        ]
-        workers = [self.chain.to_checksum_address(worker) for worker in job_workers]
+        """Hash proposal data according to coordinator contract structure."""
         encoded_data = encode(
-            ["address[]", "bytes32[]", "uint256[]", "address[]"],
-            [validators_to_remove, job_hashes, job_capacities, workers],
+            ["bytes32", "address[]", "bytes32[]", "bytes32", "bytes32"],
+            [
+                HexBytes(proposal_data["merkle_root"]),
+                proposal_data["validators"],
+                [HexBytes(j) for j in proposal_data["job_hashes"]],
+                HexBytes(proposal_data["workers_hash"]),
+                HexBytes(proposal_data["capacities_hash"]),
+            ],
         )
 
         return self.chain.keccak(encoded_data)
@@ -469,12 +486,22 @@ class ContractManager:
         while not self.terminate_flag.is_set():
             try:
                 # Verify proposal can be submitted
-                self.multi_sig_contract.functions.createProposal(proposal_hash).call(
+                self.coordinator_contract.functions.createProposal(proposal_hash).call(
                     {"from": self.public_key}
                 )
 
                 # Build and submit transaction
-                tx = self._build_proposal_transaction(proposal_hash)
+                tx = self.coordinator_contract.functions.createProposal(
+                    proposal_hash
+                ).build_transaction(
+                    {
+                        "from": self.public_key,
+                        "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                        "gas": 6_721_975,
+                        "gasPrice": self.chain.eth.gas_price,
+                    }
+                )
+
                 tx_hash = self._submit_transaction(tx)
 
                 self.node.debug_print(
@@ -515,7 +542,7 @@ class ContractManager:
 
     def _build_proposal_transaction(self, proposal_hash: bytes) -> Dict[str, Any]:
         """Build the proposal transaction."""
-        return self.multi_sig_contract.functions.createProposal(
+        return self.coordinator_contract.functions.createProposal(
             proposal_hash
         ).build_transaction(
             {
@@ -542,75 +569,77 @@ class ContractManager:
                 break
             time.sleep(5)
 
-    def _monitor_and_execute_proposal(
-        self,
-        validators_to_remove: List[str],
-        job_hashes: List[bytes],
-        job_capacities: List[int],
-        job_workers: List[str],
-        total_capacities: List[int],
-        total_workers: List[int],
-    ) -> None:
+    def _monitor_and_execute_proposal(self, proposal_hash: str) -> None:
         """Monitor proposal status and execute when ready."""
         while not self.terminate_flag.is_set():
             if not self._is_proposal_valid():
                 return
 
-            if self._is_proposal_ready():
-                self._execute_proposal(
-                    validators_to_remove,
-                    job_hashes,
-                    job_capacities,
-                    job_workers,
-                    total_capacities,
-                    total_workers,
-                )
+            proposal_number, is_ready = self._is_proposal_ready()
+            if is_ready:
+                self._execute_proposal(proposal_number, proposal_hash)
+                self.node.proposals.append(proposal_hash)
                 return
 
-            time.sleep(15)
+            time.sleep(10)
 
     def _is_proposal_valid(self) -> bool:
         """Check if the current proposal is still valid."""
-        proposal_id = self.multi_sig_contract.functions.nextProposalId.call()
+        proposal_id = self.coordinator_contract.functions.nextProposalId.call()
         time.sleep(1)
         return self.current_proposal == proposal_id
 
-    def _is_proposal_ready(self) -> bool:
+    def _is_proposal_ready(self) -> (int, bool):
         """Check if the proposal is ready for execution."""
-        proposal_number = self.multi_sig_contract.functions.hasSubmittedProposal(
+        proposal_number = self.coordinator_contract.functions.hasSubmittedProposal(
             self.public_key
         ).call()
         time.sleep(1)
-        return self.multi_sig_contract.functions.isProposalReady(proposal_number).call()
+        return (
+            proposal_number,
+            self.coordinator_contract.functions.isProposalReady(proposal_number).call(),
+        )
 
-    def _execute_proposal(
-        self,
-        validators_to_remove: List[str],
-        job_hashes: List[bytes],
-        job_capacities: List[int],
-        job_workers: List[str],
-        total_capacities: List[int],
-        total_workers: List[int],
-    ) -> bool:
-        """Execute the proposal once it's ready."""
+    def _execute_proposal(self, proposal_number: int, proposal_hash: str) -> bool:
+        """Execute the proposal with correct merkle proof generation."""
         try:
-            self.multi_sig_contract.functions.executeProposal(
-                validators_to_remove,
+            proposal = self.node.dht.query(proposal_hash)
+            merkle_root = HexBytes(proposal["merkle_root"])
+            total_capacity = proposal["total_capacity"][0]
+            validators = proposal["validators"]
+            job_hashes = [HexBytes(j) for j in proposal["job_hashes"]]
+            workers_hash = HexBytes(proposal["workers_hash"])
+            capacities_hash = HexBytes(proposal["capacities_hash"])
+
+            # Test execution first
+            self.coordinator_contract.functions.executeProposal(
+                proposal_number,
+                merkle_root,
+                total_capacity,
+                validators,
                 job_hashes,
-                job_capacities,
-                job_workers,
-                total_capacities,
-                total_workers,
+                workers_hash,
+                capacities_hash,
             ).call({"from": self.public_key})
 
-            execute_tx = self._build_execution_transaction(
-                validators_to_remove,
+            # Build and execute transaction
+            execute_tx = self.coordinator_contract.functions.executeProposal(
+                proposal_number,
+                merkle_root,
+                total_capacity,
+                validators,
                 job_hashes,
-                job_capacities,
-                job_workers,
-                total_capacities,
-                total_workers,
+                workers_hash,
+                capacities_hash,
+            ).build_transaction(
+                {
+                    "from": self.public_key,
+                    "nonce": self.chain.eth.get_transaction_count(self.public_key),
+                    "gas": 6_721_975,
+                    "gasPrice": self.chain.eth.gas_price,
+                }
             )
+
             execute_tx_hash = self._submit_transaction(execute_tx)
 
             self.node.debug_print(
@@ -629,21 +658,19 @@ class ContractManager:
 
     def _build_execution_transaction(
         self,
+        proposal_number: int,
         validators_to_remove: List[str],
         job_hashes: List[bytes],
         job_capacities: List[int],
         job_workers: List[str],
-        total_capacities: List[int],
-        total_workers: List[int],
     ) -> Dict[str, Any]:
         """Build the execution transaction"""
         return self.node.multi_sig_contract.functions.executeProposal(
+            proposal_number,
             validators_to_remove,
             job_hashes,
-            job_capacities,
             job_workers,
-            total_capacities,
-            total_workers,
+            job_capacities,
         ).build_transaction(
             {
                 "from": self.public_key,
@@ -674,3 +701,220 @@ class ContractManager:
         """Clear lists of completed validators and jobs."""
         self.validators_to_clear = []
         self.jobs_to_complete = []
+
+    def _build_merkle_tree_from_participants(self, participants):
+        """Build merkle tree from participant data"""
+        if not participants:
+            return bytes(32)
+
+        # Generate leaves exactly like Solidity: keccak256(abi.encode(addr, capacity))
+        leaves = []
+        for participant in participants:
+            leaf = self.chain.keccak(
+                encode(
+                    ["address", "uint256"],
+                    [
+                        self.chain.to_checksum_address(participant['addr']),
+                        participant['capacity'],
+                    ],
+                )
+            )
+            leaves.append(leaf)
+
+        return self._build_merkle_tree(leaves)
+
+    def _build_merkle_tree(self, leaves):
+        """Build merkle tree from leaves"""
+        if len(leaves) == 0:
+            return bytes(32)
+        if len(leaves) == 1:
+            return leaves[0]
+
+        current_level = leaves[:]
+
+        while len(current_level) > 1:
+            # next_level_size = (len(current_level) + 1) // 2
+            next_level = []
+
+            for i in range(0, len(current_level), 2):
+                left = current_level[i]
+                right = (
+                    current_level[i + 1]
+                    if i + 1 < len(current_level)
+                    else current_level[i]
+                )
+
+                if left <= right:
+                    combined = self.chain.keccak(left + right)
+                else:
+                    combined = self.chain.keccak(right + left)
+
+                next_level.append(combined)
+
+            current_level = next_level
+
+        return current_level[0]
+
+    def _generate_merkle_proof(self, participants, target_address):
+        """Generate Merkle proof for a specific participant - matches Solidity test logic."""
+        if not participants:
+            return []
+
+        # Find target index
+        target_index = None
+        for i, participant in enumerate(participants):
+            if self.chain.to_checksum_address(
+                participant['addr']
+            ) == self.chain.to_checksum_address(target_address):
+                target_index = i
+                break
+
+        if target_index is None:
+            raise ValueError(f"Participant {target_address} not found")
+
+        # Generate leaves
+        leaves = []
+        for participant in participants:
+            leaf = self.chain.keccak(
+                encode(
+                    ["address", "uint256"],
+                    [
+                        self.chain.to_checksum_address(participant['addr']),
+                        participant['capacity'],
+                    ],
+                )
+            )
+            leaves.append(leaf)
+
+        if len(leaves) <= 1:
+            return []
+
+        proof = []
+        current_level = leaves[:]
+        current_index = target_index
+
+        while len(current_level) > 1:
+            # Determine sibling index
+            if current_index % 2 == 0:
+                sibling_index = current_index + 1
+            else:
+                sibling_index = current_index - 1
+
+            # Add sibling to proof
+            if sibling_index < len(current_level):
+                proof.append(current_level[sibling_index])
+            else:
+                proof.append(current_level[current_index])
+
+            # Build next level
+            next_level = []
+            for i in range(0, len(current_level), 2):
+                left = current_level[i]
+                right = (
+                    current_level[i + 1]
+                    if i + 1 < len(current_level)
+                    else current_level[i]
+                )
+
+                if left <= right:
+                    combined = self.chain.keccak(left + right)
+                else:
+                    combined = self.chain.keccak(right + left)
+
+                next_level.append(combined)
+
+            current_level = next_level
+            current_index = current_index // 2
+
+        return proof
+
+    def get_worker_claim_data(self, worker_address: str) -> List[Dict[str, Any]]:
+        """
+        Get all available claim data for a worker across all proposals.
+        Returns a list of claim objects, each containing the data needed to claim rewards.
+
+        Args:
+            worker_address: The blockchain address of the worker
+
+        Returns:
+            List of dictionaries containing claim data, each with:
+            - distribution_id: The distribution/proposal ID
+            - worker: Checksummed worker address
+            - capacity: Worker's capacity for this distribution
+            - merkle_proof: Proof array for Merkle tree verification
+            - total_capacity: Total capacity for the distribution
+            - is_claimed: Whether rewards have already been claimed
+        """
+        claims = []
+        worker_address = self.chain.to_checksum_address(worker_address)
+
+        try:
+            # Iterate through all stored proposals
+            for proposal_hash in self.node.proposals:
+                proposal_data = self.node.dht.query(proposal_hash)
+                # Check if worker participated in this proposal
+                if worker_address not in proposal_data.get("workers", []):
+                    continue
+
+                # Get the distribution ID
+                distribution_id = proposal_data.get("distribution_id")
+                if distribution_id is None:
+                    continue
+
+                # Prepare proposal payload to get participants
+                participants = self._build_participants(proposal_data)
+
+                # Find the worker's participation data
+                worker_participant = None
+                for participant in participants:
+                    if (
+                        self.chain.to_checksum_address(participant["addr"])
+                        == worker_address
+                    ):
+                        worker_participant = participant
+                        break
+
+                if not worker_participant:
+                    continue
+
+                # Generate Merkle proof for this worker
+                try:
+                    merkle_proof = self._generate_merkle_proof(
+                        participants, worker_address
+                    )
+                except Exception as e:
+                    self.node.debug_print(
+                        f"Failed to generate merkle proof for {worker_address} in distribution {distribution_id}: {e}",
+                        colour="yellow",
+                        level=logging.WARNING,
+                        tag="ContractManager",
+                    )
+                    continue
+
+                # Calculate total capacity
+                total_capacity = sum(p["capacity"] for p in participants)
+
+                # Create claim data object
+                claim_data = {
+                    "distribution_id": distribution_id,
+                    "worker": worker_address,
+                    "capacity": worker_participant["capacity"],
+                    "merkle_proof": [
+                        proof.hex() for proof in merkle_proof
+                    ],  # Convert bytes to hex strings
+                    "total_capacity": total_capacity,
+                    "proposal_hash": proposal_hash,
+                    "merkle_root": proposal_data["merkle_root"],
+                }
+
+                claims.append(claim_data)
+
+        except Exception as e:
+            self.node.debug_print(
+                f"Error getting claim data for worker {worker_address}: {e}",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ContractManager",
+            )
+
+        return claims

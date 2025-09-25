@@ -229,17 +229,9 @@ class Torchnode(Smartnode):
             else:
                 module_id = None
                 for module in self.modules:
-                    # Validators store worker info as workers instead so must be conditional
-                    if self.role == "V":
-                        if node.node_id in [
-                            w[0] for w in self.modules[module]["workers"]
-                        ]:
-                            module_id = module
-                            break
-                    else:
-                        if node.node_id in self.modules[module]["workers"]:
-                            module_id = module
-                            break
+                    if node.node_id in self.modules[module]["workers"]:
+                        module_id = module
+                        break
 
                 shm = shared_memory.SharedMemory(create=True, size=size)
                 buffer = shm.buf[:size]
@@ -479,9 +471,11 @@ class Torchnode(Smartnode):
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     def _handle_check_module(self, request):
-        # Check if module has been received and is loaded in shared mpc
         return_val = False
-        for module_id, module in self.modules.items():
+
+        for module_id in list(self.modules.keys()):
+            module = self.modules[module_id]
+
             if "mem_info" in module:
                 name = module["mem_info"]
 
@@ -503,13 +497,13 @@ class Torchnode(Smartnode):
                         module["optimizer"],
                         module["training"],
                     )
+
                 del module["mem_info"]
 
             elif "termination" in module:
                 return_val = module_id
                 del module["termination"]
                 module["terminated"] = True
-                self.available_gpu_memory += module["vram"]
                 del self.modules[module_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})

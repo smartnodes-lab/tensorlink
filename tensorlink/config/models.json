@@ -1,5 +1,5 @@
 {
-  "FREE_MODELS": [
+  "DEFAULT_MODELS": [
     "Qwen/Qwen2.5-7B-Instruct"
   ]
 }

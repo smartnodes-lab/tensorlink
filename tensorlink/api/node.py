@@ -1,6 +1,8 @@
-from fastapi import FastAPI, HTTPException, APIRouter, Query
+from fastapi import FastAPI, HTTPException, APIRouter, Query, Request
+from tensorlink.ml.utils import get_popular_model_stats
 from pydantic import BaseModel
 from typing import Optional, List
+from collections import defaultdict
 import threading
 import uvicorn
 import asyncio
@@ -9,7 +11,7 @@ import time
 
 
 class JobRequest(BaseModel):
-    _model_name: str
+    hf_name: str
     time: int
     payment: int
 
@@ -35,6 +37,10 @@ class TensorlinkAPI:
         self.port = port
         self.app = FastAPI()
         self.router = APIRouter()
+
+        self.model_name_to_request = {}
+        self.model_request_timestamps = defaultdict(list)
+
         self._define_routes()
         self._start_server()
 
@@ -43,16 +49,49 @@ class TensorlinkAPI:
         async def generate(request: GenerationRequest):
             print("Incoming request:", request)
             try:
+                # Log model request
+                current_time = time.time()
+                self.model_request_timestamps[request.hf_name].append(current_time)
+
+                cutoff = current_time - 300
+                self.model_request_timestamps[request.hf_name] = [
+                    ts
+                    for ts in self.model_request_timestamps[request.hf_name]
+                    if ts > cutoff
+                ]
+
+                # Update request counter
+                if request.hf_name not in self.model_name_to_request:
+                    self.model_name_to_request[request.hf_name] = 1
+                self.model_name_to_request[request.hf_name] += 1
+
                 request.output = None
                 request.id = hash(random.random())
+
+                # Append model request to the queue
                 self.smart_node.endpoint_requests["incoming"].append(request)
 
+                # Wait for the result
                 request = await self._wait_for_result(request)
+
                 return_val = request.output
                 return {"response": return_val}
 
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
+
+        @self.router.post("/request-job")
+        def request_job(request: Request, job_request: JobRequest):
+            # client_ip = request.client.host
+            self.smart_node.create_base_job()
+
+        @self.router.get("/model-demand")
+        async def get_api_demand_stats(
+            days: int = Query(30, ge=1, le=90),
+            limit: int = Query(10, ge=1, le=50),
+        ):
+            """Return current API demand statistics"""
+            return get_popular_model_stats(days=days, limit=limit)
 
         @self.app.get("/stats")
         async def get_network_stats():
@@ -80,7 +119,7 @@ class TensorlinkAPI:
                     if request.id == response.id:
                         return response
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.01)
             if time.time() - start_time > 30:
                 raise HTTPException(status_code=504, detail="Request timed out.")
 
@@ -155,11 +194,6 @@ class TensorlinkAPI:
     #     except Exception as e:
     #         # logger.error(f"Error unloading model: {str(e)}")
     #         raise HTTPException(status_code=500, detail=str(e))
-    #
-    # @app.post("/api/request-job")
-    # def request_job(request: Request, job_request: JobRequest):
-    #     client_ip = request.client.host
-    #     smart_node.handle_api_job_req(job_request, client_ip)
     #
     # @app.post("/api/node-info")
     # def get_node_info():

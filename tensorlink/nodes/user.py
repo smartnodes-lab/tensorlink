@@ -115,8 +115,10 @@ class User(Torchnode):
                         daemon=True,
                     ).start()
                 elif b"DECLINE-JOB" == data[:11]:
-                    if node.node_id in self.jobs[-1]["seed_validators"]:
-                        reason = data[11:]
+                    job_id = self.jobs[-1]
+                    job_data = self.dht.query(job_id)
+                    if node.node_id in job_data.get("seed_validators", []):
+                        reason = data[11:].decode()
                         self.debug_print(
                             f"Validator ({node.node_id}) declined job! Reason: {reason}",
                             colour="bright_red",
@@ -127,6 +129,7 @@ class User(Torchnode):
 
                     else:
                         ghost += 1
+
                 elif b"WORKERS" == data[:7]:
                     self.debug_print(
                         f"Received workers from: {node.node_id}", tag="User"

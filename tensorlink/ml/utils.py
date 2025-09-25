@@ -1,21 +1,18 @@
-import ast
-import base64
-import importlib
-import inspect
-import io
 import json
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
-
+from typing import Dict, List, Tuple, Union
+import time
+import os
 import numpy as np
 import torch
 import torch.nn as nn
-from huggingface_hub import HfApi
+from huggingface_hub import HfApi, hf_hub_download
 from transformers.utils import ModelOutput
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+
+MODELS_CACHE_PATH = "logs/models.json"
 
 
 class MemoryType(Enum):
@@ -318,42 +315,169 @@ def format_memory_size(number: int) -> str:
 
 def estimate_hf_model_memory(
     model_name: str,
-    batch_size: int = 32,
-    dtype: torch.dtype = torch.float32,
+    batch_size: int = 1,  # Default to 1 for inference
+    seq_length: int = 2048,  # More realistic default
+    dtype: Union[torch.dtype, str] = torch.float16,  # More common for inference
     optimizer_type: str = "adam",
-    precision: str = "fp32",
-    seq_length: int = 256,
-    training: bool = True,
-) -> Tuple[float, float]:
-    api = HfApi()
+    training: bool = False,  # Default to inference
+    include_kv_cache: bool = True,  # Important for inference
+) -> Tuple[float, dict]:
+    """
+    Estimate memory requirements for a HuggingFace transformer model.
+
+    Returns:
+        Tuple[float, dict]: (total_memory_gb, breakdown_dict)
+    """
+
+    def get_dtype_size(dtype_input):
+        """Convert dtype to bytes per element"""
+        if isinstance(dtype_input, str):
+            dtype_map = {
+                "float32": 4,
+                "fp32": 4,
+                "float16": 2,
+                "fp16": 2,
+                "half": 2,
+                "bfloat16": 2,
+                "bf16": 2,
+                "int8": 1,
+                "uint8": 1,
+                "int4": 0.5,
+                "uint4": 0.5,  # For quantized models
+            }
+            return dtype_map.get(dtype_input.lower(), 4)
+        else:
+            if hasattr(dtype_input, 'element_size'):
+                return dtype_input.element_size()
+            elif hasattr(dtype_input, 'itemsize'):
+                return dtype_input.itemsize
+            else:
+                return 4
 
     try:
-        training_multiplier = 4 if training else 1
-        model_info = api.model_info(repo_id=model_name)
-        total_ram = model_info.usedStorage * training_multiplier
-        total_vram = total_ram
+        # Get model config
+        config_path = hf_hub_download(repo_id=model_name, filename="config.json")
+        with open(config_path, "r") as f:
+            config = json.load(f)
 
-        # Extract model size (if available)
-        # num_params = model_info.safetensors.get("parameters", {}).get("F16", 0) // 2
-        # dtype_size = {"fp32": 4, "fp16": 2, "int8": 1}.get(precision, 4)
-        # param_memory = num_params * dtype_size
-        # activation_memory = batch_size * seq_length * dtype_size * 4
-        # total_vram = param_memory + activation_memory
-        #
-        # if training:
-        #     optimizer_memory = param_memory * 2
-        #     total_vram += optimizer_memory
-        # total_ram = 1.2 * num_params * dtype_size
+        # Extract architecture parameters with better fallbacks
+        hidden_size = config.get("hidden_size", config.get("d_model", 4096))
+        num_layers = config.get("num_hidden_layers", config.get("num_layers", 32))
+        vocab_size = config.get("vocab_size", 32000)
+        intermediate_size = config.get("intermediate_size", hidden_size * 4)
+        num_attention_heads = config.get("num_attention_heads", 32)
+        num_key_value_heads = config.get(
+            "num_key_value_heads", num_attention_heads
+        )  # For GQA/MQA
 
-        return total_vram, total_ram
+        # Get dtype size in bytes
+        dtype_size = get_dtype_size(dtype)
+
+        # More accurate parameter calculation
+        # Token embeddings
+        token_embeddings = vocab_size * hidden_size
+
+        # Per layer parameters
+        # Self-attention: Q, K, V projections + output projection
+        # Account for grouped query attention
+        q_params = hidden_size * hidden_size
+        kv_params = (
+            2 * hidden_size * (hidden_size * num_key_value_heads // num_attention_heads)
+        )
+        attn_output_params = hidden_size * hidden_size
+        attention_params = q_params + kv_params + attn_output_params
+
+        # Feed-forward network (typically gate, up, down projections for modern models)
+        ff_params = (
+            2 * hidden_size * intermediate_size + intermediate_size * hidden_size
+        )
+
+        # RMS norm parameters (more common than LayerNorm in modern models)
+        norm_params = hidden_size  # One norm per layer typically
+
+        layer_params = attention_params + ff_params + norm_params
+        total_layer_params = num_layers * layer_params
+
+        # Final norm and output projection (often tied to embeddings)
+        final_norm = hidden_size
+        # Many models tie output projection to input embeddings, so don't double count
+        output_projection = 0  # vocab_size * hidden_size if not tied
+
+        total_params = (
+            token_embeddings + total_layer_params + final_norm + output_projection
+        )
+
+        # Base parameter memory
+        param_memory_bytes = total_params * dtype_size
+
+        breakdown = {
+            "parameters_gb": param_memory_bytes / (1024**3),
+            "activations_gb": 0,
+            "kv_cache_gb": 0,
+            "optimizer_gb": 0,
+            "gradients_gb": 0,
+        }
+
+        # Activation memory (much smaller for inference, larger for training)
+        if training:
+            # Rough estimate: activations scale with batch_size * seq_length * hidden_size * num_layers
+            # Include attention matrices and intermediate activations
+            activation_memory = (
+                batch_size
+                * seq_length
+                * hidden_size
+                * num_layers
+                * dtype_size
+                * 4  # Rough multiplier
+            )
+            breakdown["activations_gb"] = activation_memory / (1024**3)
+
+            # Gradients memory (same size as parameters)
+            gradient_memory = param_memory_bytes
+            breakdown["gradients_gb"] = gradient_memory / (1024**3)
+
+            # Optimizer states
+            optimizer_multiplier = {
+                "adam": 2,
+                "adamw": 2,
+                "sgd": 1,
+                "adafactor": 1,
+            }.get(optimizer_type.lower(), 2)
+            optimizer_memory = param_memory_bytes * optimizer_multiplier
+            breakdown["optimizer_gb"] = optimizer_memory / (1024**3)
+
+        else:
+            # Inference activations are much smaller
+            # Mainly just the current layer's activations
+            activation_memory = batch_size * seq_length * hidden_size * dtype_size * 2
+            breakdown["activations_gb"] = activation_memory / (1024**3)
+
+        # KV cache for inference (can be significant for long sequences)
+        if include_kv_cache and not training:
+            # KV cache: 2 (K,V) * num_layers * num_kv_heads * head_dim * seq_length * batch_size
+            head_dim = hidden_size // num_attention_heads
+            kv_cache_memory = (
+                2
+                * num_layers
+                * num_key_value_heads
+                * head_dim
+                * seq_length
+                * batch_size
+                * dtype_size
+            )
+            breakdown["kv_cache_gb"] = kv_cache_memory / (1024**3)
+
+        total_memory_bytes = sum(v * (1024**3) for v in breakdown.values())
+        total_memory_gb = total_memory_bytes / (1024**3)
+
+        return total_memory_gb, breakdown
 
     except Exception as e:
-        print(f"Error fetching model info: {e}")
-        return 0, 0
+        print(f"Error estimating memory for {model_name}: {e}")
+        return 0.0, {}
 
 
 def get_hf_model(model_name: str, tokenizer: bool = False):
-    api = HfApi()
     try:
         # Get model information from Hugging Face api
         model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -1190,3 +1314,168 @@ def bytes_to_tensor(tensor_data):
         return obj
 
     return _deserialize(tensor_data)
+
+
+def load_models_cache():
+    try:
+        with open(MODELS_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_models_cache(models):
+    os.makedirs(os.path.dirname(MODELS_CACHE_PATH), exist_ok=True)
+    with open(MODELS_CACHE_PATH, "w") as f:
+        json.dump(models, f, indent=4)
+
+
+def get_popular_model_stats(
+    days: int = 7, min_requests: int = 1, limit: int = None
+) -> Dict:
+    """
+    Get popular model demand statistics for API responses
+
+    Args:
+        days: Number of days to look back for request counts (default: 7)
+        min_requests: Minimum requests to include in results (default: 1)
+        limit: Maximum number of models to return (default: None - all models)
+
+    Returns:
+        Dictionary containing popular model statistics
+    """
+    cache = load_models_cache()
+
+    if not cache:
+        return {
+            "status": "success",
+            "data": {
+                "popular_models": [],
+                "total_models_tracked": 0,
+                "time_period_days": days,
+                "generated_at": time.time(),
+            },
+        }
+
+    cutoff_time = time.time() - (days * 24 * 3600)
+    popular_models = []
+
+    for model_name, model_data in cache.items():
+        demand_metrics = model_data.get("demand_metrics", {})
+        timestamps = demand_metrics.get("request_timestamps", [])
+
+        # Count recent requests
+        recent_requests = sum(1 for ts in timestamps if ts >= cutoff_time)
+
+        if recent_requests >= min_requests:
+            model_stats = {
+                "model_name": model_name,
+                "recent_requests": recent_requests,
+                "total_requests": demand_metrics.get("total_requests", 0),
+                "last_accessed": demand_metrics.get("last_accessed"),
+                "has_distribution": model_data.get("distribution") is not None,
+                "requests_per_day": round(recent_requests / days, 2) if days > 0 else 0,
+            }
+
+            # Add human-readable last accessed time
+            if model_stats["last_accessed"]:
+                time_ago = time.time() - model_stats["last_accessed"]
+                if time_ago < 3600:  # Less than 1 hour
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 60)} minutes ago"
+                    )
+                elif time_ago < 86400:  # Less than 1 day
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 3600)} hours ago"
+                    )
+                else:
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 86400)} days ago"
+                    )
+            else:
+                model_stats["last_accessed_human"] = "Never"
+
+            popular_models.append(model_stats)
+
+    # Sort by recent requests (descending)
+    popular_models.sort(key=lambda x: x["recent_requests"], reverse=True)
+
+    # Apply limit if specified
+    if limit and limit > 0:
+        popular_models = popular_models[:limit]
+
+    return {
+        "status": "success",
+        "data": {
+            "popular_models": popular_models,
+            "total_models_tracked": len(cache),
+            "models_with_recent_activity": len(popular_models),
+            "time_period_days": days,
+            "min_requests_threshold": min_requests,
+            "generated_at": time.time(),
+        },
+    }
+
+
+def get_model_detailed_stats(model_name: str) -> Dict:
+    """
+    Get detailed statistics for a specific model
+
+    Args:
+        model_name: Name of the model to get stats for
+
+    Returns:
+        Dictionary containing detailed model statistics
+    """
+    cache = load_models_cache()
+
+    if model_name not in cache:
+        return {
+            "status": "error",
+            "message": f"Model '{model_name}' not found in cache",
+            "data": None,
+        }
+
+    model_data = cache[model_name]
+    demand_metrics = model_data.get("demand_metrics", {})
+    timestamps = demand_metrics.get("request_timestamps", [])
+
+    current_time = time.time()
+
+    # Calculate request counts for different time periods
+    time_periods = {
+        "1_hour": 3600,
+        "1_day": 86400,
+        "7_days": 7 * 86400,
+        "30_days": 30 * 86400,
+    }
+
+    request_counts = {}
+    for period_name, seconds in time_periods.items():
+        cutoff = current_time - seconds
+        count = sum(1 for ts in timestamps if ts >= cutoff)
+        request_counts[period_name] = count
+
+    # Distribution info
+    distribution = model_data.get("distribution")
+    distribution_info = {
+        "has_distribution": distribution is not None,
+        "distribution_keys": list(distribution.keys()) if distribution else [],
+    }
+
+    return {
+        "status": "success",
+        "data": {
+            "model_name": model_name,
+            "demand_metrics": {
+                "total_requests": demand_metrics.get("total_requests", 0),
+                "last_accessed": demand_metrics.get("last_accessed"),
+                "request_counts_by_period": request_counts,
+                "recent_request_timestamps": (
+                    timestamps[-10:] if len(timestamps) > 10 else timestamps
+                ),
+            },
+            "distribution_info": distribution_info,
+            "generated_at": current_time,
+        },
+    }

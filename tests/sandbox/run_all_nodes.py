@@ -5,7 +5,7 @@ import logging
 import time
 
 
-OFFCHAIN = True
+OFFCHAIN = False
 LOCAL = True
 UPNP = False
 
@@ -17,10 +17,10 @@ if __name__ == "__main__":
     )
     # Temporary sleep for preventing two nodes from starting on the same port and conflicting
     time.sleep(1)
-    user = UserNode(
-        upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
-    )
-    time.sleep(1)
+    # user = UserNode(
+    #     upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
+    # )
+    # time.sleep(1)
     worker = WorkerNode(
         upnp=UPNP, off_chain_test=OFFCHAIN, local_test=LOCAL, print_level=logging.DEBUG
     )
@@ -30,8 +30,8 @@ if __name__ == "__main__":
     val_key, val_host, val_port = validator.send_request("info", None)
     worker.connect_node(val_host, val_port, node_id=val_key, timeout=5)
     time.sleep(1)
-    user.connect_node(val_host, val_port, node_id=val_key, timeout=5)
-    time.sleep(1)
+    # user.connect_node(val_host, val_port, node_id=val_key, timeout=5)
+    # time.sleep(1)
 
     while True:
         time.sleep(3)
