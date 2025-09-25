@@ -533,7 +533,7 @@ class Validator(Torchnode):
         assigned_workers = self.check_job_availability(job_data)
 
         if job_data.get("payment", 0) == 0:
-            _time = 1 * 20 + 1
+            _time = 10 * 60 + 1
         else:
             _time = job_data.get("time")
 

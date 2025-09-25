@@ -1,6 +1,7 @@
 from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.module import DistributedModel
+from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.node import GenerationRequest
 
 from transformers import AutoTokenizer
@@ -13,9 +14,6 @@ import gc
 import re
 import os
 
-
-MODELS_CACHE_PATH = "logs/models.json"
-
 # Path to package root
 base_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -25,19 +23,6 @@ SUPPORTED_MODELS_PATH = os.path.join(base_dir, "..", "config", "models.json")
 with open(SUPPORTED_MODELS_PATH, "rb") as f:
     MODELS = json.load(f)
     DEFAULT_MODELS = MODELS["DEFAULT_MODELS"]
-
-
-def load_models():
-    try:
-        with open(MODELS_CACHE_PATH, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def save_models(models):
-    with open(MODELS_CACHE_PATH, "w") as f:
-        json.dump(models, f, indent=4)
 
 
 def extract_assistant_response(text: str, model_name: str = None) -> str:
@@ -124,16 +109,11 @@ def format_chat_prompt(model_name, current_message, history):
 class DistributedValidator(DistributedWorker):
     def __init__(self, node, trusted=False):
         super().__init__(node, trusted)
-        self.model_cache = load_models()
+        self.model_cache = load_models_cache()
         self.models = {}
         self.tokenizers = {}
         self.GC_CHECK_INTERVAL = 1000
         self.CHECK_COUNTER = 1
-
-        # Track requests per model over time (model_name -> deque of timestamps)
-        self.model_name_to_request = defaultdict(
-            lambda: deque(maxlen=5000)
-        )  # Cap to prevent memory issues
 
         # Track models that are in the process of being initialized
         self.models_initializing = set()
@@ -143,42 +123,103 @@ class DistributedValidator(DistributedWorker):
         self.MIN_REQUESTS_THRESHOLD = 10  # Minimum requests to consider auto-loading
         self.MAX_AUTO_MODELS = 5  # Maximum models to auto-load
 
+    def _ensure_model_entry(self, model_name: str):
+        """Ensure a model has an entry in the cache with proper structure"""
+        if model_name not in self.model_cache:
+            self.model_cache[model_name] = {
+                "distribution": None,
+                "demand_metrics": {
+                    "request_timestamps": [],
+                    "total_requests": 0,
+                    "last_accessed": None,
+                },
+            }
+
     def _record_request(self, model_name: str):
-        """Record a request timestamp for a model"""
+        """Record a request timestamp for a model in the JSON cache"""
+        self._ensure_model_entry(model_name)
+
         current_time = time.time()
-        self.model_name_to_request[model_name].append(current_time)
+
+        # Add timestamp to the list
+        self.model_cache[model_name]["demand_metrics"]["request_timestamps"].append(
+            current_time
+        )
+        self.model_cache[model_name]["demand_metrics"]["total_requests"] += 1
+        self.model_cache[model_name]["demand_metrics"]["last_accessed"] = current_time
+
+        # Keep only recent timestamps to prevent unlimited growth
+        cutoff_time = current_time - (self.TRACKING_DAYS * 24 * 3600)
+        timestamps = self.model_cache[model_name]["demand_metrics"][
+            "request_timestamps"
+        ]
+        self.model_cache[model_name]["demand_metrics"]["request_timestamps"] = [
+            ts for ts in timestamps if ts >= cutoff_time
+        ]
+
+        # Save updated metrics
+        save_models_cache(self.model_cache)
 
     def _get_recent_request_count(self, model_name: str, days: int = None) -> int:
-        """Get number of requests for a model in the past X days"""
+        """Get number of requests for a model in the past X days from JSON cache"""
         if days is None:
             days = self.TRACKING_DAYS
 
-        cutoff_time = time.time() - (days * 24 * 3600)  # X days ago
-        requests = self.model_name_to_request[model_name]
+        if model_name not in self.model_cache:
+            return 0
 
-        # Count requests after cutoff time
-        return sum(1 for timestamp in requests if timestamp >= cutoff_time)
+        cutoff_time = time.time() - (days * 24 * 3600)
+        timestamps = (
+            self.model_cache[model_name]
+            .get("demand_metrics", {})
+            .get("request_timestamps", [])
+        )
+
+        return sum(1 for timestamp in timestamps if timestamp >= cutoff_time)
 
     def _cleanup_old_requests(self):
-        """Remove request timestamps older than tracking period"""
+        """Remove request timestamps older than tracking period from all models in cache"""
         cutoff_time = time.time() - (self.TRACKING_DAYS * 24 * 3600)
+        updated = False
 
-        for model_name in list(self.model_name_to_request.keys()):
-            requests = self.model_name_to_request[model_name]
+        for model_name in list(self.model_cache.keys()):
+            if "demand_metrics" in self.model_cache[model_name]:
+                old_count = len(
+                    self.model_cache[model_name]["demand_metrics"]["request_timestamps"]
+                )
 
-            # Remove old timestamps
-            while requests and requests[0] < cutoff_time:
-                requests.popleft()
+                # Filter out old timestamps
+                self.model_cache[model_name]["demand_metrics"]["request_timestamps"] = [
+                    ts
+                    for ts in self.model_cache[model_name]["demand_metrics"][
+                        "request_timestamps"
+                    ]
+                    if ts >= cutoff_time
+                ]
 
-            # Clean up empty entries
-            if not requests:
-                del self.model_name_to_request[model_name]
+                new_count = len(
+                    self.model_cache[model_name]["demand_metrics"]["request_timestamps"]
+                )
+
+                if old_count != new_count:
+                    updated = True
+
+                # Remove entries with no recent activity
+                if (
+                    new_count == 0
+                    and self.model_cache[model_name].get("distribution") is None
+                ):
+                    del self.model_cache[model_name]
+                    updated = True
+
+        if updated:
+            save_models_cache(self.model_cache)
 
     def _get_popular_models(self) -> list:
-        """Get list of models sorted by popularity (request count)"""
+        """Get list of models sorted by popularity from JSON cache"""
         model_popularity = []
 
-        for model_name in self.model_name_to_request:
+        for model_name, model_data in self.model_cache.items():
             request_count = self._get_recent_request_count(model_name)
             if request_count >= self.MIN_REQUESTS_THRESHOLD:
                 model_popularity.append((model_name, request_count))
@@ -188,7 +229,7 @@ class DistributedValidator(DistributedWorker):
         return [model_name for model_name, _ in model_popularity]
 
     def _manage_auto_loaded_models(self):
-        """Manage auto-loaded models based on popularity, falling back to DEFAULT_MODELS"""
+        """Manage auto-loaded models based on popularity from JSON cache, falling back to DEFAULT_MODELS"""
         popular_models = self._get_popular_models()
 
         # If no popular models tracked yet, use DEFAULT_MODELS as fallback
@@ -264,7 +305,7 @@ class DistributedValidator(DistributedWorker):
                     self._remove_hosted_job(model_name)
 
     def inspect_model(self, model_name: str, job_data: dict = None):
-        """Inspect a model to determine network requirements (ie vram, n modules, etc)"""
+        """Inspect a model to determine network requirements and store distribution in JSON cache"""
         parser = ModelParser()
         model_name = job_data.get("model_name", model_name)
 
@@ -275,7 +316,11 @@ class DistributedValidator(DistributedWorker):
             trusted=False,
         )
         job_data["distribution"] = distribution
-        self.model_cache[model_name] = {"distribution": distribution}
+
+        # Store distribution in JSON cache
+        self._ensure_model_entry(model_name)
+        self.model_cache[model_name]["distribution"] = distribution
+        save_models_cache(self.model_cache)
 
         self.send_request(
             "debug_print",
@@ -317,6 +362,7 @@ class DistributedValidator(DistributedWorker):
                                 self._remove_hosted_job(model_name)
 
                     self.CHECK_COUNTER = 1
+
                 elif self.models_initializing:
                     # Only call model management if we have models actively initializing
                     self._manage_auto_loaded_models()
@@ -496,15 +542,27 @@ class DistributedValidator(DistributedWorker):
                     ),
                 )
 
-            # Clean up model cache
-            if model_name in self.model_cache:
-                del self.model_cache[model_name]
+            # Only remove if it has no distribution data and no recent requests
+            if (
+                model_name in self.model_cache
+                and self.model_cache[model_name].get("distribution") is not None
+                and self._get_recent_request_count(model_name, days=1) == 0
+            ):
+
+                # Keep demand metrics but clear distribution if no recent activity
+                self.model_cache[model_name]["distribution"] = None
+                save_models_cache(self.model_cache)
+
                 self.send_request(
                     "debug_print",
-                    (f"Removed cache entry for {model_name}", "yellow", logging.INFO),
+                    (
+                        f"Cleared distribution cache for {model_name}",
+                        "yellow",
+                        logging.INFO,
+                    ),
                 )
 
-            # Send cleanup request to coordinator/scheduler
+            # Send cleanup request to node
             try:
                 self.send_request("remove_job", {"model_name": model_name})
             except Exception as e:

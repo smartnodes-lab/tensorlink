@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, APIRouter, Query, Request
+from tensorlink.ml.utils import get_popular_model_stats
 from pydantic import BaseModel
 from typing import Optional, List
 from collections import defaultdict
@@ -84,20 +85,13 @@ class TensorlinkAPI:
             # client_ip = request.client.host
             self.smart_node.create_base_job()
 
-        @self.router.get("/api-demand-stats")
-        async def get_api_demand_stats():
+        @self.router.get("/model-demand")
+        async def get_api_demand_stats(
+            days: int = Query(30, ge=1, le=90),
+            limit: int = Query(10, ge=1, le=50),
+        ):
             """Return current API demand statistics"""
-            current_time = time.time()
-            demand_stats = {}
-
-            for model_name, timestamps in self.model_request_timestamps.items():
-                # Count requests in the last 5 minutes
-                recent_requests = sum(
-                    1 for ts in timestamps if current_time - ts <= 300
-                )
-                demand_stats[model_name] = recent_requests
-
-            return demand_stats
+            return get_popular_model_stats(days=days, limit=limit)
 
         @self.app.get("/stats")
         async def get_network_stats():

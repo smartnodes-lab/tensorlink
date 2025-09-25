@@ -3,13 +3,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Tuple, Union
-
+import time
+import os
 import numpy as np
 import torch
 import torch.nn as nn
 from huggingface_hub import HfApi, hf_hub_download
 from transformers.utils import ModelOutput
 from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+
+MODELS_CACHE_PATH = "logs/models.json"
 
 
 class MemoryType(Enum):
@@ -1311,3 +1314,168 @@ def bytes_to_tensor(tensor_data):
         return obj
 
     return _deserialize(tensor_data)
+
+
+def load_models_cache():
+    try:
+        with open(MODELS_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_models_cache(models):
+    os.makedirs(os.path.dirname(MODELS_CACHE_PATH), exist_ok=True)
+    with open(MODELS_CACHE_PATH, "w") as f:
+        json.dump(models, f, indent=4)
+
+
+def get_popular_model_stats(
+    days: int = 7, min_requests: int = 1, limit: int = None
+) -> Dict:
+    """
+    Get popular model demand statistics for API responses
+
+    Args:
+        days: Number of days to look back for request counts (default: 7)
+        min_requests: Minimum requests to include in results (default: 1)
+        limit: Maximum number of models to return (default: None - all models)
+
+    Returns:
+        Dictionary containing popular model statistics
+    """
+    cache = load_models_cache()
+
+    if not cache:
+        return {
+            "status": "success",
+            "data": {
+                "popular_models": [],
+                "total_models_tracked": 0,
+                "time_period_days": days,
+                "generated_at": time.time(),
+            },
+        }
+
+    cutoff_time = time.time() - (days * 24 * 3600)
+    popular_models = []
+
+    for model_name, model_data in cache.items():
+        demand_metrics = model_data.get("demand_metrics", {})
+        timestamps = demand_metrics.get("request_timestamps", [])
+
+        # Count recent requests
+        recent_requests = sum(1 for ts in timestamps if ts >= cutoff_time)
+
+        if recent_requests >= min_requests:
+            model_stats = {
+                "model_name": model_name,
+                "recent_requests": recent_requests,
+                "total_requests": demand_metrics.get("total_requests", 0),
+                "last_accessed": demand_metrics.get("last_accessed"),
+                "has_distribution": model_data.get("distribution") is not None,
+                "requests_per_day": round(recent_requests / days, 2) if days > 0 else 0,
+            }
+
+            # Add human-readable last accessed time
+            if model_stats["last_accessed"]:
+                time_ago = time.time() - model_stats["last_accessed"]
+                if time_ago < 3600:  # Less than 1 hour
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 60)} minutes ago"
+                    )
+                elif time_ago < 86400:  # Less than 1 day
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 3600)} hours ago"
+                    )
+                else:
+                    model_stats["last_accessed_human"] = (
+                        f"{int(time_ago // 86400)} days ago"
+                    )
+            else:
+                model_stats["last_accessed_human"] = "Never"
+
+            popular_models.append(model_stats)
+
+    # Sort by recent requests (descending)
+    popular_models.sort(key=lambda x: x["recent_requests"], reverse=True)
+
+    # Apply limit if specified
+    if limit and limit > 0:
+        popular_models = popular_models[:limit]
+
+    return {
+        "status": "success",
+        "data": {
+            "popular_models": popular_models,
+            "total_models_tracked": len(cache),
+            "models_with_recent_activity": len(popular_models),
+            "time_period_days": days,
+            "min_requests_threshold": min_requests,
+            "generated_at": time.time(),
+        },
+    }
+
+
+def get_model_detailed_stats(model_name: str) -> Dict:
+    """
+    Get detailed statistics for a specific model
+
+    Args:
+        model_name: Name of the model to get stats for
+
+    Returns:
+        Dictionary containing detailed model statistics
+    """
+    cache = load_models_cache()
+
+    if model_name not in cache:
+        return {
+            "status": "error",
+            "message": f"Model '{model_name}' not found in cache",
+            "data": None,
+        }
+
+    model_data = cache[model_name]
+    demand_metrics = model_data.get("demand_metrics", {})
+    timestamps = demand_metrics.get("request_timestamps", [])
+
+    current_time = time.time()
+
+    # Calculate request counts for different time periods
+    time_periods = {
+        "1_hour": 3600,
+        "1_day": 86400,
+        "7_days": 7 * 86400,
+        "30_days": 30 * 86400,
+    }
+
+    request_counts = {}
+    for period_name, seconds in time_periods.items():
+        cutoff = current_time - seconds
+        count = sum(1 for ts in timestamps if ts >= cutoff)
+        request_counts[period_name] = count
+
+    # Distribution info
+    distribution = model_data.get("distribution")
+    distribution_info = {
+        "has_distribution": distribution is not None,
+        "distribution_keys": list(distribution.keys()) if distribution else [],
+    }
+
+    return {
+        "status": "success",
+        "data": {
+            "model_name": model_name,
+            "demand_metrics": {
+                "total_requests": demand_metrics.get("total_requests", 0),
+                "last_accessed": demand_metrics.get("last_accessed"),
+                "request_counts_by_period": request_counts,
+                "recent_request_timestamps": (
+                    timestamps[-10:] if len(timestamps) > 10 else timestamps
+                ),
+            },
+            "distribution_info": distribution_info,
+            "generated_at": current_time,
+        },
+    }
