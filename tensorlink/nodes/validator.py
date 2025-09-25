@@ -914,7 +914,7 @@ class Validator(Torchnode):
 
         with open(models_path, "rb") as f:
             models = json.load(f)
-            free_models = models["FREE_MODELS"]
+            free_models = models["DEFAULT_MODELS"]
 
         summary = self.keeper.get_network_summary()["current"]
 
