@@ -124,6 +124,12 @@ class TensorlinkAPI:
                 include_summary=include_summary,
             )
 
+        @self.app.get("/worker-info")
+        async def get_worker_info(worker_address: str):
+            return self.smart_node.contract_manager.get_worker_claim_data(
+                worker_address
+            )
+
         self.app.include_router(self.router)
 
     async def _wait_for_result(self, request: GenerationRequest) -> GenerationRequest:

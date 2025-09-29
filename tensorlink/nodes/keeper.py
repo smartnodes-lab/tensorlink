@@ -315,7 +315,7 @@ class Keeper:
             self._save_network_stats()
 
             self.node.debug_print(
-                f"{action} daily statistics updated - Workers: {daily_stat['workers']}, "
+                f"{action} daily statistics - Workers: {daily_stat['workers']}, "
                 f"Validators: {daily_stat['validators']}, Users: {daily_stat['users']}, "
                 f"Jobs: {daily_stat['jobs']}, Proposals: {daily_stat['proposals']}, "
                 f"Available Capacity: {daily_stat['available_capacity']}, "
