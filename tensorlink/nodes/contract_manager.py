@@ -44,8 +44,6 @@ class ContractManager:
 
     def proposal_validator(self):
         """Listen for new proposals created on SmartnodesCoordinator and validate them."""
-        current_proposal_num = 1
-
         while not self.terminate_flag.is_set():
             try:
                 # Check if a new round of proposals has started
@@ -53,40 +51,49 @@ class ContractManager:
                     self.coordinator_contract.functions.nextProposalId().call()
                 )
                 time.sleep(1)
-                current_proposal_num = 1
 
                 # Update variables for new round of proposals
                 if current_proposal_id != self.current_proposal:
                     self.current_proposal = current_proposal_id
                     self.proposals = {}
 
-                # Get ID for next proposal in round
-                try:
-                    # Get proposal data - updated structure
-                    proposal_data = self.coordinator_contract.functions.getProposal(
-                        current_proposal_num
-                    ).call()
-                    proposal_hash = proposal_data[-1].hex()  # hash is at index -1
-                    author = proposal_data[0]  # author is at index 0
-                    time.sleep(1)
+                # Get expected number of proposals for this round
+                expected_proposals = self._get_expected_proposal_count()
 
-                except ContractLogicError:
-                    # Proposal has not been published yet, keep waiting
-                    time.sleep(60)
-                    continue
+                # Validate all proposals in the current round
+                for proposal_num in range(1, expected_proposals + 1):
+                    if self.terminate_flag.is_set():
+                        break
 
-                # Validator proposal
-                t = threading.Thread(
-                    target=self.validate_proposal,
-                    args=(author, proposal_hash, current_proposal_num),
-                    name=f"proposal_validator_{current_proposal_num}",
-                    daemon=True,
-                )
-                self.proposals[proposal_hash] = t
-                t.start()
-                time.sleep(1)
+                    try:
+                        # Get proposal data
+                        proposal_data = self.coordinator_contract.functions.getProposal(
+                            proposal_num
+                        ).call()
+                        proposal_hash = proposal_data[-1].hex()  # hash is at index -1
+                        author = proposal_data[0]  # author is at index 0
+                        time.sleep(1)
 
-                time.sleep(3000)  # Temp fix for current 1 validator testnet setup
+                        # Skip if we've already started validating this proposal
+                        if proposal_hash in self.proposals:
+                            continue
+
+                        # Start validation thread
+                        t = threading.Thread(
+                            target=self.validate_proposal,
+                            args=(author, proposal_hash, proposal_num),
+                            name=f"proposal_validator_{proposal_num}",
+                            daemon=True,
+                        )
+                        self.proposals[proposal_hash] = t
+                        t.start()
+
+                    except ContractLogicError:
+                        # Proposal has not been published yet, continue to next
+                        continue
+
+                # Wait for next round after processing all expected proposals
+                self._wait_for_next_round()
 
             except Exception as e:
                 self.node.debug_print(
@@ -96,7 +103,7 @@ class ContractManager:
                     tag="ContractManager",
                 )
 
-            time.sleep(3)
+            time.sleep(5)  # Short sleep before checking again
 
     def validate_proposal(self, author, proposal_hash, proposal_num):
         # TODO if we are the proposal creator (ie a selected validator), automatically cast a vote.
@@ -308,8 +315,15 @@ class ContractManager:
         return all_job_ids, squished_capacities, unique_workers
 
     def proposal_creator(self):
+        """Create proposals when this node is selected as a round validator."""
         while not self.terminate_flag.is_set():
             try:
+                # Check if we're in the current round of validators
+                if not self._is_in_current_round_validators():
+                    # Wait for next round
+                    self._wait_for_next_round()
+                    continue
+
                 # Fetch state from the contract
                 (next_proposal_id, execution_time, round_validators) = (
                     self.coordinator_contract.functions.getState().call()
@@ -318,9 +332,14 @@ class ContractManager:
                 is_expired = self.coordinator_contract.functions.isRoundExpired().call()
                 time.sleep(1)
 
+                # Create proposal if we're a current validator or round is expired
                 if self.public_key in round_validators or is_expired:
-                    # Wait a bit before creating the proposal
                     self.create_and_submit_proposal()
+
+                    # Wait for next round after creating proposal
+                    self._wait_for_next_round()
+                else:
+                    # Wait a bit before checking again
                     time.sleep(30)
 
             except Exception as e:
@@ -331,7 +350,7 @@ class ContractManager:
                     tag="ContractManager",
                 )
 
-            time.sleep(60)
+            time.sleep(10)
 
     def create_and_submit_proposal(self) -> None:
         """
@@ -346,17 +365,37 @@ class ContractManager:
             tag="ContractManager",
         )
 
-        while True:
+        max_attempts = 3
+        attempt = 0
+
+        while attempt < max_attempts:
+            attempt += 1
+
             # Verify proposal can be submitted
             try:
                 self.coordinator_contract.functions.createProposal(
                     encode(["uint256"], [12345])
                 ).call({"from": self.public_key})
 
-            except Exception:
-                # If the proposal couldnt be created, we must wait
-                time.sleep(120)
-                continue
+            except Exception as e:
+                if "updateTime - 2min" in str(e):
+                    # Wait for next round instead of arbitrary sleep
+                    self.node.debug_print(
+                        f"Waiting for next round (attempt {attempt})",
+                        colour="yellow",
+                        level=logging.DEBUG,
+                        tag="ContractManager",
+                    )
+                    self._wait_for_next_round()
+                    continue
+                else:
+                    self.node.debug_print(
+                        f"Cannot create proposal: {e}",
+                        colour="bright_red",
+                        level=logging.ERROR,
+                        tag="ContractManager",
+                    )
+                    return
 
             # Request all workers connected to the network
             self.node.get_workers()
@@ -405,12 +444,20 @@ class ContractManager:
             code = self._submit_proposal(proposal_hash)
 
             if code == 0:
-                break  # Exit loop if already submitted or submission is successful
+                break  # Exit loop if submission is successful
             elif code == 1:
                 return  # Exit method (error)
             elif code == 2:
-                time.sleep(30)
                 continue  # Restart and continue to build proposal data
+
+        if attempt >= max_attempts:
+            self.node.debug_print(
+                "Max proposal creation attempts reached",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ContractManager",
+            )
+            return
 
         # Wait for next block before monitoring
         self._wait_for_next_block()
@@ -491,7 +538,10 @@ class ContractManager:
 
     def _submit_proposal(self, proposal_hash: bytes) -> int:
         """Submit the proposal to the blockchain."""
-        while not self.terminate_flag.is_set():
+        max_retries = 3
+        retry_count = 0
+
+        while not self.terminate_flag.is_set() and retry_count < max_retries:
             try:
                 # Verify proposal can be submitted
                 self.coordinator_contract.functions.createProposal(proposal_hash).call(
@@ -532,21 +582,32 @@ class ContractManager:
 
                 elif "updateTime - 2min" in str(e):
                     self.node.debug_print(
-                        "Not enough time since last proposal! Sleeping...",
+                        "Not enough time since last proposal! Waiting for next round...",
                         colour="green",
                         level=logging.DEBUG,
                         tag="ContractManager",
                     )
-                    time.sleep(60)
+                    # Wait for next round instead of arbitrary sleep
+                    self._wait_for_next_round()
                     return 2
                 else:
+                    retry_count += 1
                     self.node.debug_print(
-                        f"Error creating proposal: {str(e)}",
+                        f"Error creating proposal (attempt {retry_count}): {str(e)}",
                         colour="bright_red",
-                        level=logging.INFO,
+                        level=(
+                            logging.WARNING
+                            if retry_count < max_retries
+                            else logging.ERROR
+                        ),
                         tag="ContractManager",
                     )
-                    return 1
+                    if retry_count < max_retries:
+                        time.sleep(10)  # Short retry delay
+                    else:
+                        return 1
+
+        return 1
 
     def _build_proposal_transaction(self, proposal_hash: bytes) -> Dict[str, Any]:
         """Build the proposal transaction."""
@@ -579,7 +640,23 @@ class ContractManager:
 
     def _monitor_and_execute_proposal(self, proposal_hash: str) -> None:
         """Monitor proposal status and execute when ready."""
+        # Calculate the maximum time to wait (proposal period)
+        proposal_time, _ = self._get_time_config()
+        max_wait_time = int(time.time()) + proposal_time
+
         while not self.terminate_flag.is_set():
+            current_time = int(time.time())
+
+            # Stop monitoring if we've exceeded the proposal period
+            if current_time > max_wait_time:
+                self.node.debug_print(
+                    f"Proposal period expired for {proposal_hash}",
+                    colour="yellow",
+                    level=logging.INFO,
+                    tag="ContractManager",
+                )
+                return
+
             if not self._is_proposal_valid():
                 return
 
@@ -926,3 +1003,40 @@ class ContractManager:
             )
 
         return claims
+
+    def _get_time_config(self) -> Tuple[int, int]:
+        """Get proposal timing configuration from contract."""
+        return self.coordinator_contract.functions.timeConfig().call()
+
+    def _get_current_round_validators(self) -> List[str]:
+        """Get the list of current round validators."""
+        return self.coordinator_contract.functions.getCurrentRoundValidators().call()
+
+    def _calculate_next_round_time(self) -> int:
+        """Calculate when the next proposal round will start."""
+        proposal_time, last_execution_time = self._get_time_config()
+        return last_execution_time + proposal_time
+
+    def _wait_for_next_round(self) -> None:
+        """Wait until the next proposal round begins."""
+        next_round_time = self._calculate_next_round_time()
+        current_time = int(time.time())
+
+        if next_round_time > current_time:
+            sleep_duration = next_round_time - current_time
+            self.node.debug_print(
+                f"Waiting {sleep_duration} seconds for next proposal round",
+                colour="yellow",
+                level=logging.INFO,
+                tag="ContractManager",
+            )
+            time.sleep(sleep_duration)
+
+    def _is_in_current_round_validators(self) -> bool:
+        """Check if this node is in the current round of validators."""
+        current_validators = self._get_current_round_validators()
+        return self.public_key in current_validators
+
+    def _get_expected_proposal_count(self) -> int:
+        """Get the expected number of proposals for this round."""
+        return len(self._get_current_round_validators())
