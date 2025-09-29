@@ -4,6 +4,7 @@ from dotenv import get_key
 from eth_abi import encode
 from hexbytes import HexBytes
 import logging
+from collections import defaultdict
 import threading
 import time
 
@@ -297,7 +298,14 @@ class ContractManager:
             all_capacities.extend(capacities)
             all_workers.extend(workers)
 
-        return all_job_ids, all_capacities, all_workers
+        squished = defaultdict(int)
+        for worker, cap in zip(all_workers, all_capacities):
+            squished[worker] += cap
+
+        unique_workers = list(squished.keys())
+        squished_capacities = list(squished.values())
+
+        return all_job_ids, squished_capacities, unique_workers
 
     def proposal_creator(self):
         while not self.terminate_flag.is_set():

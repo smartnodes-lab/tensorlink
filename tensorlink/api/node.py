@@ -82,8 +82,23 @@ class TensorlinkAPI:
 
         @self.router.post("/request-job")
         def request_job(request: Request, job_request: JobRequest):
-            # client_ip = request.client.host
-            self.smart_node.create_base_job()
+            client_ip = request.client.host
+            job_request = {
+                "author": self.smart_node.rsa_key_hash,
+                "active": True,
+                "hosted": False,
+                "training": False,
+                "payment": job_request.payment,
+                "time": job_request.time,
+                "capacity": 0,
+                "n_pipelines": 1,
+                "dp_factor": 1,
+                "distribution": {},
+                "n_workers": 0,
+                "model_name": job_request.hf_name,
+                "seed_validators": [self.smart_node.rsa_key_hash],
+            }
+            self.smart_node.create_hf_job(job_request, client_ip)
 
         @self.router.get("/model-demand")
         async def get_api_demand_stats(

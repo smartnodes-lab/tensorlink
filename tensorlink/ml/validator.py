@@ -235,10 +235,6 @@ class DistributedValidator(DistributedWorker):
         # If no popular models tracked yet, use DEFAULT_MODELS as fallback
         if not popular_models:
             models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
-            self.send_request(
-                "debug_print",
-                ("Using DEFAULT_MODELS as fallback", "blue", logging.INFO),
-            )
         else:
             models_to_load = popular_models[: self.MAX_AUTO_MODELS]
             self.send_request(
@@ -451,7 +447,7 @@ class DistributedValidator(DistributedWorker):
         time to finalize the job init."""
         args = self.send_request("check_module", None)
 
-        # Check if the model loading is complete across workers and ready to go
+        # Check if the model loading is complete across workers and ready to go (second call)
         if model_name in self.models and args:
             if isinstance(args, tuple):
                 (
@@ -467,8 +463,9 @@ class DistributedValidator(DistributedWorker):
                 self.modules[module_id].distribute_model(distribution)
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
-        # If not, check if we can spin up the model
+        # If not, check if we can spin up the model (first call)
         else:
+            # Small init sleep time
             if model_name in self.models:
                 time.sleep(20)
 

@@ -110,7 +110,7 @@ class User(Torchnode):
                 if b"ACCEPT-JOB" == data[:10]:
                     # Start a new thread to handle the job acceptance logic
                     threading.Thread(
-                        target=self.finalize_job_creation,
+                        target=self._finalize_job_creation,
                         args=(data, node),
                         daemon=True,
                     ).start()
@@ -187,7 +187,7 @@ class User(Torchnode):
     def request_peers(self):
         pass
 
-    def finalize_job_creation(self, data: bytes, node: Connection):
+    def _finalize_job_creation(self, data: bytes, node: Connection):
         """
         Handle the job acceptance logic when a validator accepts a job.
         Runs in a separate thread.
@@ -358,7 +358,7 @@ class User(Torchnode):
         job_req_threads = []
         for validator in validators[:1]:
             t = threading.Thread(
-                target=self.send_job_req, args=(validator, job_request)
+                target=self._send_job_req, args=(validator, job_request)
             )
             t.start()
             job_req_threads.append(t)
@@ -405,7 +405,7 @@ class User(Torchnode):
 
         return dist_model_config
 
-    def send_job_req(self, validator: Connection, job_info):
+    def _send_job_req(self, validator: Connection, job_info):
         """Send a request to a validator to oversee our job"""
         if validator.node_id not in job_info["seed_validators"]:
             raise "Validator not a seed validator"
@@ -436,6 +436,20 @@ class User(Torchnode):
         module_id: bytes,
         reconnect: bool = False,
     ) -> bool:
+        """
+        Connect to a worker node in the Smartnodes network.
+
+        Args:
+            id_hash (bytes): Unique identifier of the worker node.
+            host (str): Worker host address.
+            port (int): Worker port.
+            module_id (bytes): Identifier of the worker's module/service.
+            reconnect (bool, optional): Whether to attempt reconnecting
+                if already connected. Defaults to False.
+
+        Returns:
+            bool: True if the worker connection succeeds, False otherwise.
+        """
         connected = self.connect_node(id_hash, host, port, reconnect)
         return connected
 

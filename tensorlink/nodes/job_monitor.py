@@ -4,7 +4,7 @@ from tensorlink.ml.proofs import MLProofOfWork
 from typing import TYPE_CHECKING, Dict, Optional, List, Tuple
 from cryptography.hazmat.primitives import hashes
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 import numpy as np
 import logging
@@ -36,23 +36,6 @@ class WorkerHealth:
     metrics: Dict
     last_proof: Dict
     proof_history: List[Dict]
-
-
-@dataclass
-class ResourceUsageTracker:
-    user_id: str
-    job_id: str
-    resource_type: ResourceUsage = ResourceUsage.FREE
-    usage_start_time: float = 0.0
-    total_gpu_hours_used: float = 0.0
-    total_gpu_memory_gb: float = 0.0
-    daily_quota_reset_time: float = 0.0
-    daily_usage_gb_hours: float = 0.0
-    free_quota_gb_hours: float = 48.0  # Default 48 GB-hours per day
-    cost_per_gb_hour: float = 0.10  # $0.10 per GB-hour
-    total_cost: float = 0.0
-    last_billing_time: float = 0.0
-    billing_increment_hours: float = 0.1  # Bill every 6 minutes
 
 
 def calculate_gradient_hash(gradients: List[np.ndarray]) -> bytes:
@@ -108,7 +91,6 @@ class JobMonitor:
         self.terminate_flag = node.terminate_flag
         self.worker_health_checks: Dict[str, WorkerHealth] = {}
         self.ml_pow = MLProofOfWork()
-        self.resource_tracker = None
 
         # Configuration parameters
         self.WORKER_TIMEOUT_SECONDS = 60
@@ -134,29 +116,6 @@ class JobMonitor:
             return
 
         job_status = JobStatus.ACTIVE
-
-        current_date = datetime.fromtimestamp(time.time())
-        next_midnight = datetime(
-            year=current_date.year,
-            month=current_date.month,
-            day=current_date.day,
-            hour=0,
-            minute=0,
-            second=0,
-        ) + timedelta(
-            days=1
-        )  # Add one day to get to the next midnight
-
-        midnight_timestamp = next_midnight.timestamp()
-
-        self.resource_tracker = ResourceUsageTracker(
-            user_id=job_data.get("author"),
-            job_id=job_id,
-            resource_type=ResourceUsage.FREE,
-            usage_start_time=time.time(),
-            total_gpu_memory_gb=job_data.get("capacity", 0),
-            daily_quota_reset_time=midnight_timestamp,
-        )
 
         try:
             while not self.terminate_flag.is_set():
