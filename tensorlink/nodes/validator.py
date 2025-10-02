@@ -18,6 +18,9 @@ import time
 import os
 
 
+FREE_JOB_MAX_TIME = 1  # 30 * 60
+
+
 class Validator(Torchnode):
     def __init__(
         self,
@@ -265,7 +268,7 @@ class Validator(Torchnode):
         """Check if we have received any job requests for huggingface models and fully hosted or api jobs, then relay
         that information back to the DistributedValidator process"""
         try:
-            # Check for API job requests for this node
+            # Check for job requests coming from API
             if self.rsa_key_hash in self.requests:
                 job_req = next(
                     (
@@ -355,7 +358,7 @@ class Validator(Torchnode):
         )
 
         if job_info.get("payment", 0) == 0:
-            _time = 0.25
+            _time = FREE_JOB_MAX_TIME
         else:
             _time = job_info.get("time")
 
@@ -533,7 +536,7 @@ class Validator(Torchnode):
         assigned_workers = self.check_job_availability(job_data)
 
         if job_data.get("payment", 0) == 0:
-            _time = 10 * 60 + 1
+            _time = FREE_JOB_MAX_TIME
         else:
             _time = job_data.get("time")
 

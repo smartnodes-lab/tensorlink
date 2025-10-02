@@ -1062,28 +1062,49 @@ class Smartnode(threading.Thread):
         self, id_hash: Union[bytes, str], host: str, port: int, reconnect: bool = False
     ) -> bool:
         """
-        Connect to a node and exchange information to confirm its role in the Smartnodes network.
+        Attempt to connect to another node in the Smartnodes network.
+
+        This method will:
+        - Check if the node is already connected (via `id_hash`).
+        - Validate if the given host:port can accept a connection.
+        - Attempt up to `max_attempts` (default 3) to establish a TCP connection
+          using exponential backoff for retries.
+        - Bind a local socket to a free port chosen by `_get_next_port()`.
+        - Exchange basic identity/role information with the peer node
+          (role, public keys) and perform a handshake.
+
+        Args:
+            id_hash (Union[bytes, str]): Unique identifier of the target node.
+            host (str): Host address of the target node.
+            port (int): Port of the target node.
+            reconnect (bool, optional): Whether to attempt reconnecting if already connected. Defaults to False.
+
+        Returns:
+            bool: True if the handshake and connection succeed, False otherwise.
         """
         if isinstance(id_hash, bytes):
             id_hash = id_hash.decode()
 
+        # Verify if the host/port is reachable before attempting
         _can_connect = self._can_connect(host, port)
 
-        # Check that we are not already connected
-        if id_hash in self.nodes:
+        # Avoid duplicate connections
+        if id_hash in self.nodes and not reconnect:
             self.debug_print(
                 f"connect_node: Already connected to {id_hash}", tag="Smartnode"
             )
             return True
 
         if _can_connect:
-            backoff = 1
-            max_attempts = 3
+            backoff = 1  # Initial wait time in seconds
+            max_attempts = 3  # Number of retry attempts
 
             for attempt in range(max_attempts):
                 try:
-                    # Open up a free port
+                    # Initialize TCP socket
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+                    # Select a free local port for outbound connection
                     our_port = self._get_next_port()
                     self.add_port_mapping(our_port, our_port)
                     self.debug_print(
@@ -1091,13 +1112,14 @@ class Smartnode(threading.Thread):
                         tag="Smartnode",
                     )
 
+                    # If running locally for testing, override host
                     if self.local_test:
                         host = "127.0.0.1"
 
-                    # Attempt connection
+                    # Bind locally and connect to target node
                     sock.bind((self.host, our_port))
                     sock.connect((host, port))
-                    sock.settimeout(10)
+                    sock.settimeout(10)  # Prevent hanging connections
 
                     self.debug_print(
                         f"connect_node: connecting to {host}:{port}",
@@ -1106,19 +1128,20 @@ class Smartnode(threading.Thread):
                         tag="Smartnode",
                     )
 
-                    # Send our info to node
+                    # Send initial identity message (role + keys)
                     message = json.dumps(
                         (None, self.role, self.public_key, self.rsa_pub_key.decode())
                     )
                     sock.send(message.encode())
 
-                    # Perform handshake and ensure socket is closed after use
+                    # Perform handshake; closes socket afterwards
                     success = self._handshake(sock, (host, port), instigator=True)
-                    sock.close()  # Close the socket after the handshake
+                    sock.close()
                     return success
 
                 except Exception as e:
-                    wait_time = backoff * (2**attempt)  # Exponential backoff
+                    # Retry with exponential backoff
+                    wait_time = backoff * (2**attempt)
                     self.debug_print(
                         f"Attempt {attempt + 1}/{max_attempts} failed: {e}. Retrying in {wait_time}s",
                         level=logging.WARNING,
@@ -1126,6 +1149,8 @@ class Smartnode(threading.Thread):
                         tag="Smartnode",
                     )
                     time.sleep(wait_time)
+
+                    # Clean up port mapping on failure
                     self.remove_port_mapping(our_port)
 
         else:
