@@ -784,8 +784,9 @@ class Validator(Torchnode):
         return True
 
     def get_workers(self):
+        """Request information of all workers on the network. Sends request to all current worker connections,
+        as well as a request for other validators to do the same."""
         self.all_workers = {}
-
         self.request_worker_stats()
 
         for node_id, node in self.nodes.items():
@@ -793,7 +794,7 @@ class Validator(Torchnode):
                 self.send_to_node(node, b"REQUEST-WORKERS")
                 self._store_request(node_id, "ALL-WORKER-STATS")
 
-        time.sleep(5)
+        time.sleep(3)  # Await results
 
         for worker in self.workers:
             if self.nodes[worker].stats:
@@ -873,7 +874,7 @@ class Validator(Torchnode):
         super().run()
 
         if self.off_chain_test is False:
-            time.sleep(30)
+            time.sleep(15)
             self.execution_listener = threading.Thread(
                 target=self.contract_manager.proposal_creator, daemon=True
             )
@@ -887,6 +888,7 @@ class Validator(Torchnode):
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
             if counter % 300 == 0:
+                self.get_workers()
                 self.keeper.write_state()
             if counter % 120 == 0:
                 self.keeper.clean_node()
