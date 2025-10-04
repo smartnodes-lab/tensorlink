@@ -6,7 +6,6 @@ from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_hf_model_memory
 from tensorlink.api.node import TensorlinkAPI, GenerationRequest
 
-from datetime import datetime
 from dotenv import get_key
 from typing import Dict
 import threading
@@ -18,7 +17,7 @@ import time
 import os
 
 
-FREE_JOB_MAX_TIME = 1  # 30 * 60
+FREE_JOB_MAX_TIME = 30 * 60  # 30 minutes in seconds for a free job
 
 
 class Validator(Torchnode):
@@ -874,11 +873,11 @@ class Validator(Torchnode):
         super().run()
 
         if self.off_chain_test is False:
+            time.sleep(30)
             self.execution_listener = threading.Thread(
                 target=self.contract_manager.proposal_creator, daemon=True
             )
             self.execution_listener.start()
-            time.sleep(15)
             self.proposal_listener = threading.Thread(
                 target=self.contract_manager.proposal_validator, daemon=True
             )
@@ -887,11 +886,8 @@ class Validator(Torchnode):
         counter = 0
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
-            if counter % 1800 == 0:
+            if counter % 300 == 0:
                 self.keeper.write_state()
-            elif counter % 300 == 0:
-                self.keeper.write_state(latest_only=True)
-
             if counter % 120 == 0:
                 self.keeper.clean_node()
                 self.clean_port_mappings()
@@ -935,105 +931,4 @@ class Validator(Torchnode):
     def get_network_status(
         self, days: int = 30, include_weekly: bool = False, include_summary: bool = True
     ) -> Dict:
-        """
-        Get network statistics formatted for API consumption and charting.
-        Stores recent network stats and only re-renders them after a certain
-        time has passed
-
-        Args:
-            days: Number of days of daily statistics to retrieve (max 90)
-            include_weekly: Whether to include weekly aggregated data
-            include_summary: Whether to include current network summary
-
-        Returns:
-            Dictionary containing network statistics ready for API/charting use
-        """
-        if time.time() - self.latest_network_status_time > 300:
-            try:
-                if not hasattr(self, 'keeper') or self.keeper is None:
-                    return {"error": "Keeper not initialized"}
-
-                result = {}
-
-                # Get daily statistics
-                daily_stats = self.keeper.get_daily_statistics(days)
-                # current_stats = self.keeper.get_current_statistics()
-
-                # Format daily data for charting
-                daily_formatted = {
-                    "labels": [stat["date"] for stat in daily_stats],
-                    "datasets": {
-                        "workers": [stat["workers"] for stat in daily_stats],
-                        "validators": [stat["validators"] for stat in daily_stats],
-                        "users": [stat["users"] for stat in daily_stats],
-                        "jobs": [stat["jobs"] for stat in daily_stats],
-                        "proposals": [stat["proposals"] for stat in daily_stats],
-                        "total_capacity": [
-                            stat["total_capacity"] for stat in daily_stats
-                        ],
-                        "used_capacity": [
-                            stat["used_capacity"] for stat in daily_stats
-                        ],
-                    },
-                    "timestamps": [stat["timestamp"] for stat in daily_stats],
-                }
-
-                result["daily"] = daily_formatted
-
-                # Include weekly data if requested
-                if include_weekly:
-                    weekly_stats = self.keeper.get_weekly_statistics(
-                        12
-                    )  # Last 12 weeks
-
-                    weekly_formatted = {
-                        "labels": [stat["week"] for stat in weekly_stats],
-                        "datasets": {
-                            "avg_workers": [
-                                stat["avg_workers"] for stat in weekly_stats
-                            ],
-                            "avg_validators": [
-                                stat["avg_validators"] for stat in weekly_stats
-                            ],
-                            "avg_users": [stat["avg_users"] for stat in weekly_stats],
-                            "avg_jobs": [stat["avg_jobs"] for stat in weekly_stats],
-                            "avg_proposals": [
-                                stat["avg_proposals"] for stat in weekly_stats
-                            ],
-                        },
-                        "week_starts": [stat["week_start"] for stat in weekly_stats],
-                        "week_ends": [stat["week_end"] for stat in weekly_stats],
-                    }
-
-                    result["weekly"] = weekly_formatted
-
-                # Include current summary if requested
-                if include_summary:
-                    summary = self.keeper.get_network_summary()
-                    result["summary"] = summary
-
-                # Add metadata
-                result["metadata"] = {
-                    "total_days_available": len(self.keeper.network_stats["daily"]),
-                    "total_weeks_available": len(self.keeper.network_stats["weekly"]),
-                    "requested_days": days,
-                    "generated_at": time.time(),
-                    "generated_at_iso": datetime.now().isoformat(),
-                }
-
-                # Update network status cache
-                self.latest_network_status = result
-                self.latest_network_status_time = time.time()
-
-                return result
-
-            except Exception as e:
-                self.debug_print(
-                    f"Error retrieving network stats for API: {e}",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                    tag="NetworkStats",
-                )
-                return {"error": str(e)}
-        else:
-            return self.latest_network_status
+        return self.keeper.get_network_status(days, include_weekly, include_summary)

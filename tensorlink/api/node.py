@@ -80,8 +80,8 @@ class TensorlinkAPI:
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.router.post("/request-job")
-        def request_job(request: Request, job_request: JobRequest):
+        @self.router.post("/request-model")
+        def request_job(job_request: JobRequest, request: Request):
             client_ip = request.client.host
             job_request = {
                 "author": self.smart_node.rsa_key_hash,

@@ -1,8 +1,8 @@
-from tensorlink.ml.utils import get_gpu_memory, handle_output
+from tensorlink.ml.utils import get_gpu_memory
 from tensorlink.p2p.connection import Connection
 from tensorlink.p2p.torch_node import Torchnode
+from tensorlink.nodes.keeper import Keeper
 
-import torch
 import torch.nn as nn
 from dotenv import get_key
 import psutil
@@ -10,11 +10,6 @@ import hashlib
 import json
 import logging
 import time
-import os
-
-
-STATE_FILE = "logs/dht_state.json"
-LATEST_STATE_FILE = "logs/latest_state.json"
 
 
 class Worker(Torchnode):
@@ -50,6 +45,7 @@ class Worker(Torchnode):
         self.print_level = print_level
         self.loss = None
         self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
+        self.keeper = Keeper(self)
 
         self.debug_print(
             f"Launching Worker: {self.rsa_key_hash} ({self.host}:{self.port})",
@@ -92,6 +88,7 @@ class Worker(Torchnode):
             #         )
             #         self.stop()
             #         self.terminate_flag.set()
+        self.keeper.load_previous_state()
 
     def handle_data(self, data: bytes, node: Connection):
         """
@@ -202,8 +199,9 @@ class Worker(Torchnode):
         counter = 0
         while not self.terminate_flag.is_set():
             if counter % 180 == 0:
-                self.clean_node()
+                self.keeper.clean_node()
                 self.clean_port_mappings()
+                self.print_status()
 
             time.sleep(1)
             counter += 1
@@ -211,16 +209,16 @@ class Worker(Torchnode):
     def load_distributed_module(self, module: nn.Module, graph: dict = None):
         pass
 
-    def proof_of_learning(self, dummy_input: torch.Tensor):
-        proof = {
-            "node_id": self.name,
-            "memory": self.available_gpu_memory,
-            "learning": self.training,
-            "model": self.model,
-        }
-
-        if self.training:
-            proof["output"] = handle_output(self.model(dummy_input)).sum()
+    # def proof_of_learning(self, dummy_input: torch.Tensor):
+    #     proof = {
+    #         "node_id": self.name,
+    #         "memory": self.available_gpu_memory,
+    #         "learning": self.training,
+    #         "model": self.model,
+    #     }
+    #
+    #     if self.training:
+    #         proof["output"] = handle_output(self.model(dummy_input)).sum()
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
@@ -246,154 +244,6 @@ class Worker(Torchnode):
 
     def activate(self):
         self.training = True
-
-    def save_dht_state(self, latest_only=False):
-        """
-        Serialize and save the DHT state to a file.
-
-        Args:
-            latest_only (bool): If True, save only to the latest state file.
-                               If False, save to both archive and latest files.
-        """
-        try:
-            # Prepare current state data
-            current_data = {
-                "workers": {},
-                "validators": {},
-                "users": {},
-                "jobs": {},
-                "timestamp": time.time(),
-            }
-
-            # Collect current state
-            for worker_id in self.workers:
-                worker = self.dht.query(worker_id)
-                current_data["workers"][worker_id] = worker
-
-            for validator_id in self.validators:
-                validator = self.dht.query(validator_id)
-                current_data["validators"][validator_id] = validator
-
-            for user_id in self.users:
-                user = self.dht.query(user_id)
-                current_data["users"][user_id] = user
-
-            for job_id in self.jobs:
-                job = self.dht.query(job_id)
-                current_data["jobs"][job_id] = job
-
-            # Save to the latest state file (overwriting previous version)
-            with open(LATEST_STATE_FILE, "w") as f:
-                json.dump(current_data, f, indent=4)
-
-            # If not latest_only, also save to the archive/permanent state file
-            if not latest_only:
-                # Load existing archive data if available
-                existing_data = {
-                    "workers": {},
-                    "validators": {},
-                    "users": {},
-                    "jobs": {},
-                }
-
-                if os.path.exists(STATE_FILE):
-                    try:
-                        with open(STATE_FILE, "r") as f:
-                            existing_data = json.load(f)
-                    except json.JSONDecodeError:
-                        self.debug_print(
-                            "Existing state file read error.",
-                            level=logging.WARNING,
-                            colour="red",
-                            tag="Worker",
-                        )
-
-                # Update the archive with current data
-                for category in ["workers", "validators", "users", "jobs"]:
-                    existing_data[category].update(current_data[category])
-
-                # Save updated archive data
-                with open(STATE_FILE, "w") as f:
-                    json.dump(existing_data, f, indent=4)
-
-            self.debug_print(
-                "DHT state saved successfully to "
-                + f"{'both files' if not latest_only else 'latest file only'}.",
-                level=logging.INFO,
-                colour="green",
-                tag="Worker",
-            )
-
-        except Exception as e:
-            self.debug_print(
-                f"Error saving DHT state: {e}",
-                colour="bright_red",
-                level=logging.WARNING,
-                tag="Worker",
-            )
-
-    def load_dht_state(self):
-        """Load the DHT state from a file."""
-        if os.path.exists(LATEST_STATE_FILE):
-            try:
-                with open(LATEST_STATE_FILE, "r") as f:
-                    state = json.load(f)
-
-                # Restructure state: list only hash and corresponding data
-                structured_state = {}
-                for category, items in state.items():
-                    if category != "timestamp":
-                        structured_state[category] = {
-                            hash_key: data for hash_key, data in items.items()
-                        }
-                        self.dht.routing_table.update(items)
-
-                self.debug_print(
-                    "DHT state loaded successfully.", level=logging.INFO, tag="Worker"
-                )
-
-            except Exception as e:
-                self.debug_print(
-                    f"Error loading DHT state: {e}",
-                    colour="bright_red",
-                    level=logging.INFO,
-                    tag="Worker",
-                )
-        else:
-            self.debug_print(
-                "No DHT state file found.", level=logging.INFO, tag="Worker"
-            )
-
-    def clean_node(self):
-        """Periodically clean up node storage"""
-
-        def clean_nodes(nodes):
-            nodes_to_remove = []
-            for node_id in nodes:
-                # Remove any ghost ids in the list
-                if node_id not in self.nodes:
-                    nodes_to_remove.append(node_id)
-
-                # Remove any terminated connections
-                elif self.nodes[node_id].terminate_flag.is_set():
-                    nodes_to_remove.append(node_id)
-                    del self.nodes[node_id]
-
-            for node in nodes_to_remove:
-                nodes.remove(node)
-
-        for job_id in self.jobs:
-            job_data = self.dht.query(job_id)
-
-            if job_data["active"] is False:
-                self.jobs.remove(job_id)
-                self._delete_item(job_id)
-
-        clean_nodes(self.workers)
-        clean_nodes(self.validators)
-        clean_nodes(self.users)
-
-        self.print_status()
 
     def print_status(self):
         self.print_base_status()
