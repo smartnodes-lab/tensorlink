@@ -10,6 +10,10 @@ import random
 import time
 
 
+class NodeRequest(BaseModel):
+    address: str
+
+
 class JobRequest(BaseModel):
     hf_name: str
     time: int
@@ -124,11 +128,55 @@ class TensorlinkAPI:
                 include_summary=include_summary,
             )
 
-        @self.app.get("/worker-info")
-        async def get_worker_info(worker_address: str):
-            return self.smart_node.contract_manager.get_worker_claim_data(
-                worker_address
-            )
+        @self.app.get("/node-info")
+        async def get_node_info(node_id: str):
+            """
+            {
+              pubKeyHash: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
+              type: 'validator',
+              lastSeen: '2 minutes ago',
+              data: {
+                peers: 12,
+                rewards: 1000.5,
+                is_active: true
+              }
+            },
+            {
+              pubKeyHash: '0x8f3B9c4A7E2D1F5C6A8B9D0E3F4A5B6C7D8E9F0A',
+              type: 'worker',
+              lastSeen: '5 minutes ago',
+              data: {
+                jobs_completed: 47,
+                rewards: 235.8,
+                is_active: true
+              }
+            },
+            """
+            node_info = self.smart_node.dht.query(node_id)
+            if node_info:
+                return_package = {
+                    "pubKeyHash": node_id,
+                    "type": node_info["role"],
+                    "lastSeen": node_info["last_seen"],
+                    "data": {},
+                }
+
+                if node_info["role"] == "V":
+                    # node_info["peers"] = 1
+                    pass
+                elif node_info["role"] == "W":
+                    node_info["rewards"] = (
+                        self.smart_node.contract_manager.get_worker_claim_data(
+                            node_info["address"]
+                        )
+                    )
+                return return_package
+            else:
+                return {}
+
+        @self.app.get("/claim-info")
+        async def get_worker_claims(node_address: str):
+            return self.smart_node.contract_manager.get_worker_claim_data(node_address)
 
         self.app.include_router(self.router)
 
@@ -153,73 +201,20 @@ class TensorlinkAPI:
         thread.daemon = True
         thread.start()
 
-    # @app.post("/api/load_model")
-    # async def load_model(request: JobRequest):
-    #     """Load model and tokenizer"""
-    #     global model, tokenizer
-    #
-    #     try:
-    #         # logger.info(f"Loading model: {request.model_name}")
-    #
-    #         # Clear GPU memory if applicable
-    #         if model is not None and torch.cuda.is_available():
-    #             del model
-    #             torch.cuda.empty_cache()
-    #
-    #         # Load tokenizer
-    #         tokenizer = AutoTokenizer.from_pretrained(request.model_name)
-    #
-    #         # Load model
-    #         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    #         # logger.info(f"Using device: {device}")
-    #
-    #         model = AutoModelForCausalLM.from_pretrained(
-    #             request.model_name,
-    #             torch_dtype=(
-    #                 torch.float16 if torch.cuda.is_available() else torch.float32
-    #             ),
-    #         ).to(device)
-    #
-    #         # logger.info(f"Model loaded successfully")
-    #
-    #         return {
-    #             "success": True,
-    #             "message": f"Model '{request.model_name}' loaded successfully",
-    #         }
-    #
-    #     except Exception as e:
-    #         # logger.error(f"Error loading model: {str(e)}")
-    #         raise HTTPException(
-    #             status_code=500, detail=f"Error loading model: {str(e)}"
-    #         )
-    #
     # @app.post("/api/unload_model")
     # async def unload_model():
     #     """Unload the current model to free resources"""
     #     global model, tokenizer
-    #
     #     try:
     #         if model is not None:
     #             # logger.info("Unloading model...")
     #             del model
     #             model = None
-    #
-    #             if torch.cuda.is_available():
-    #                 torch.cuda.empty_cache()
-    #
-    #             tokenizer = None
-    #             # logger.info("Model unloaded successfully")
-    #
     #         return {"success": True, "message": "Model unloaded successfully"}
     #
     #     except Exception as e:
     #         # logger.error(f"Error unloading model: {str(e)}")
     #         raise HTTPException(status_code=500, detail=str(e))
-    #
-    # @app.post("/api/node-info")
-    # def get_node_info():
-    #     response = smart_node.get_self_info()
-    #     return response
     #
     # @app.post("/jobs", methods=["POST"])
     # def upload_job_info():
