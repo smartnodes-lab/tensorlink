@@ -1,3 +1,5 @@
+import time
+
 from tensorlink.nodes.user import User
 from tensorlink.nodes.validator import Validator
 from tensorlink.nodes.worker import Worker
@@ -30,7 +32,9 @@ def test_node_start(nodes):
 
     # Start nodes
     worker.start()
+    time.sleep(1)
     user.start()
+    time.sleep(1)
     validator.start()
 
     # Connect worker and user to validator

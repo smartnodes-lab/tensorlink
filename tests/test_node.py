@@ -19,7 +19,7 @@ def nodes():
     # Yield nodes to be used in tests
     yield worker, user, validator
 
-    # Teardown: Stop nodes after all tests complete
+    # Stop nodes after all tests complete
     worker.stop()
     user.stop()
     validator.stop()
@@ -68,9 +68,7 @@ def test_job_request(nodes):
     """Ensure job request and job-related functionalities work"""
     worker, user, validator = nodes
 
-    # user.request_job(1, 1, {""})
-    # ... perform tests that rely on nodes still being active
-    assert True
+    user.request_job()
 
 
 def test_send_ghost_data():
