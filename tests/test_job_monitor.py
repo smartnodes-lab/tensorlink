@@ -36,6 +36,7 @@ def test_node_start(nodes):
     user.start()
     time.sleep(1)
     validator.start()
+    time.sleep(1)
 
     # Connect worker and user to validator
     worker.connect_node(validator.rsa_key_hash, validator.host, validator.port)
