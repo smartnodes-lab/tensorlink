@@ -47,8 +47,12 @@ def nodes():
     # Cleanup nodes after tests
 
     validator = ValidatorNode(
-        upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG
-    )
+        upnp=UPNP,
+        off_chain_test=LOCAL,
+        local_test=LOCAL,
+        print_level=logging.DEBUG,
+        endpoint=False,
+    )  # Must turn off endpoint for pytest
     time.sleep(1)
     user = UserNode(
         upnp=UPNP, off_chain_test=LOCAL, local_test=LOCAL, print_level=logging.DEBUG

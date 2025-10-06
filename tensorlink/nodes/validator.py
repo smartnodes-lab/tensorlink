@@ -30,6 +30,7 @@ class Validator(Torchnode):
         upnp=True,
         off_chain_test=False,
         local_test=False,
+        endpoint=True,
     ):
         super(Validator, self).__init__(
             request_queue,
@@ -106,9 +107,10 @@ class Validator(Torchnode):
                 self.terminate_flag.set()
 
         # Start up the API for handling public jobs
-        self.endpoint = TensorlinkAPI(self)
-        if not local_test:
-            self.add_port_mapping(64747, 64747)
+        if endpoint:
+            self.endpoint = TensorlinkAPI(self)
+            if not local_test:
+                self.add_port_mapping(64747, 64747)
 
         # Finally, load up previous saved state if any
         self.keeper.load_previous_state()
@@ -797,7 +799,7 @@ class Validator(Torchnode):
         time.sleep(3)  # Await results
 
         for worker in self.workers:
-            if self.nodes[worker].stats:
+            if hasattr(self.nodes[worker], "stats"):
                 self.all_workers[worker] = self.nodes[worker].stats
 
     def request_worker_stats(self, send_to=None):
@@ -888,7 +890,6 @@ class Validator(Torchnode):
         # Loop for active job and network moderation
         while not self.terminate_flag.is_set():
             if counter % 300 == 0:
-                self.get_workers()
                 self.keeper.write_state()
             if counter % 120 == 0:
                 self.keeper.clean_node()

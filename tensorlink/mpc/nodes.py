@@ -47,6 +47,7 @@ class BaseNode:
         print_level=logging.INFO,
         trusted=False,
         utilization=True,
+        endpoint=None,
     ):
         self.node_requests = mp.Queue()
         self.node_responses = mp.Queue()
@@ -175,12 +176,35 @@ class WorkerNode(BaseNode):
 
 
 class ValidatorNode(BaseNode):
+    def __init__(
+        self,
+        upnp=True,
+        max_connections: int = 0,
+        off_chain_test=False,
+        local_test=False,
+        print_level=logging.INFO,
+        trusted=False,
+        utilization=True,
+        endpoint=True,
+    ):
+        self.endpoint = endpoint
+        super().__init__(
+            upnp=upnp,
+            max_connections=max_connections,
+            off_chain_test=off_chain_test,
+            local_test=local_test,
+            print_level=print_level,
+            trusted=trusted,
+            utilization=utilization,
+        )
+
     def run_role(self):
         kwargs = self.init_kwargs.copy()
         kwargs.update(
             {
                 "upnp": kwargs.get("upnp", True),
                 "off_chain_test": kwargs.get("off_chain_test", False),
+                "endpoint": self.endpoint,
             }
         )
 
