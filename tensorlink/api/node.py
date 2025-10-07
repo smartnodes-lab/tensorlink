@@ -128,6 +128,13 @@ class TensorlinkAPI:
                 include_summary=include_summary,
             )
 
+        @self.app.get("/proposal-history")
+        async def get_proposals(limit: int = Query(30, ge=1, le=180)):
+            """
+            Retrieve historical proposals from the node's archive cache.
+            """
+            return self.smart_node.keeper.get_proposals(limit=limit)
+
         @self.app.get("/node-info")
         async def get_node_info(node_id: str):
             """

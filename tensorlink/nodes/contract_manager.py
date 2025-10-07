@@ -423,6 +423,7 @@ class ContractManager:
                 "total_capacity": total_capacities,
                 "total_workers": total_workers,
                 "distribution_id": self.current_proposal,
+                "timestamp": time.time(),
             }
 
             # Build participants for merkle tree

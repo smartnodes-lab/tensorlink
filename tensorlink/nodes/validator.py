@@ -796,7 +796,7 @@ class Validator(Torchnode):
                 self.send_to_node(node, b"REQUEST-WORKERS")
                 self._store_request(node_id, "ALL-WORKER-STATS")
 
-        time.sleep(3)  # Await results
+        time.sleep(3)
 
         for worker in self.workers:
             if hasattr(self.nodes[worker], "stats"):

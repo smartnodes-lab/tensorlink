@@ -684,3 +684,41 @@ class Keeper:
             self.clean_ticker = 0
 
         self.clean_ticker += 1
+
+    def get_proposals(self, days: int | None = None, limit: int | None = None) -> Dict:
+        """
+        Retrieve proposals from the archive cache.
+
+        Args:
+            days (int, optional): Only include proposals from the last N days.
+            limit (int, optional): Maximum number of proposals to return.
+
+        Returns:
+            Dict[str, Dict]: {proposal_id: proposal_data} sorted and filtered.
+        """
+        proposals = self.archive_cache.get("proposals", {})
+        if not proposals:
+            return {}
+
+        proposals_list = list(proposals.items())
+
+        # Filter by recency if days specified
+        if days is not None:
+            cutoff = time.time() - (days * 24 * 60 * 60)
+            proposals_list = [
+                (pid, p)
+                for pid, p in proposals_list
+                if isinstance(p, dict) and float(p.get("timestamp", 0)) >= cutoff
+            ]
+
+        # Sort by chosen field
+        def sort_key(item):
+            data = item[1]
+            return data.get("distribution_id", 0)
+
+        proposals_list.sort(key=sort_key)
+        if limit is not None:
+            proposals_list = proposals_list[:limit]
+
+        # Return as dict with proposal_id keys
+        return {pid: p for pid, p in proposals_list}
