@@ -5,7 +5,6 @@ from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.node import GenerationRequest
 
 from transformers import AutoTokenizer
-from collections import defaultdict, deque
 import torch
 import logging
 import json
@@ -233,14 +232,15 @@ class DistributedValidator(DistributedWorker):
         popular_models = self._get_popular_models()
 
         # If no popular models tracked yet, use DEFAULT_MODELS as fallback
-        if not popular_models:
-            models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
-        else:
-            models_to_load = popular_models[: self.MAX_AUTO_MODELS]
-            self.send_request(
-                "debug_print",
-                (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
-            )
+        models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        # if not popular_models:
+        #     models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        # else:
+        #     models_to_load = popular_models[: self.MAX_AUTO_MODELS]
+        #     self.send_request(
+        #         "debug_print",
+        #         (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
+        #     )
 
         # Load models up to the limit
         for model_name in models_to_load:
@@ -385,6 +385,64 @@ class DistributedValidator(DistributedWorker):
             logging.error(f"Error checking for jobs: {str(e)}")
 
         self.CHECK_COUNTER += 1
+
+    def _handle_check_model_status(self, model_name: str):
+        """Check the loading status of a model"""
+        if model_name in self.models:
+            module_id = self.models[model_name]
+            if isinstance(module_id, str):
+                # Model is fully loaded
+                return {
+                    "status": "loaded",
+                    "message": f"Model {model_name} is loaded and ready",
+                    "module_id": module_id,
+                }
+            else:
+                # Model is in the process of loading
+                return {
+                    "status": "loading",
+                    "message": f"Model {model_name} is currently loading",
+                }
+        elif model_name in self.models_initializing:
+            return {
+                "status": "loading",
+                "message": f"Model {model_name} initialization in progress",
+            }
+        else:
+            return {
+                "status": "not_loaded",
+                "message": f"Model {model_name} is not loaded",
+            }
+
+    def _handle_load_model(self, model_name: str):
+        """Handle explicit request to load a model"""
+        try:
+            # Check if already loaded or loading
+            if model_name in self.models or model_name in self.models_initializing:
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Model {model_name} is already loaded or loading",
+                        "yellow",
+                        logging.INFO,
+                    ),
+                )
+                return
+
+            # Add to initializing set
+            self.models_initializing.add(model_name)
+
+            self.send_request(
+                "debug_print",
+                (f"Loading model on demand: {model_name}", "green", logging.INFO),
+            )
+
+            # Initialize the model
+            self._initialize_hosted_job(model_name)
+
+        except Exception as e:
+            logging.error(f"Error loading model {model_name}: {str(e)}")
+            self.models_initializing.discard(model_name)
 
     def _handle_generate_request(self, request: GenerationRequest):
         # Record the request for tracking

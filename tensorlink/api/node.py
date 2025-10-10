@@ -1,13 +1,16 @@
-from fastapi import FastAPI, HTTPException, APIRouter, Query, Request
-from tensorlink.ml.utils import get_popular_model_stats
+from fastapi import FastAPI, HTTPException, APIRouter, Request, Query
 from pydantic import BaseModel
 from typing import Optional, List
 from collections import defaultdict
-import threading
+from threading import Thread
+import logging
 import uvicorn
 import asyncio
 import random
+import queue
 import time
+
+from tensorlink.ml.utils import get_popular_model_stats
 
 
 class NodeRequest(BaseModel):
@@ -25,6 +28,7 @@ class GenerationRequest(BaseModel):
     message: str
     prompt: str = None
     max_length: int = 2048
+    max_new_tokens: int = 2048
     temperature: float = 0.4
     do_sample: bool = True
     num_beams: int = 4
@@ -32,6 +36,12 @@ class GenerationRequest(BaseModel):
     output: str = None
     processing: bool = False
     id: int = None
+
+
+class ModelStatusResponse(BaseModel):
+    model_name: str
+    status: str  # "loaded", "loading", "not_loaded", "error"
+    message: str
 
 
 class TensorlinkAPI:
@@ -45,13 +55,15 @@ class TensorlinkAPI:
         self.model_name_to_request = {}
         self.model_request_timestamps = defaultdict(list)
 
+        # Track models requested via API for prioritization
+        self.api_requested_models = set()
+
         self._define_routes()
         self._start_server()
 
     def _define_routes(self):
         @self.router.post("/generate")
         async def generate(request: GenerationRequest):
-            print("Incoming request:", request)
             try:
                 # Log model request
                 current_time = time.time()
@@ -72,6 +84,21 @@ class TensorlinkAPI:
                 request.output = None
                 request.id = hash(random.random())
 
+                # Check if model is loaded, if not trigger loading
+                model_status = self._check_model_status(request.hf_name)
+                if model_status["status"] == "not_loaded":
+                    # Trigger model loading
+                    self._trigger_model_load(request.hf_name)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Model {request.hf_name} is currently loading. Please try again in a few moments.",
+                    )
+                elif model_status["status"] == "loading":
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Model {request.hf_name} is still loading. Please try again in a few moments.",
+                    )
+
                 # Append model request to the queue
                 self.smart_node.endpoint_requests["incoming"].append(request)
 
@@ -81,28 +108,81 @@ class TensorlinkAPI:
                 return_val = request.output
                 return {"response": return_val}
 
+            except HTTPException:
+                raise
             except Exception as e:
                 raise HTTPException(status_code=500, detail=str(e))
 
-        @self.router.post("/request-model")
-        def request_job(job_request: JobRequest, request: Request):
-            client_ip = request.client.host
-            job_request = {
-                "author": self.smart_node.rsa_key_hash,
-                "active": True,
-                "hosted": False,
-                "training": False,
-                "payment": job_request.payment,
-                "time": job_request.time,
-                "capacity": 0,
-                "n_pipelines": 1,
-                "dp_factor": 1,
-                "distribution": {},
-                "n_workers": 0,
-                "model_name": job_request.hf_name,
-                "seed_validators": [self.smart_node.rsa_key_hash],
-            }
-            self.smart_node.create_hf_job(job_request, client_ip)
+        @self.router.post("/request-model", response_model=ModelStatusResponse)
+        def request_model(job_request: JobRequest, request: Request):
+            """Explicitly request a model to be loaded on the network"""
+            try:
+                client_ip = request.client.host
+                model_name = job_request.hf_name
+
+                # Mark this model as API-requested for prioritization
+                self.api_requested_models.add(model_name)
+
+                # Check current status
+                status = self._check_model_status(model_name)
+
+                if status["status"] == "loaded":
+                    return ModelStatusResponse(
+                        model_name=model_name,
+                        status="loaded",
+                        message="Model is already loaded and ready to use",
+                    )
+                elif status["status"] == "loading":
+                    return ModelStatusResponse(
+                        model_name=model_name,
+                        status="loading",
+                        message="Model is currently being loaded",
+                    )
+
+                # Trigger the loading process
+                job_data = {
+                    "author": self.smart_node.rsa_key_hash,
+                    "active": True,
+                    "hosted": True,  # Changed to True for auto-loading
+                    "training": False,
+                    "payment": job_request.payment,
+                    "time": job_request.time,
+                    "capacity": 0,
+                    "n_pipelines": 1,
+                    "dp_factor": 1,
+                    "distribution": {"model_name": model_name},
+                    "n_workers": 0,
+                    "model_name": model_name,
+                    "seed_validators": [self.smart_node.rsa_key_hash],
+                }
+
+                # Store as HF job request
+                self.smart_node.create_hf_job(job_data, client_ip)
+
+                return ModelStatusResponse(
+                    model_name=model_name,
+                    status="loading",
+                    message=f"Model {model_name} loading has been initiated",
+                )
+
+            except Exception as e:
+                return ModelStatusResponse(
+                    model_name=job_request.hf_name,
+                    status="error",
+                    message=f"Error requesting model: {str(e)}",
+                )
+
+        @self.router.get(
+            "/model-status/{model_name}", response_model=ModelStatusResponse
+        )
+        def get_model_status(model_name: str):
+            """Check the loading status of a specific model"""
+            status = self._check_model_status(model_name)
+            return ModelStatusResponse(
+                model_name=model_name,
+                status=status["status"],
+                message=status["message"],
+            )
 
         @self.router.get("/model-demand")
         async def get_api_demand_stats(
@@ -111,6 +191,36 @@ class TensorlinkAPI:
         ):
             """Return current API demand statistics"""
             return get_popular_model_stats(days=days, limit=limit)
+
+        @self.router.get("/available-models")
+        def list_available_models():
+            """List all currently loaded models"""
+            try:
+                loaded_models = []
+                loading_models = []
+
+                # Query the node's worker for model status
+                response = self.smart_node.request_queue.put(
+                    {"type": "get_loaded_models", "args": None}
+                )
+
+                # Wait for response
+                try:
+                    result = self.smart_node.response_queue.get(timeout=5)
+                    if result.get("status") == "SUCCESS":
+                        model_info = result.get("return", {})
+                        loaded_models = model_info.get("loaded", [])
+                        loading_models = model_info.get("loading", [])
+                except queue.Empty:
+                    pass
+
+                return {
+                    "loaded_models": loaded_models,
+                    "loading_models": loading_models,
+                    "api_requested_models": list(self.api_requested_models),
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
 
         @self.app.get("/stats")
         async def get_network_stats():
@@ -187,51 +297,61 @@ class TensorlinkAPI:
 
         self.app.include_router(self.router)
 
-    async def _wait_for_result(self, request: GenerationRequest) -> GenerationRequest:
-        start_time = time.time()
-        while True:
-            if self.smart_node.endpoint_requests["outgoing"]:
-                for response in self.smart_node.endpoint_requests["outgoing"]:
-                    if request.id == response.id:
-                        return response
+    def _check_model_status(self, model_name: str) -> dict:
+        """Check if a model is loaded, loading, or not loaded"""
+        try:
+            # Query the ML validator process
+            self.smart_node.request_queue.put(
+                {"type": "check_model_status", "args": (model_name,)}
+            )
 
-            await asyncio.sleep(0.01)
-            if time.time() - start_time > 30:
-                raise HTTPException(status_code=504, detail="Request timed out.")
+            # Wait for response
+            try:
+                result = self.smart_node.response_queue.get(timeout=5)
+                if result.get("status") == "SUCCESS":
+                    return result.get(
+                        "return", {"status": "unknown", "message": "Unknown status"}
+                    )
+            except queue.Empty:
+                pass
+
+        except Exception as e:
+            logging.error(f"Error checking model status: {e}")
+
+        return {"status": "not_loaded", "message": "Model is not currently loaded"}
+
+    def _trigger_model_load(self, model_name: str):
+        """Trigger the ML validator to load a specific model"""
+        try:
+            # Mark as API requested
+            self.api_requested_models.add(model_name)
+
+            # Send load request to ML validator
+            self.smart_node.request_queue.put(
+                {"type": "load_model", "args": (model_name,)}
+            )
+        except Exception as e:
+            logging.error(f"Error triggering model load: {e}")
+
+    async def _wait_for_result(self, request: GenerationRequest, timeout: int = 300):
+        """Wait for the generation result with timeout"""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            # Check if result is ready
+            for idx, req in enumerate(self.smart_node.endpoint_requests["outgoing"]):
+                if req.id == request.id:
+                    return self.smart_node.endpoint_requests["outgoing"].pop(idx)
+
+            await asyncio.sleep(0.1)
+
+        raise HTTPException(status_code=504, detail="Request timed out")
 
     def _start_server(self):
-        thread = threading.Thread(
-            target=uvicorn.run,
-            args=(self.app,),
-            kwargs={"host": self.host, "port": self.port},
-        )
-        thread.daemon = True
-        thread.start()
+        """Start the FastAPI server in a separate thread"""
 
-    # @app.post("/api/unload_model")
-    # async def unload_model():
-    #     """Unload the current model to free resources"""
-    #     global model, tokenizer
-    #     try:
-    #         if model is not None:
-    #             # logger.info("Unloading model...")
-    #             del model
-    #             model = None
-    #         return {"success": True, "message": "Model unloaded successfully"}
-    #
-    #     except Exception as e:
-    #         # logger.error(f"Error unloading model: {str(e)}")
-    #         raise HTTPException(status_code=500, detail=str(e))
-    #
-    # @app.post("/jobs", methods=["POST"])
-    # def upload_job_info():
-    #     data = request.get_json()
-    #     job_id = data.get("job_id")
-    #     job_info = data.get("job_info")
-    #     smart_node.jobs.append({job_id: job_info})
-    #     return (
-    #         jsonify({"message": "Job info uploaded successfully", "job_id": job_id}),
-    #         200,
-    #     )
-    #
-    # return app
+        def run_server():
+            uvicorn.run(self.app, host=self.host, port=self.port)
+
+        server_thread = Thread(target=run_server, daemon=True)
+        server_thread.start()
