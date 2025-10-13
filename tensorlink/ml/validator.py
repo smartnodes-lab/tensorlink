@@ -339,7 +339,7 @@ class DistributedValidator(DistributedWorker):
         """Check for node requests/updates"""
         try:
             # When running on the public network, manage models automatically
-            if not self.node.init_kwargs.get("local_test", False):
+            if not self.node.init_kwargs.get("endpoint", False):
                 # Periodic cleanup and model management
                 if self.CHECK_COUNTER % self.GC_CHECK_INTERVAL == 0:
                     # Clean up old request data

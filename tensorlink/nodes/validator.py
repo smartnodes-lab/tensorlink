@@ -685,6 +685,7 @@ class Validator(Torchnode):
                 "training": False,
                 "workers": module.get("workers", []),
                 "distribution": job_data.get("distribution"),
+                "public": True,
             }
             self.state_updates[mod_id] = []
 

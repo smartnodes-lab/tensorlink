@@ -1,3 +1,5 @@
+from tensorlink.ml.utils import get_popular_model_stats
+
 from fastapi import FastAPI, HTTPException, APIRouter, Request, Query
 from pydantic import BaseModel
 from typing import Optional, List
@@ -9,8 +11,6 @@ import asyncio
 import random
 import queue
 import time
-
-from tensorlink.ml.utils import get_popular_model_stats
 
 
 class NodeRequest(BaseModel):
@@ -143,7 +143,7 @@ class TensorlinkAPI:
                 job_data = {
                     "author": self.smart_node.rsa_key_hash,
                     "active": True,
-                    "hosted": True,  # Changed to True for auto-loading
+                    "hosted": True,
                     "training": False,
                     "payment": job_request.payment,
                     "time": job_request.time,
@@ -299,37 +299,31 @@ class TensorlinkAPI:
 
     def _check_model_status(self, model_name: str) -> dict:
         """Check if a model is loaded, loading, or not loaded"""
-        try:
-            # Query the ML validator process
-            self.smart_node.request_queue.put(
-                {"type": "check_model_status", "args": (model_name,)}
-            )
+        status = "not_loaded"
 
-            # Wait for response
-            try:
-                result = self.smart_node.response_queue.get(timeout=5)
-                if result.get("status") == "SUCCESS":
-                    return result.get(
-                        "return", {"status": "unknown", "message": "Unknown status"}
-                    )
-            except queue.Empty:
-                pass
+        try:
+            # Check if there is a public job with this module
+            for module_id, module in self.smart_node.modules.items():
+                if module.get("name", "") == model_name:
+                    if module.get("public", False):
+                        status = "loaded"
 
         except Exception as e:
             logging.error(f"Error checking model status: {e}")
 
-        return {"status": "not_loaded", "message": "Model is not currently loaded"}
+        return {"status": status, "message": "Model is not currently loaded"}
 
     def _trigger_model_load(self, model_name: str):
         """Trigger the ML validator to load a specific model"""
         try:
             # Mark as API requested
             self.api_requested_models.add(model_name)
+            self.smart_node.create_hf_job(model_name)
 
-            # Send load request to ML validator
-            self.smart_node.request_queue.put(
-                {"type": "load_model", "args": (model_name,)}
-            )
+            # TODO Send load request to ML validator
+            # self.smart_node.request_queue.put(
+            #     {"type": "load_model", "args": (model_name,)}
+            # )
         except Exception as e:
             logging.error(f"Error triggering model load: {e}")
 
