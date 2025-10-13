@@ -1,5 +1,6 @@
 recursive-include tensorlink/config *
 exclude .env
+exclude .tensorlink.env
 include README.md
 include LICENSE
-include docs/*.png
+recursive-include docs *
