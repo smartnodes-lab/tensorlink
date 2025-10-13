@@ -25,18 +25,42 @@ with open(SUPPORTED_MODELS_PATH, "rb") as f:
 
 
 def extract_assistant_response(text: str, model_name: str = None) -> str:
-    # Split on 'assistant' prompts
-    assistant_responses = re.split(r"\bassistant\b", text)
-    if len(assistant_responses) < 2:
-        return text.strip()
+    """
+    Universal extractor that removes system/user/thought tags and returns
+    the final human-readable assistant response.
+    """
 
-    # Take the last assistant response and strip off any trailing user/system prompts
-    last_response = assistant_responses[-1].strip()
+    # Remove reasoning or hidden thought blocks (e.g. <think>...</think>)
+    text = re.sub(
+        r"<\s*(think|reflection|thought|internal|analysis)\s*>.*?<\s*/\1\s*>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
 
-    # Optionally remove any 'user' or 'system' that follows
-    last_response = re.split(r"\b(user|system)\b", last_response)[0].strip()
+    # Remove common chat tags used by newer models
+    text = re.sub(r"<\|im_start\|>\s*\w+\s*", "", text)
+    text = re.sub(r"<\|im_end\|>", "", text)
+    text = re.sub(r"<\|assistant\|>", "", text)
+    text = re.sub(r"<\|user\|>", "", text)
+    text = re.sub(r"<\|system\|>", "", text)
 
-    return last_response
+    # Strip out any prefixes like "assistant:" or "Assistant:"
+    text = re.sub(r"(?i)\bassistant\s*[:：]\s*", "", text)
+
+    # Remove lingering system/user scaffolding
+    text = re.sub(r"(?i)\b(system|user)\s*[:：]\s*", "", text)
+    text = text.strip().replace("\r", "")
+
+    # If multiple paragraphs, prefer the last coherent chunk
+    # (models sometimes prepend hidden reasoning)
+    if "\n\n" in text:
+        parts = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 10]
+        if parts:
+            text = parts[-1]
+
+    # Fallback: if text still empty, just return as-is (safe default)
+    return text.strip() or "[No output produced]"
 
 
 def format_chat_prompt(model_name, current_message, history):
