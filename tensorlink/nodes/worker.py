@@ -29,6 +29,8 @@ class Worker(Torchnode):
         upnp=True,
         off_chain_test=False,
         local_test=False,
+        mining_active=None,
+        reserved_memory=None,
     ):
         super(Worker, self).__init__(
             request_queue,
@@ -55,6 +57,8 @@ class Worker(Torchnode):
         self.available_gpu_memory = get_gpu_memory()
         self.total_gpu_memory = self.available_gpu_memory
         self.available_ram = psutil.virtual_memory().available
+        self.mining_active = mining_active
+        self.reserved_memory = reserved_memory
 
         if self.off_chain_test is False:
             self.public_key = get_key(".tensorlink.env", "PUBLIC_KEY")
@@ -224,13 +228,16 @@ class Worker(Torchnode):
         """When a validator requests a stats request, return stats"""
         self.available_gpu_memory = get_gpu_memory()
 
+        # If mining is active, report total GPU memory since we'll stop mining on job acceptance
+        if self.mining_active is not None and self.mining_active.value:
+            self.available_gpu_memory = self.total_gpu_memory
+
         stats = {
             "id": self.rsa_key_hash,
             "gpu_memory": self.available_gpu_memory,
             "total_gpu_memory": self.total_gpu_memory,
             "role": self.role,
             "training": self.training,
-            # "connection": self.connections[i], "latency_matrix": self.connections[i].latency
         }
 
         if additional_context is not None:

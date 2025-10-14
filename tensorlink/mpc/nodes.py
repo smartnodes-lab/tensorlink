@@ -47,7 +47,6 @@ class BaseNode:
         print_level=logging.INFO,
         trusted=False,
         utilization=True,
-        endpoint=None,
     ):
         self.node_requests = mp.Queue()
         self.node_responses = mp.Queue()
@@ -142,6 +141,11 @@ class BaseNode:
 
 
 class WorkerNode(BaseNode):
+    def __init__(self, *args, **kwargs):
+        self.mining_active = mp.Value('b', False)  # boolean
+        self.reserved_memory = mp.Value('d', 0.0)  # double for GPU memory
+        super().__init__(*args, **kwargs)
+
     distributed_worker = None
 
     def run_role(self):
@@ -150,6 +154,8 @@ class WorkerNode(BaseNode):
             {
                 "upnp": kwargs.get("upnp", True),
                 "off_chain_test": kwargs.get("off_chain_test", False),
+                "mining_active": self.mining_active,  # Pass shared state
+                "reserved_memory": self.reserved_memory,
             }
         )
 
