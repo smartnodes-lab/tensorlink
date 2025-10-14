@@ -117,7 +117,7 @@ class DHT:
                             key,
                             self.node.nodes[closest_node_id],
                             requester,
-                            keys_to_exclude + [node_hash],
+                            keys_to_exclude,
                         )  # Send query to validator
 
                 except Exception as e:

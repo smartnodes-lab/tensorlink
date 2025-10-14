@@ -5,7 +5,6 @@ from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.node import GenerationRequest
 
 from transformers import AutoTokenizer
-from collections import defaultdict, deque
 import torch
 import logging
 import json
@@ -26,18 +25,42 @@ with open(SUPPORTED_MODELS_PATH, "rb") as f:
 
 
 def extract_assistant_response(text: str, model_name: str = None) -> str:
-    # Split on 'assistant' prompts
-    assistant_responses = re.split(r"\bassistant\b", text)
-    if len(assistant_responses) < 2:
-        return text.strip()
+    """
+    Universal extractor that removes system/user/thought tags and returns
+    the final human-readable assistant response.
+    """
 
-    # Take the last assistant response and strip off any trailing user/system prompts
-    last_response = assistant_responses[-1].strip()
+    # Remove reasoning or hidden thought blocks (e.g. <think>...</think>)
+    text = re.sub(
+        r"<\s*(think|reflection|thought|internal|analysis)\s*>.*?<\s*/\1\s*>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
 
-    # Optionally remove any 'user' or 'system' that follows
-    last_response = re.split(r"\b(user|system)\b", last_response)[0].strip()
+    # Remove common chat tags used by newer models
+    text = re.sub(r"<\|im_start\|>\s*\w+\s*", "", text)
+    text = re.sub(r"<\|im_end\|>", "", text)
+    text = re.sub(r"<\|assistant\|>", "", text)
+    text = re.sub(r"<\|user\|>", "", text)
+    text = re.sub(r"<\|system\|>", "", text)
 
-    return last_response
+    # Strip out any prefixes like "assistant:" or "Assistant:"
+    text = re.sub(r"(?i)\bassistant\s*[:：]\s*", "", text)
+
+    # Remove lingering system/user scaffolding
+    text = re.sub(r"(?i)\b(system|user)\s*[:：]\s*", "", text)
+    text = text.strip().replace("\r", "")
+
+    # If multiple paragraphs, prefer the last coherent chunk
+    # (models sometimes prepend hidden reasoning)
+    if "\n\n" in text:
+        parts = [p.strip() for p in text.split("\n\n") if len(p.strip()) > 10]
+        if parts:
+            text = parts[-1]
+
+    # Fallback: if text still empty, just return as-is (safe default)
+    return text.strip() or "[No output produced]"
 
 
 def format_chat_prompt(model_name, current_message, history):
@@ -233,14 +256,15 @@ class DistributedValidator(DistributedWorker):
         popular_models = self._get_popular_models()
 
         # If no popular models tracked yet, use DEFAULT_MODELS as fallback
-        if not popular_models:
-            models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
-        else:
-            models_to_load = popular_models[: self.MAX_AUTO_MODELS]
-            self.send_request(
-                "debug_print",
-                (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
-            )
+        models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        # if not popular_models:
+        #     models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        # else:
+        #     models_to_load = popular_models[: self.MAX_AUTO_MODELS]
+        #     self.send_request(
+        #         "debug_print",
+        #         (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
+        #     )
 
         # Load models up to the limit
         for model_name in models_to_load:
@@ -339,7 +363,7 @@ class DistributedValidator(DistributedWorker):
         """Check for node requests/updates"""
         try:
             # When running on the public network, manage models automatically
-            if not self.node.init_kwargs.get("local_test", False):
+            if not self.node.init_kwargs.get("endpoint", False):
                 # Periodic cleanup and model management
                 if self.CHECK_COUNTER % self.GC_CHECK_INTERVAL == 0:
                     # Clean up old request data
@@ -385,6 +409,64 @@ class DistributedValidator(DistributedWorker):
             logging.error(f"Error checking for jobs: {str(e)}")
 
         self.CHECK_COUNTER += 1
+
+    def _handle_check_model_status(self, model_name: str):
+        """Check the loading status of a model"""
+        if model_name in self.models:
+            module_id = self.models[model_name]
+            if isinstance(module_id, str):
+                # Model is fully loaded
+                return {
+                    "status": "loaded",
+                    "message": f"Model {model_name} is loaded and ready",
+                    "module_id": module_id,
+                }
+            else:
+                # Model is in the process of loading
+                return {
+                    "status": "loading",
+                    "message": f"Model {model_name} is currently loading",
+                }
+        elif model_name in self.models_initializing:
+            return {
+                "status": "loading",
+                "message": f"Model {model_name} initialization in progress",
+            }
+        else:
+            return {
+                "status": "not_loaded",
+                "message": f"Model {model_name} is not loaded",
+            }
+
+    def _handle_load_model(self, model_name: str):
+        """Handle explicit request to load a model"""
+        try:
+            # Check if already loaded or loading
+            if model_name in self.models or model_name in self.models_initializing:
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Model {model_name} is already loaded or loading",
+                        "yellow",
+                        logging.INFO,
+                    ),
+                )
+                return
+
+            # Add to initializing set
+            self.models_initializing.add(model_name)
+
+            self.send_request(
+                "debug_print",
+                (f"Loading model on demand: {model_name}", "green", logging.INFO),
+            )
+
+            # Initialize the model
+            self._initialize_hosted_job(model_name)
+
+        except Exception as e:
+            logging.error(f"Error loading model {model_name}: {str(e)}")
+            self.models_initializing.discard(model_name)
 
     def _handle_generate_request(self, request: GenerationRequest):
         # Record the request for tracking

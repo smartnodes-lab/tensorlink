@@ -1,11 +1,10 @@
-import json
-import logging
-import os
-import subprocess
-import sys
-import time
-
 import torch.cuda as cuda
+import subprocess
+import logging
+import json
+import time
+import sys
+import os
 
 from tensorlink.mpc.nodes import WorkerNode
 
@@ -96,8 +95,6 @@ def _confirm_action():
 def main():
     root_dir = get_root_dir()
     env_path = os.path.join(root_dir, ".tensorlink.env")
-
-    # Load config if needed
     config = load_config(os.path.join(root_dir, "config.json"))
     create_env_file(env_path, config)
 
@@ -118,31 +115,39 @@ def main():
         off_chain_test=local,
         print_level=logging.INFO,
         trusted=trusted,
-        utilization=False,
+        utilization=True,
     )
 
     try:
         while True:
             if mining_enabled and mining_script:
                 if is_gpu_available(worker):
-                    # If GPU is available and mining is not active, start it
                     if not mining_process or mining_process.poll() is not None:
                         logging.info("Starting mining...")
                         mining_process = start_mining(mining_script, use_sudo)
+
+                        # Update shared state
+                        worker.mining_active.value = True
+                        time.sleep(2)
+
+                        total_mem = cuda.get_device_properties(0).total_memory
+                        available = cuda.memory_reserved(0)
+                        worker.reserved_memory.value = total_mem - available
                 else:
-                    # Stop mining if we require GPU for worker and mining is active
                     if mining_process and mining_process.poll() is None:
                         logging.info("Stopping mining...")
                         stop_mining(mining_process)
 
-            time.sleep(5)
+                        # Clear shared state
+                        worker.mining_active.value = False
+                        worker.reserved_memory.value = 0.0
 
+            time.sleep(5)
             if not worker.node_process.is_alive():
                 break
 
     except KeyboardInterrupt:
         logging.info("Exiting...")
-
     finally:
         if mining_process:
             stop_mining(mining_process)

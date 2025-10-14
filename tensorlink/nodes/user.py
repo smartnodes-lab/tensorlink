@@ -213,8 +213,8 @@ class User(Torchnode):
                         self.modules[mod_id]["workers"] = []
 
                     for worker in mod_info["workers"]:
-                        worker_id, worker_info = worker
-                        # for worker, worker_info in _:
+                        worker_info = self.dht.query(worker)
+
                         # Connect to workers for each model
                         connected = self.connect_worker(
                             worker_info["id"],

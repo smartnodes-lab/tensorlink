@@ -1,16 +1,20 @@
 [tool.poetry]
 name = "tensorlink"
-version = "0.1.6.post1"
-description = "Tensorlink is a library designed to simplify distributed model training and inference with PyTorch, offering tools to easily distribute models across a network of peers and share computational resources both locally and globally."
-authors = ["Smartnodes Lab <smartnodes-lab@proton.me>"]
+version = "0.2.0"
+description = "Tensorlink is a decentralized Python library for distributed PyTorch models, providing easy Hugging Face API access and enabling users to share compute resources across a global network."
+authors = [
+    "Smartnodes Lab <smartnodes-lab@proton.me>",
+    "Matthew Hawken",
+    "Nikita Vassilyev"
+]
 readme = "README.md"
 packages = [{include = "tensorlink"}]
 homepage = "https://smartnodes.ca/tensorlink"
-documentation = "https://smartnodes.ca/docs"
+documentation = "https://smartnodes.ca/tensorlink/docs"
 repository = "https://github.com/smartnodes-lab/tensorlink"
 license = "MIT"
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
