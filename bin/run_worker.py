@@ -57,8 +57,19 @@ def start_mining(mining_script, use_sudo=False):
     """
     Start the mining process using the specified script.
     """
-    command = f"sudo {mining_script}" if use_sudo else mining_script
-    return subprocess.Popen(command, shell=True)
+    # Convert to absolute path relative to current working directory
+    if not os.path.isabs(mining_script):
+        mining_script = os.path.abspath(mining_script)
+
+    # Verify script exists
+    if not os.path.exists(mining_script):
+        raise FileNotFoundError(f"Mining script not found: {mining_script}")
+
+    if use_sudo:
+        # Use list form for better security
+        return subprocess.Popen(["sudo", mining_script])
+    else:
+        return subprocess.Popen([mining_script])
 
 
 def stop_mining(mining_process):
