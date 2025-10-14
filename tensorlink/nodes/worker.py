@@ -71,27 +71,28 @@ class Worker(Torchnode):
 
             self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
 
-            # if self.local_test is False:
-            #     attempts = 0
-            #
-            #     self.debug_print("Bootstrapping...", tag="Worker")
-            #     while attempts < 3 and len(self.validators) == 0:
-            #         self.bootstrap()
-            #         if len(self.validators) == 0:
-            #             time.sleep(15)
-            #             self.debug_print(
-            #                 "No validators found, trying again...", tag="Worker"
-            #             )
-            #             attempts += 1
-            #
-            #     if len(self.validators) == 0:
-            #         self.debug_print(
-            #             "No validators found, shutting down...",
-            #             level=logging.CRITICAL,
-            #             tag="Worker",
-            #         )
-            #         self.stop()
-            #         self.terminate_flag.set()
+            if not self.local_test and not self.off_chain_test:
+                attempts = 0
+
+                self.debug_print("Bootstrapping...", tag="Worker")
+                while attempts < 3 and len(self.validators) == 0:
+                    self.bootstrap()
+                    if len(self.validators) == 0:
+                        time.sleep(15)
+                        self.debug_print(
+                            "No validators found, trying again...", tag="Worker"
+                        )
+                        attempts += 1
+
+                if len(self.validators) == 0:
+                    self.debug_print(
+                        "No validators found, shutting down...",
+                        level=logging.CRITICAL,
+                        tag="Worker",
+                    )
+                    self.stop()
+                    self.terminate_flag.set()
+
         self.keeper.load_previous_state()
 
     def handle_data(self, data: bytes, node: Connection):
