@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/logo.png" alt="Logo" width="400" style="max-width: 100%; border-radius: 12px;">
+  <img src="https://raw.githubusercontent.com/smartnodes-lab/tensorlink/main/docs/images/logo.png" alt="Logo" width="400" style="max-width:100%; border-radius:12px;">
 </p>
 
 <h3 align="center">Distributed AI Inference & Training for Everyone</h3>
