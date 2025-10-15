@@ -355,7 +355,7 @@ class Validator(Torchnode):
 
         # Huggingface model info checks
         (vram, ram) = estimate_hf_model_memory(
-            job_info.get("model_name"), training=False
+            job_info.get("model_name"), training=job_info.get("training", False)
         )
 
         if job_info.get("payment", 0) == 0:
@@ -367,6 +367,7 @@ class Validator(Torchnode):
         job_data["ram"] = ram
         job_data["vram"] = vram
         job_data["time"] = _time
+
         # Hand off model dissection and worker assignment to DistributedValidator process
         request_value = "HF-JOB-REQ" + json.dumps(job_data)
         self._store_request(self.rsa_key_hash, request_value)
@@ -527,7 +528,6 @@ class Validator(Torchnode):
                         tag="Validator",
                     )
                     return False
-
         return assigned_workers
 
     def create_base_job(self, job_data: dict):
