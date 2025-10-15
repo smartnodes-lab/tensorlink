@@ -734,7 +734,11 @@ class DistributedModel(nn.Module):
                     module["training"] = self.training
 
         else:
-            distribution = {"model_name": self.model}
+            distribution = {
+                "model_name": self.model,
+                "training": self.training,
+                "optimizer": optimizer_type,
+            }
 
         # Request job from network
         distributed_config = self.node.send_request(

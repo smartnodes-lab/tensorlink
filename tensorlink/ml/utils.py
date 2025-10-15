@@ -873,25 +873,42 @@ def combine_micro_batches(micro_batches):
 def replace_output_with_custom_grad(combined_output, custom_grad_output):
     """
     Replace the main output tensor (logits, last_hidden_state, etc.) in the combined_output
-    with the custom_grad_output, preserving the original structure.
+    with the custom_grad_output, preserving structure and returning a ModelOutput when possible.
     """
-    if hasattr(combined_output, "logits"):
-        return combined_output.__class__(
-            **{**combined_output, "logits": custom_grad_output}
-        )
-    elif hasattr(combined_output, "last_hidden_state"):
-        return combined_output.__class__(
-            **{**combined_output, "last_hidden_state": custom_grad_output}
-        )
-    elif isinstance(combined_output, torch.Tensor):
+    # If the combined output is already a tensor
+    if isinstance(combined_output, torch.Tensor):
         return custom_grad_output
-    else:
-        # For custom ModelOutput-like structures, replace the first tensor found
-        for key, value in combined_output.items():
-            if isinstance(value, torch.Tensor):
-                combined_output[key] = custom_grad_output
-                break
-        return combined_output
+
+    # Handle ModelOutput subclasses (SequenceClassifierOutput, etc.)
+    if isinstance(combined_output, ModelOutput):
+        data = combined_output.to_dict()
+        if "logits" in data:
+            data["logits"] = custom_grad_output
+        elif "last_hidden_state" in data:
+            data["last_hidden_state"] = custom_grad_output
+        else:
+            for k, v in data.items():
+                if isinstance(v, torch.Tensor):
+                    data[k] = custom_grad_output
+                    break
+        return combined_output.__class__(**data)
+
+    # Handle dict outputs
+    if isinstance(combined_output, dict):
+        new_output = dict(combined_output)
+        if "logits" in new_output:
+            new_output["logits"] = custom_grad_output
+        elif "last_hidden_state" in new_output:
+            new_output["last_hidden_state"] = custom_grad_output
+        else:
+            for k, v in new_output.items():
+                if isinstance(v, torch.Tensor):
+                    new_output[k] = custom_grad_output
+                    break
+        # Wrap dict in a generic ModelOutput for consistency
+        return ModelOutput(**new_output)
+
+    raise TypeError(f"Unsupported output type: {type(combined_output)}")
 
 
 def split_into_micro_batches(combined_output, n_micro_batch):

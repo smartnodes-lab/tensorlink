@@ -157,7 +157,7 @@ class Torchnode(Smartnode):
             node.ghosts += 1
             return False
         else:
-            module_id, response_type = json.dumps(data[18:]).encode()
+            module_id, response_type = json.loads(data[18:])
 
             if response_type == "loaded":
                 self.debug_print(

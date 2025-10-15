@@ -293,7 +293,7 @@ class User(Torchnode):
         # self.debug_print("request_job: Job requested on Smart Contract!")
         # validator_ids = self.contract.functions.getJobValidators(job_id).call()
         validator_ids = [random.choice(self.validators)]
-        if len(distribution) != 1:
+        if not distribution.get("model_name"):
             # The case where we have a custom model with distributed config
             distribution = {
                 k: v for k, v in distribution.items() if v["type"] == "offloaded"
@@ -322,6 +322,7 @@ class User(Torchnode):
             }
         else:
             # The case where we have a huggingface model name for inference
+            optimizer_type = distribution.get("optimizer")
             job_request = {
                 "author": self.rsa_key_hash,
                 "active": True,
@@ -334,6 +335,7 @@ class User(Torchnode):
                 "distribution": {},
                 "n_workers": 0,
                 "model_name": distribution.get("model_name"),
+                "optimizer": f"{optimizer_type.__module__}.{optimizer_type.__name__}",
                 "seed_validators": validator_ids,
             }
 
