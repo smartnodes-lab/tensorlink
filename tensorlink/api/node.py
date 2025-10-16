@@ -142,6 +142,7 @@ class TensorlinkAPI:
                 # Trigger the loading process
                 job_data = {
                     "author": self.smart_node.rsa_key_hash,
+                    "api": True,
                     "active": True,
                     "hosted": True,
                     "training": False,
