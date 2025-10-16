@@ -894,6 +894,7 @@ class Validator(Torchnode):
             if counter % 120 == 0:
                 self.keeper.clean_node()
                 self.clean_port_mappings()
+                self.get_workers()
             if counter % 180 == 0:
                 self.print_status()
 
