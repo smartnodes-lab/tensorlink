@@ -828,7 +828,6 @@ class Validator(Torchnode):
         """Distribute job to a few other non-seed validators"""
         for validator in self.validators:
             pass
-        pass
 
     #         # Query job information from seed validators
     #         job_responses = [
@@ -895,6 +894,7 @@ class Validator(Torchnode):
             if counter % 120 == 0:
                 self.keeper.clean_node()
                 self.clean_port_mappings()
+                self.get_workers()
             if counter % 180 == 0:
                 self.print_status()
 
