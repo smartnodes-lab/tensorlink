@@ -353,11 +353,6 @@ class ContractManager:
             time.sleep(10)
 
     def create_and_submit_proposal(self) -> None:
-        """
-        Main function to create and execute a proposal.
-        Coordinates the process of creating, submitting, and executing a proposal
-        for validator removal and job completion.
-        """
         self.node.debug_print(
             "Creating proposal...",
             colour="bright_blue",
@@ -366,20 +361,64 @@ class ContractManager:
         )
 
         max_attempts = 3
-        attempt = 0
+        proposal = None
+        proposal_hash = None
 
-        while attempt < max_attempts:
-            attempt += 1
-
-            # Verify proposal can be submitted
+        for attempt in range(1, max_attempts + 1):
             try:
+                # Dry run
                 self.coordinator_contract.functions.createProposal(
                     encode(["uint256"], [12345])
                 ).call({"from": self.public_key})
 
+                # Gather data
+                self.node.get_workers()
+                validators_to_remove = self.verify_and_remove_validators()
+                job_hashes, job_capacities, job_workers = self.process_jobs()
+
+                proposal = {
+                    "validators": validators_to_remove,
+                    "job_hashes": [j.hex() for j in job_hashes],
+                    "job_capacities": job_capacities,
+                    "workers": job_workers,
+                    "total_capacity": [
+                        int(
+                            sum(
+                                w["total_gpu_memory"]
+                                for w in self.node.all_workers.values()
+                            )
+                        )
+                    ],
+                    "total_workers": [len(self.node.all_workers)],
+                    "distribution_id": self.current_proposal,
+                    "timestamp": time.time(),
+                }
+
+                participants = self._build_participants(proposal)
+                proposal["merkle_root"] = self._build_merkle_tree_from_participants(
+                    participants
+                ).hex()
+                proposal["workers_hash"] = self.chain.keccak(
+                    encode(["address[]"], [job_workers])
+                ).hex()
+                proposal["capacities_hash"] = self.chain.keccak(
+                    encode(["uint256[]"], [job_capacities])
+                ).hex()
+
+                proposal_hash = self._hash_proposal_data(proposal)
+                self.node.dht.store(proposal_hash.hex(), proposal.copy())
+
+                code = self._submit_proposal(proposal_hash)
+                if code == 0:
+                    break
+                elif code == 1:
+                    return
+                elif code == 2:
+                    continue
+
             except Exception as e:
-                if "updateTime - 2min" in str(e):
-                    # Wait for next round instead of arbitrary sleep
+                msg = str(e).lower()
+                if "updatetime - 2min" in msg:
                     self.node.debug_print(
                         f"Waiting for next round (attempt {attempt})",
                         colour="yellow",
@@ -388,6 +427,13 @@ class ContractManager:
                     )
                     self._wait_for_next_round()
                     continue
+                elif "0xde813857" in msg:
+                    self.node.debug_print(
+                        "Already submitted proposal!",
+                        colour="yellow",
+                        level=logging.DEBUG,
+                        tag="ContractManager",
+                    )
                 else:
                     self.node.debug_print(
                         f"Cannot create proposal: {e}",
@@ -396,62 +442,7 @@ class ContractManager:
                         tag="ContractManager",
                     )
                     return
-
-            # Request all workers connected to the network
-            self.node.get_workers()
-
-            # Process validators and jobs
-            validators_to_remove = self.verify_and_remove_validators()
-            job_hashes, job_capacities, job_workers = self.process_jobs()
-
-            total_capacities = [
-                int(
-                    sum(
-                        worker["total_gpu_memory"]
-                        for worker in self.node.all_workers.values()
-                    )
-                )
-            ]
-            total_workers = [len(self.node.all_workers)]
-
-            # Create and store proposal
-            proposal = {
-                "validators": validators_to_remove,
-                "job_hashes": [j.hex() for j in job_hashes],
-                "job_capacities": job_capacities,
-                "workers": job_workers,
-                "total_capacity": total_capacities,
-                "total_workers": total_workers,
-                "distribution_id": self.current_proposal,
-                "timestamp": time.time(),
-            }
-
-            # Build participants for merkle tree
-            participants = self._build_participants(proposal)
-            proposal["merkle_root"] = self._build_merkle_tree_from_participants(
-                participants
-            ).hex()
-            proposal["workers_hash"] = self.chain.keccak(
-                encode(["address[]"], [job_workers])
-            ).hex()
-            proposal["capacities_hash"] = self.chain.keccak(
-                encode(["uint256[]"], [job_capacities])
-            ).hex()
-
-            proposal_hash = self._hash_proposal_data(proposal)
-            self.node.dht.store(proposal_hash.hex(), proposal.copy())
-
-            # Submit proposal
-            code = self._submit_proposal(proposal_hash)
-
-            if code == 0:
-                break  # Exit loop if submission is successful
-            elif code == 1:
-                return  # Exit method (error)
-            elif code == 2:
-                continue  # Restart and continue to build proposal data
-
-        if attempt >= max_attempts:
+        else:
             self.node.debug_print(
                 "Max proposal creation attempts reached",
                 colour="bright_red",
@@ -460,10 +451,16 @@ class ContractManager:
             )
             return
 
-        # Wait for next block before monitoring
-        self._wait_for_next_block()
+        if not proposal_hash:
+            self.node.debug_print(
+                "No valid proposal hash to monitor",
+                colour="bright_red",
+                level=logging.ERROR,
+                tag="ContractManager",
+            )
+            return
 
-        # Monitor and execute proposal
+        self._wait_for_next_block()
         self._monitor_and_execute_proposal(proposal_hash.hex())
 
     def _is_validator_online(self, node_info: Dict[str, Any]) -> bool:
@@ -572,7 +569,7 @@ class ContractManager:
                 return 0
 
             except Exception as e:
-                if "Validator has already submitted a proposal this round" in str(e):
+                if "0xde813857" in str(e):
                     self.node.debug_print(
                         "Validator has already submitted a proposal this round!",
                         colour="bright_red",

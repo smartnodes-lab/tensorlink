@@ -19,8 +19,8 @@ class NodeRequest(BaseModel):
 
 class JobRequest(BaseModel):
     hf_name: str
-    time: int
-    payment: int
+    time: int = 1800
+    payment: int = 0
 
 
 class GenerationRequest(BaseModel):
@@ -346,7 +346,14 @@ class TensorlinkAPI:
         """Start the FastAPI server in a separate thread"""
 
         def run_server():
-            uvicorn.run(self.app, host=self.host, port=self.port)
+            uvicorn.run(
+                self.app,
+                host=self.host,
+                port=self.port,
+                timeout_keep_alive=20,
+                limit_concurrency=100,
+                lifespan="on",
+            )
 
         server_thread = Thread(target=run_server, daemon=True)
         server_thread.start()
