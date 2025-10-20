@@ -25,6 +25,7 @@ from transformers import (
     AutoModelForSpeechSeq2Seq,
     AutoModelForTokenClassification,
     AutoModelForVision2Seq,
+    AutoModelForSeq2SeqLM,
 )
 
 from tensorlink.ml.utils import (
@@ -372,79 +373,71 @@ class DistributedWorker:
         self.send_request("module_loaded", module_id)
 
     def _load_huggingface_model(self, module_name, file_name: str = None):
-        """Load model from HuggingFace based on file content and model name"""
-        api = HfApi()
+        """Load any Hugging Face model using config to pick the right class."""
         try:
-            # Get model information from Hugging Face api
-            api.model_info(repo_id=module_name)
+            config = AutoConfig.from_pretrained(module_name)
 
+            # Determine the model class
+            model_class = None
+
+            arch = getattr(config, "architectures", [None])[0]
+            if arch is not None:
+                arch = arch.lower()
+                if "lmhead" in arch:
+                    model_class = AutoModelForCausalLM
+                elif "forseq2seqlm" in arch or "bart" in arch or "t5" in arch:
+                    model_class = AutoModelForSeq2SeqLM
+                elif "model" in arch:
+                    model_class = AutoModel
+            else:
+                # fallback by model_type
+                if getattr(config, "is_decoder", False):
+                    model_class = AutoModelForCausalLM
+                elif getattr(config, "encoder_decoder", False):
+                    model_class = AutoModelForSeq2SeqLM
+                else:
+                    model_class = AutoModel
+
+            # Load the model
             if (
                 file_name is None
                 or os.stat(file_name).st_size == 0
                 or file_name == module_name
             ):
-                # Load model directly
                 if self.device.type == "cuda":
-                    free_memory = (
-                        torch.cuda.get_device_properties(0).total_memory
-                        - torch.cuda.memory_allocated()
-                    )
-                    # TODO ensure free memory
-                    module = AutoModelForCausalLM.from_pretrained(
-                        module_name,
-                        # device_map="auto",
-                        torch_dtype=(torch.float16 if self.use_amp else torch.float32),
-                    )
-                else:
-                    module = AutoModelForCausalLM.from_pretrained(module_name)
-            else:
-                with open(file_name, "rb") as f:
-                    metadata_size = int.from_bytes(f.read(4), "big")
-                    metadata_bytes = f.read(metadata_size)
-                    metadata = json.loads(metadata_bytes.decode("utf-8"))
-
-                    state_dict_bytes = f.read()
-                    state_dict_buffer = io.BytesIO(state_dict_bytes)
-
-                    # Load with appropriate device placement
-                    if self.device.type == "cuda":
-                        received_state_dict = torch.load(
-                            state_dict_buffer,
-                            weights_only=True,
-                            map_location=self.device,
-                        )
-                    else:
-                        received_state_dict = torch.load(
-                            state_dict_buffer, weights_only=True
-                        )
-
-                # Load the expected model with optimized settings
-                if self.device.type == "cuda":
-                    module = AutoModel.from_pretrained(
+                    module = model_class.from_pretrained(
                         module_name,
                         device_map="auto",
                         torch_dtype=(torch.float16 if self.use_amp else torch.float32),
                     )
                 else:
-                    module = AutoModel.from_pretrained(module_name)
+                    module = model_class.from_pretrained(module_name)
+            else:
+                # Local file loading (same as before)
+                with open(file_name, "rb") as f:
+                    metadata_size = int.from_bytes(f.read(4), "big")
+                    f.read(metadata_size)  # skip metadata
+                    state_dict_bytes = f.read()
+                    state_dict_buffer = io.BytesIO(state_dict_bytes)
+                    map_location = self.device if self.device.type == "cuda" else "cpu"
+                    received_state_dict = torch.load(
+                        state_dict_buffer, map_location=map_location, weights_only=True
+                    )
 
+                module = model_class.from_pretrained(
+                    module_name,
+                    device_map="auto" if self.device.type == "cuda" else None,
+                )
                 model_state_dict = module.state_dict()
-
-                # Map received keys to expected keys
-                new_state_dict = {}
-                for expected_key, received_key in zip(
-                    model_state_dict.keys(), received_state_dict.keys()
-                ):
-                    new_state_dict[expected_key] = received_state_dict[received_key]
-
-                # Load remapped state dict with error handling
-                module.load_state_dict(
-                    new_state_dict, strict=False
-                )  # strict=False allows minor mismatches
+                new_state_dict = {
+                    k: received_state_dict[v]
+                    for k, v in zip(model_state_dict.keys(), received_state_dict.keys())
+                }
+                module.load_state_dict(new_state_dict, strict=False)
 
             return module
+
         except Exception as e:
-            # Handle exceptions appropriately
             raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
             # TODO route error to validator for reporting
 
@@ -616,13 +609,13 @@ class DistributedWorker:
                     self.handle_backward(module_id, tag, loss_relay)
 
         # Small sleep to prevent CPU hogging
-        time.sleep(0.01)
+        time.sleep(0.001)
 
     def run(self):
         """Main execution thread"""
         while not self.terminate:
             self.main_loop()
-            time.sleep(0.005)
+            time.sleep(0.001)
 
         # Final cleanup
         if self.device.type == "cuda":
