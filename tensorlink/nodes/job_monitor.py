@@ -417,6 +417,10 @@ class JobMonitor:
             if self.node.contract_manager:
                 self.node.contract_manager.add_job_to_complete(job_data)
 
+            # Remove module from node
+            for module_id in job_data["distribution"]:
+                del self.node.modules[module_id]
+
         except Exception as e:
             self.node.debug_print(
                 f"Error during job cleanup: {str(e)}",
