@@ -64,7 +64,7 @@ class ModelParser:
 
     def create_distributed_config(
         self,
-        model: nn.Module,
+        model: Union[nn.Module, str],
         training: bool,
         trusted: bool,
         handle_layers: bool = True,

@@ -254,17 +254,15 @@ class DistributedValidator(DistributedWorker):
     def _manage_auto_loaded_models(self):
         """Manage auto-loaded models based on popularity from JSON cache, falling back to DEFAULT_MODELS"""
         popular_models = self._get_popular_models()
-        # if not popular_models:
-        #     models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
-        # else:
-        #     models_to_load = popular_models[: self.MAX_AUTO_MODELS]
-        #     self.send_request(
-        #         "debug_print",
-        #         (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
-        #     )
 
-        # If no popular models tracked yet, use DEFAULT_MODELS as fallback
-        models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        if not popular_models:
+            models_to_load = DEFAULT_MODELS[: self.MAX_AUTO_MODELS]
+        else:
+            models_to_load = popular_models[: self.MAX_AUTO_MODELS]
+            self.send_request(
+                "debug_print",
+                (f"Loading popular models: {models_to_load}", "blue", logging.INFO),
+            )
 
         # Load models up to the limit
         for model_name in models_to_load:
@@ -305,10 +303,10 @@ class DistributedValidator(DistributedWorker):
                         )
                         self._remove_hosted_job(model_name)
 
-    def inspect_model(self, model_name: str, job_data: dict = None):
+    def inspect_model(self, model_name: str, job_data: dict):
         """Inspect a model to determine network requirements and store distribution in JSON cache"""
         parser = ModelParser()
-        model_name = job_data.get("model_name", model_name)
+        model_name: str = job_data.get("model_name", model_name)
 
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
@@ -372,7 +370,7 @@ class DistributedValidator(DistributedWorker):
             job_data = self.send_request("get_jobs", None)
 
             if isinstance(job_data, dict):
-                model_name = job_data.get("model_name")
+                model_name: str = job_data.get("model_name", "")
 
                 if job_data.get("api"):
                     payment = job_data.get("payment", 0)
@@ -624,6 +622,16 @@ class DistributedValidator(DistributedWorker):
 
             # Distribute the model across workers
             self.modules[module_id].distribute_model(distribution)
+
+            # Ensure workers are registered
+            for dist_module_id, dist_module_info in distribution.items():
+                if dist_module_id in self.modules and isinstance(
+                    self.modules[dist_module_id], dict
+                ):
+                    # Update workers list to ensure it's current
+                    self.modules[dist_module_id]["workers"] = dist_module_info.get(
+                        "workers", []
+                    )
 
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)

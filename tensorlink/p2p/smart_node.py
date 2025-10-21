@@ -1457,7 +1457,7 @@ class Smartnode(threading.Thread):
     def handle_message(self, node: Connection, data) -> None:
         """Callback method to handles incoming data from connections"""
         self.debug_print(
-            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__()/1e6}MB",
+            f"handle_message from {node.host}:{node.port} -> {data.__sizeof__() / 1e6}MB",
             tag="Smartnode",
         )
 
