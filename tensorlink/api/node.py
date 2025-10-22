@@ -1,8 +1,12 @@
 from tensorlink.ml.utils import get_popular_model_stats
+from tensorlink.ml.validator import extract_assistant_response
+from tensorlink.api.models import (
+    JobRequest,
+    GenerationRequest,
+    ModelStatusResponse,
+)
 
 from fastapi import FastAPI, HTTPException, APIRouter, Request, Query
-from pydantic import BaseModel
-from typing import Optional, List
 from collections import defaultdict
 from threading import Thread
 import logging
@@ -13,35 +17,73 @@ import queue
 import time
 
 
-class NodeRequest(BaseModel):
-    address: str
+def _format_response(
+    request: GenerationRequest,
+    processing_time: float,
+    request_id: str,
+):
+    """
+    Format the response based on the requested format type.
 
+    Args:
+        request: The original generation request with output
+        processing_time: Time taken to process the request
+        request_id: Unique identifier for this request
 
-class JobRequest(BaseModel):
-    hf_name: str
-    time: int = 1800
-    payment: int = 0
+    Returns:
+        Dictionary formatted according to response_format
+    """
+    timestamp = int(time.time())
 
+    # Extract clean text from output
+    clean_output = extract_assistant_response(request.output, request.hf_name)
 
-class GenerationRequest(BaseModel):
-    hf_name: str
-    message: str
-    prompt: str = None
-    max_length: int = 2048
-    max_new_tokens: int = 2048
-    temperature: float = 0.4
-    do_sample: bool = True
-    num_beams: int = 4
-    history: Optional[List[dict]] = None
-    output: str = None
-    processing: bool = False
-    id: int = None
+    if request.response_format == "simple":
+        # Minimal response - just the text
+        return {"response": clean_output}
 
+    elif request.response_format == "openai":
+        # OpenAI-compatible format
+        return {
+            "id": request_id,
+            "object": "chat.completion",
+            "created": timestamp,
+            "model": request.hf_name,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": clean_output},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": -1,  # Not tracked in current implementation
+                "completion_tokens": -1,
+                "total_tokens": -1,
+            },
+        }
 
-class ModelStatusResponse(BaseModel):
-    model_name: str
-    status: str  # "loaded", "loading", "not_loaded", "error"
-    message: str
+    else:  # "full" format (default, comprehensive response with all metadata)
+        return {
+            "id": request_id,
+            "model": request.hf_name,
+            "response": clean_output,
+            "raw_output": request.output,
+            "created": timestamp,
+            "processing_time": round(processing_time, 3),
+            "generation_params": {
+                "max_length": request.max_length,
+                "max_new_tokens": request.max_new_tokens,
+                "temperature": request.temperature,
+                "do_sample": request.do_sample,
+                "num_beams": request.num_beams,
+            },
+            "metadata": {
+                "has_history": bool(request.history),
+                "history_length": len(request.history) if request.history else 0,
+                "prompt_used": request.prompt is not None,
+            },
+        }
 
 
 class TensorlinkAPI:
@@ -65,6 +107,8 @@ class TensorlinkAPI:
         @self.router.post("/generate")
         async def generate(request: GenerationRequest):
             try:
+                start_time = time.time()
+
                 # Log model request
                 current_time = time.time()
                 self.model_request_timestamps[request.hf_name].append(current_time)
@@ -82,7 +126,8 @@ class TensorlinkAPI:
                 self.model_name_to_request[request.hf_name] += 1
 
                 request.output = None
-                request.id = hash(random.random())
+                request_id = f"req_{hash(random.random())}"
+                request.id = hash(request_id)
 
                 # Check if model is loaded, if not trigger loading
                 model_status = self._check_model_status(request.hf_name)
@@ -105,8 +150,74 @@ class TensorlinkAPI:
                 # Wait for the result
                 request = await self._wait_for_result(request)
 
-                return_val = request.output
-                return {"response": return_val}
+                processing_time = time.time() - start_time
+
+                # Format response based on requested format
+                formatted_response = _format_response(
+                    request, processing_time, request_id
+                )
+
+                return formatted_response
+
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.router.post("/v1/chat/completions")
+        async def chat_completions(request: Request):
+            """
+            OpenAI-compatible chat completions endpoint.
+            Accepts OpenAI format and returns OpenAI format.
+            """
+            try:
+                body = await request.json()
+
+                # Extract OpenAI-style parameters
+                model = body.get("model")
+                messages = body.get("messages", [])
+                temperature = body.get("temperature", 0.7)
+                max_tokens = body.get("max_tokens", 2048)
+
+                # Convert to our internal format
+                history = []
+                current_message = ""
+
+                for msg in messages:
+                    role = msg.get("role")
+                    content = msg.get("content", "")
+
+                    if role == "system":
+                        # System messages added to history
+                        history.append({"role": "system", "content": content})
+                    elif role == "user":
+                        # Last user message becomes current_message
+                        if (
+                            current_message
+                        ):  # If there was a previous user message, add to history
+                            history.append({"role": "user", "content": current_message})
+                        current_message = content
+                    elif role == "assistant":
+                        history.append({"role": "assistant", "content": content})
+
+                if not current_message:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="No user message found in messages array",
+                    )
+
+                # Create our internal request with OpenAI format
+                gen_request = GenerationRequest(
+                    hf_name=model,
+                    message=current_message,
+                    history=history if history else None,
+                    temperature=temperature,
+                    max_new_tokens=max_tokens,
+                    response_format="openai",
+                )
+
+                # Reuse the generate logic
+                return await generate(gen_request)
 
             except HTTPException:
                 raise
@@ -249,26 +360,8 @@ class TensorlinkAPI:
         @self.app.get("/node-info")
         async def get_node_info(node_id: str):
             """
-            {
-              pubKeyHash: '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
-              type: 'validator',
-              lastSeen: '2 minutes ago',
-              data: {
-                peers: 12,
-                rewards: 1000.5,
-                is_active: true
-              }
-            },
-            {
-              pubKeyHash: '0x8f3B9c4A7E2D1F5C6A8B9D0E3F4A5B6C7D8E9F0A',
-              type: 'worker',
-              lastSeen: '5 minutes ago',
-              data: {
-                jobs_completed: 47,
-                rewards: 235.8,
-                is_active: true
-              }
-            },
+            Get information about a specific node in the network.
+            Returns node type, last seen, and relevant data based on role.
             """
             node_info = self.smart_node.dht.query(node_id)
             if node_info:
@@ -280,9 +373,10 @@ class TensorlinkAPI:
                 }
 
                 if node_info["role"] == "V":
-                    # node_info["peers"] = 1
+                    # Validator-specific data
                     pass
                 elif node_info["role"] == "W":
+                    # Worker-specific data
                     node_info["rewards"] = (
                         self.smart_node.contract_manager.get_worker_claim_data(
                             node_info["address"]
@@ -294,6 +388,7 @@ class TensorlinkAPI:
 
         @self.app.get("/claim-info")
         async def get_worker_claims(node_address: str):
+            """Get claim information for a specific worker node"""
             return self.smart_node.contract_manager.get_worker_claim_data(node_address)
 
         self.app.include_router(self.router)
@@ -301,6 +396,7 @@ class TensorlinkAPI:
     def _check_model_status(self, model_name: str) -> dict:
         """Check if a model is loaded, loading, or not loaded"""
         status = "not_loaded"
+        message = "Model is not currently loaded"
 
         try:
             # Check if there is a public job with this module
@@ -308,11 +404,15 @@ class TensorlinkAPI:
                 if module.get("name", "") == model_name:
                     if module.get("public", False):
                         status = "loaded"
+                        message = f"Model {model_name} is loaded and ready"
+                        break
 
         except Exception as e:
             logging.error(f"Error checking model status: {e}")
+            status = "error"
+            message = f"Error checking model status: {str(e)}"
 
-        return {"status": status, "message": "Model is not currently loaded"}
+        return {"status": status, "message": message}
 
     def _trigger_model_load(self, model_name: str):
         """Trigger the ML validator to load a specific model"""
@@ -321,10 +421,6 @@ class TensorlinkAPI:
             self.api_requested_models.add(model_name)
             self.smart_node.create_hf_job(model_name)
 
-            # TODO Send load request to ML validator
-            # self.smart_node.request_queue.put(
-            #     {"type": "load_model", "args": (model_name,)}
-            # )
         except Exception as e:
             logging.error(f"Error triggering model load: {e}")
 

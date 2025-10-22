@@ -2,7 +2,7 @@ from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.module import DistributedModel
 from tensorlink.ml.utils import load_models_cache, save_models_cache
-from tensorlink.api.node import GenerationRequest
+from tensorlink.api.models import GenerationRequest
 
 from transformers import AutoTokenizer
 import torch
