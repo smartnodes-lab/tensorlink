@@ -31,11 +31,12 @@ class Worker(Torchnode):
         local_test=False,
         mining_active=None,
         reserved_memory=None,
+        duplicate="",
     ):
         super(Worker, self).__init__(
             request_queue,
             response_queue,
-            "W",
+            "W" + duplicate,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
@@ -43,7 +44,7 @@ class Worker(Torchnode):
         )
 
         self.training = False
-        self.role = "W"
+        self.role = "W" + duplicate
         self.print_level = print_level
         self.loss = None
         self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
@@ -160,18 +161,19 @@ class Worker(Torchnode):
                 (
                     user_id,
                     job_id,
-                    module_id,
-                    module_size,
-                    module_name,
-                    optimizer_name,
-                    training,
+                    modules,
                 ) = json.loads(data[7:])
 
-                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
-                    # Respond to validator that we can accept the job
-                    if module_name is None:
-                        module_name = ""
+                first_module = list(modules.values())[0]
+                module_id = hashlib.sha256(json.dumps(modules).encode()).hexdigest()
+                module_size = sum(
+                    m.get("memory") for m in modules.values() if isinstance(m, dict)
+                )
+                module_name = first_module.get("name", "")
+                training = first_module.get("training", False)
+                optimizer_name = first_module.get("optimizer_type", "adam")
 
+                if self.available_gpu_memory >= module_size:
                     # Store a request to wait for the user connection
                     self._store_request(user_id, module_id + module_name)
 
@@ -189,6 +191,7 @@ class Worker(Torchnode):
             else:
                 node.stop()
 
+            # Respond to validator that we can accept/decline the job
             self.send_to_node(node, data)
 
         except Exception as e:

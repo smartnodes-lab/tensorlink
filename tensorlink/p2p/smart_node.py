@@ -500,7 +500,7 @@ class Smartnode(threading.Thread):
             role_colour = "\033[37m"
             if self.role == "U":
                 role_colour = COLOURS["magenta"]
-            elif self.role == "W":
+            elif self.role.startswith("W"):
                 role_colour = COLOURS["cyan"]
             elif self.role == "V":
                 role_colour = COLOURS["bright_black"]
@@ -694,7 +694,7 @@ class Smartnode(threading.Thread):
 
         # If we are a worker, only allow connections from users which we have been coordinated to work with
         # by a validator (i.e. node_id_hash is in self.requests)
-        if node_info['role'] == "U" and self.role == "W":
+        if node_info['role'] == "U" and self.role.startswith("W"):
             if node_info['node_id_hash'] not in self.requests:
                 self.close_connection(
                     connection, f"Not assigned to user: {node_info['node_id_hash']}"
@@ -730,7 +730,9 @@ class Smartnode(threading.Thread):
                     )
                     return False
 
-            elif node_info['role'] not in ["W", "U"]:
+            elif not node_info['role'].startswith("W") and not node_info[
+                "role"
+            ].startswith("W"):
                 self.close_connection(connection, f"Invalid role: {node_info['role']}")
                 return False
 
@@ -1029,7 +1031,7 @@ class Smartnode(threading.Thread):
         if node_info["role"] == "V":
             self.validators.append(node_info["node_id_hash"])
 
-        elif node_info["role"] == "W":
+        elif node_info["role"].startswith("W"):
             self.workers.append(node_info["node_id_hash"])
 
             # If we are connecting to a worker (for a job), boost connection speed
@@ -1040,7 +1042,7 @@ class Smartnode(threading.Thread):
             self.users.append(node_info["node_id_hash"])
 
             # If we are connecting to a user (for a job), boost connection speed
-            if self.role == "W":
+            if self.role.startswith("W"):
                 thread_client.adjust_chunk_size("large")
 
         self.debug_print(
@@ -1055,7 +1057,7 @@ class Smartnode(threading.Thread):
     def _handle_user_connection(self, thread_client, node_info: dict):
         """Special handling for user connections"""
         self.users.append(node_info['node_id_hash'])
-        if self.role == "W":
+        if self.role.startswith("W"):
             thread_client.adjust_chunk_size("large")
 
     def connect_node(
@@ -1235,7 +1237,13 @@ class Smartnode(threading.Thread):
                 else:
                     raise "Error binding port."
 
-        self.sock.bind((self.host, port))
+        try:
+            self.sock.bind((self.host, port))
+        except OSError:
+            self.port += 1
+            port += 1
+            self.sock.bind((self.host, port))
+
         self.sock.settimeout(3)
         self.sock.listen(5)
 

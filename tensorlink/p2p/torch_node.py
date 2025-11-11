@@ -471,32 +471,39 @@ class Torchnode(Smartnode):
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     def _handle_check_module(self, request):
-        return_val = False
+        if self.role == "V":
+            return_val = {
+                "module_ids": [],
+                "distribution": {},
+                "model_name": None,
+                "optimizer": None,
+                "training": False,
+            }
+        else:
+            return_val = {
+                "module_id": "",
+                "host": None,
+                "distribution": {},
+                "model_name": None,
+                "optimizer": None,
+                "training": False,
+            }
 
-        for module_id in list(self.modules.keys()):
-            module = self.modules[module_id]
-
+        for module_id, module in self.modules.items():
             if "mem_info" in module:
-                name = module["mem_info"]
-
                 if self.role == "V":
-                    return_val = (
-                        name,
-                        module_id,
-                        module["distribution"],
-                        module["name"],
-                        module["optimizer"],
-                        module["training"],
-                    )
+                    return_val["module_id"] = module_id
+                    return_val["distribution"][module_id] = module["distribution"]
+                    return_val["model_name"] = module.get("model_name", "")
+                    return_val["optimizer"] = module["optimizer"]
+                    return_val["training"] = module["training"]
                 else:
-                    return_val = (
-                        name,
-                        module_id,
-                        module["host"],
-                        module["name"],
-                        module["optimizer"],
-                        module["training"],
-                    )
+                    return_val["module_id"] = module_id
+                    return_val["host"] = module["host"]
+                    return_val["distribution"].append(module["distribution"])
+                    return_val["model_name"] = module.get("model_name", "")
+                    return_val["optimizer"] = module["optimizer"]
+                    return_val["training"] = module["training"]
 
                 del module["mem_info"]
 
@@ -536,7 +543,7 @@ class Torchnode(Smartnode):
         # Check if forward pass has been received and is loaded in shared mpc
         return_val = None
 
-        if self.role == "W":
+        if self.role.startswith("W"):
             module_id = request["args"]
 
             if module_id in self.modules:
@@ -576,7 +583,7 @@ class Torchnode(Smartnode):
         args = request["args"]
         return_val = None
 
-        if self.role == "W":
+        if self.role.startswith("W"):
             module_hash = args
             module = self.modules[module_hash]
             min_iter, min_micro = -1, -1

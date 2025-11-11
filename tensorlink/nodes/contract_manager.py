@@ -485,10 +485,7 @@ class ContractManager:
                 worker_info = self.node.dht.query(worker_id)
                 worker_address = self.chain.to_checksum_address(worker_info["address"])
                 capacity = round(
-                    module_info["size"]
-                    * 1e9
-                    * (job["end_time"] - job["timestamp"])
-                    / 3600
+                    module_info["size"] * (job["end_time"] - job["timestamp"]) / 3600
                 )  # Capacity measured in byte hours
                 workers.append(worker_address)
                 capacities.append(capacity)

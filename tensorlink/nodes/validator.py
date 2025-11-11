@@ -17,7 +17,7 @@ import time
 import os
 
 
-FREE_JOB_MAX_TIME = 1 * 60  # 30 minutes in seconds for a free job
+FREE_JOB_MAX_TIME = 30 * 60  # 30 minutes in seconds for a free job
 
 
 class Validator(Torchnode):
@@ -248,6 +248,7 @@ class Validator(Torchnode):
                 "send_job_request": self.create_base_job,
                 "update_api_request": self._handle_update_api,
                 "get_model_demand_stats": self._get_api_demand,
+                "get_workers": self._get_workers,
             }
 
             handler = handlers.get(req_type)
@@ -450,15 +451,8 @@ class Validator(Torchnode):
             node.ghosts += 1
 
     def check_job_availability(self, job_data: dict):
-        """Asserts that the specified user does not have an active job, and that
-        the job capacity can be handled by the network."""
-        # job_id = job_data["id"]
+        """Asserts that the specified user does not have an active job."""
         user_id = job_data.get("author")
-        capacity = job_data.get("capacity")
-        distribution = job_data.get("distribution")
-
-        # Request updated worker statistics
-        self.request_worker_stats()
 
         if user_id and user_id != self.rsa_key_hash:
             # Check that user doesn't have an active job already
@@ -474,98 +468,33 @@ class Validator(Torchnode):
                     if current_user_job and current_user_job["active"]:
                         return False
 
-        # Check network can handle the requested job
-        total_memory = sum(self.worker_memories.values())
-
-        if total_memory < capacity:
-            self.debug_print(
-                f"Not enough network capacity for Job:\n"
-                f"\tID: {job_data['id']}\n"
-                f"\tREQUIRED-MEMORY: {capacity}.\n"
-                f"\tNETWORK-MEMORY: {total_memory}\n",
-                tag="Validator",
-            )
-            return False
-
-        # Sort workers by memory in ascending order
-        sorted_workers = sorted(
-            list(self.worker_memories.items()), key=lambda x: x[1]
-        )  # (worker_id, memory)
-        assigned_workers = []
-
-        # Iterate over the modules in the distribution
-        for module_id, module_info in distribution.items():
-            if module_info["type"] == "offloaded":
-                module_memory = module_info["size"]
-                assigned_worker = None
-
-                # Iterate through the sorted workers and find one with enough memory
-                for worker_id, memory in sorted_workers:
-                    if memory >= module_memory:
-                        # Assign the worker to this module
-                        assigned_worker = (worker_id, memory)
-                        break
-
-                if assigned_worker:
-                    assigned_workers.append(assigned_worker[0])
-
-                    # Update the worker's available memory
-                    updated_memory = assigned_worker[1] - module_memory
-                    sorted_workers = [
-                        (
-                            (w_id, mem)
-                            if w_id != assigned_worker[0]
-                            else (w_id, updated_memory)
-                        )
-                        for w_id, mem in sorted_workers
-                    ]
-                else:
-                    self.debug_print(
-                        f"No worker found with enough memory for Job:\n"
-                        f"\tID: {job_data['id']}\n"
-                        f"\tMODULE: {module_id}\n"
-                        f"\tREQUIRED-MEMORY: {module_memory}.\n",
-                        tag="Validator",
-                    )
-                    return False
-        return assigned_workers
-
     def create_base_job(self, job_data: dict):
         modules, job_id, author, n_pipelines = self._prepare_job(job_data)
-
         requesting_node = self._get_requesting_node(job_data, author)
-        assigned_workers = self.check_job_availability(job_data)
+        distribution = job_data.get("distribution", {})
 
-        if job_data.get("payment", 0) == 0:
-            _time = FREE_JOB_MAX_TIME
-        else:
-            _time = job_data.get("time")
-
-        job_data["time"] = _time
-
-        if not assigned_workers:
+        if not distribution.get("success"):
             self._decline_job(
                 job_data, requesting_node, "Could not find enough workers."
             )
             return
 
+        job_data["distribution"] = distribution["config"]
+
+        self.check_job_availability(job_data)
+
+        # Store job info in DHT
         self.dht.store(job_id, job_data)
+
+        # Recruit the workers
         worker_connection_info = self._assign_workers_to_modules(
-            modules,
-            assigned_workers,
-            author,
-            job_id,
-            job_data,
-            n_pipelines,
-            requesting_node,
+            modules, author, job_id, job_data
         )
 
         if worker_connection_info is None:
             return  # job declined inside _assign_workers_to_modules
 
-        self._update_job_distribution(
-            job_data, worker_connection_info, n_pipelines, requesting_node
-        )
+        self._update_job_distribution(job_data, n_pipelines, requesting_node)
 
         if requesting_node:
             self._send_acceptance(requesting_node, job_id, job_data)
@@ -579,6 +508,16 @@ class Validator(Torchnode):
         job_id = job_data.get("id")
         author = job_data.get("author")
         n_pipelines = job_data.get("n_pipelines")
+
+        # If a user has not paid for the job, allocate the default time
+        if job_data.get("payment", 0) == 0:
+            _time = FREE_JOB_MAX_TIME
+        else:
+            _time = job_data.get("time")
+        job_data["time"] = _time
+
+        if modules.get("success"):
+            modules = modules.get("config")
 
         if job_id is None:
             job_id = hashlib.sha256(json.dumps(job_data).encode()).hexdigest()
@@ -598,69 +537,50 @@ class Validator(Torchnode):
         if requesting_node:
             self.decline_job(requesting_node, reason)
 
-    def _assign_workers_to_modules(
-        self,
-        modules,
-        assigned_workers,
-        author,
-        job_id,
-        job_data,
-        n_pipelines,
-        requesting_node,
-    ):
+    def _assign_workers_to_modules(self, modules, author, job_id, job_data):
         worker_connection_info = {}
+        groups = {}
+        for module_name, module_info in modules.items():
+            worker_id = module_info.get("assigned_workers", [])[-1]
+            if worker_id not in groups:
+                groups[worker_id] = {}
 
-        for module_id, module in modules.items():
-            worker_assignment = []
+            groups[worker_id][module_name] = module_info
 
-            for stream in range(n_pipelines):
-                worker_found = False
+        job_data["worker_modules"] = {}
 
-                for worker_id in assigned_workers:
-                    if worker_id not in worker_assignment:
-                        if self.recruit_worker(
-                            author,
-                            job_id,
-                            module_id,
-                            module["size"],
-                            worker_id,
-                            module["name"],
-                            job_data.get("optimizer", None),
-                            job_data.get("training", False),
-                        ):
-                            worker_assignment.append(worker_id)
-                            worker_found = True
-                            time.sleep(0.25)
-                            break
+        for worker_id, worker_modules in groups.items():
+            module_id = hashlib.sha256(json.dumps(worker_modules).encode()).hexdigest()
+            self.recruit_worker(worker_id, author, job_id, worker_modules, module_id)
+            # job_data["distribution"]
+            job_data["worker_modules"][worker_id] = module_id
+            worker_connection_info[module_id] = worker_id
 
-                if not worker_found:
-                    self._decline_job(
-                        job_data,
-                        requesting_node,
-                        "Could not find enough workers for distribution.",
-                    )
-                    return None
+        regrouped = {}
+        for module_id, worker_id in worker_connection_info.items():
+            # get all modules assigned to this worker
+            worker_modules = next(
+                (groups[worker_id] for wid in groups if wid == worker_id), {}
+            )
+            regrouped[module_id] = {
+                "worker_id": worker_id,
+                "modules": worker_modules,
+            }
 
-            worker_connection_info[module_id] = [
-                worker_id for worker_id in worker_assignment
-            ]
+        job_data["distribution"] = regrouped
 
         return worker_connection_info
 
-    def _update_job_distribution(
-        self, job_data, worker_connection_info, n_pipelines, requesting_node
-    ):
-        for module_id, worker_info in worker_connection_info.items():
-            job_data["distribution"][module_id]["workers"] = worker_info
-
-        for module_id, module_info in job_data["distribution"].items():
-            if len(module_info["workers"]) != n_pipelines:
-                self._decline_job(
-                    job_data,
-                    requesting_node,
-                    f"Pipeline initialization error! Expected {n_pipelines}, Received {len(module_info['workers'])}.",
-                )
-                return None
+    def _update_job_distribution(self, job_data, n_pipelines, requesting_node):
+        pass
+        # for module_id, module_info in job_data["distribution"].items():
+        #     if len(module_info["workers"]) != n_pipelines:
+        #         self._decline_job(
+        #             job_data,
+        #             requesting_node,
+        #             f"Pipeline initialization error! Expected {n_pipelines}, Received {len(module_info['workers'])}.",
+        #         )
+        #         return None
 
     def _send_acceptance(self, requesting_node, job_id, job_data):
         self.send_to_node(
@@ -674,24 +594,27 @@ class Validator(Torchnode):
             tag="Validator",
         )
 
-        for mod_id, module in job_data.get("distribution", {}).items():
-            self.modules[mod_id] = {
-                "mem_info": mod_id,
+        for module_id, module_info in job_data["distribution"].items():
+            worker_id = module_info["worker_id"]
+            modules = module_info["modules"]
+
+            self.modules[module_id] = {
+                "mem_info": module_id,
                 "host": self.rsa_key_hash,
+                "model_name": job_data.get("model_name", ""),
                 "forward_queue": {},
                 "backward_queue": {},
-                "name": module.get("name"),
                 "optimizer": None,
                 "training": False,
-                "workers": module.get("workers", []),
-                "distribution": job_data.get("distribution"),
+                "workers": [worker_id],
+                "distribution": modules,
                 "public": True,
             }
-            self.state_updates[mod_id] = []
+            self.state_updates[module_id] = []
 
-            if len(self.modules[mod_id]["workers"]) < 1:
+            if len(self.modules[module_id]["workers"]) < 1:
                 self.debug_print(
-                    f"Network could not find workers for job '{job_id}' module {mod_id}.",
+                    f"Network could not find workers for job '{job_id}' module {module_id}.",
                     level=logging.INFO,
                     colour="red",
                     tag="Validator",
@@ -721,45 +644,22 @@ class Validator(Torchnode):
             self.send_to_node(node, b"DECLINE-JOB" + reason.encode())
 
     def recruit_worker(
-        self,
-        user_id: bytes,
-        job_id: bytes,
-        module_id: bytes,
-        module_size: int,
-        worker_id: str,
-        module_name: str,
-        optimizer_name: str = None,
-        training: bool = False,
-        is_api_job: bool = False,
-    ) -> bool:
+        self, worker_id: str, user_id: str, job_id: str, modules: dict, module_id: str
+    ):
         if user_id is None:
             user_id = self.rsa_key_hash
 
-        data = json.dumps(
-            [
-                user_id,
-                job_id,
-                module_id,
-                module_size,
-                module_name,
-                optimizer_name,
-                training,
-            ]
+        data = json.dumps([user_id, job_id, modules])
+        module_size = sum(
+            m.get("memory", 0) for m in modules.values() if isinstance(m, dict)
         )
+
         data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
         self.debug_print(
             f"Attempting to recruit worker: '{worker_id}' for job: '{job_id}'",
             tag="Validator",
         )
-
-        # Check worker's available memory
-        worker_stats = node.stats
-        if worker_stats["gpu_memory"] < module_size:
-            self.debug_print(
-                f"Worker: '{worker_id}' not enough GPU memory", tag="Validator"
-            )
-            return False
 
         # Send a job request to the worker
         self._store_request(node.node_id, job_id + module_id)
@@ -779,8 +679,6 @@ class Validator(Torchnode):
 
         # Worker accepted the job, update stats
         node.stats["gpu_memory"] -= module_size
-        job = self.dht.query(job_id)
-        job["distribution"][module_id]["workers"] = node.node_id
         self.debug_print(
             f"Worker: '{worker_id}' recruited for job '{job_id}'", tag="Validator"
         )
@@ -802,6 +700,14 @@ class Validator(Torchnode):
         for worker in self.workers:
             if hasattr(self.nodes[worker], "stats"):
                 self.all_workers[worker] = self.nodes[worker].stats
+
+    def _get_workers(self, request):
+        """Get worker statistics"""
+        if not self.all_workers:
+            # only gather all worker information if not done so already
+            self.get_workers()
+
+        self.response_queue.put({"status": "SUCCESS", "return": self.all_workers})
 
     def request_worker_stats(self, send_to=None):
         for worker_id in self.workers:

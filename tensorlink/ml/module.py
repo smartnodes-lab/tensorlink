@@ -1,7 +1,9 @@
 import logging
 from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
 from collections import defaultdict
-from transformers import PreTrainedModel
+
+from accelerate import init_empty_weights
+from transformers import PreTrainedModel, AutoConfig, AutoModel
 from transformers.utils import ModelOutput
 import torch.optim as optim
 import torch.nn as nn
@@ -159,6 +161,7 @@ class DistributedModel(nn.Module):
         # Distributed graph and parameters
         self.distributed_graph: Dict[str, Any] = {}
         self.parameters_storage: Dict[str, torch.Tensor] = {}
+        self.my_modules = set()
 
         # Set device
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -535,14 +538,12 @@ class DistributedModel(nn.Module):
             config = self.parse_model(self.model, self.max_module_size)
 
         self.distributed_graph = config
-        for mod_info in config.values():
-            mod_id = mod_info["mod_id"]
-            module_hash = mod_info["id_hash"]
-            worker_id = mod_info["workers"][0]
-            if isinstance(self.model, str):
-                self.wrap_hf_model(module_hash, worker_id)
-            else:
-                self.wrap_module(mod_id, worker_id)
+
+        if isinstance(self.model, str):
+            self._load_model_skeleton()
+            self._wrap_hf_model(config)
+        else:
+            self.wrap_module(config)
 
         if len(config) == 1:
             module, module_name = access_module(self.model, [-1])
@@ -669,16 +670,19 @@ class DistributedModel(nn.Module):
         else:
             setattr(self, "model", offloaded_module)
 
-    def wrap_hf_model(self, module_hash, worker_id):
-        file_name = f"{module_hash}_{worker_id}.pt"
-        module_info = str(PreTrainedModel)
-        offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
-        with open(file_name, "wb") as f:
-            f.close()
+    def _wrap_hf_model(self, config: dict):
+        # Iterate through each worker and their assigned modules
+        for module_id, worker_modules in config.items():
+            worker_id = next(iter(worker_modules.values())).get("assigned_workers")[0]
+            file_name = f"{module_id}_{worker_id}.pt"
+            module_info = str(PreTrainedModel)
+            offloaded_module = OffloadedModule(self, module_info, worker_id, module_id)
+            with open(file_name, "wb") as f:
+                f.close()
 
-        # Spawn a worker thread for the offloaded module
-        offloaded_module.spawn_worker(file_name)
-        setattr(self, "model", offloaded_module)
+            # Spawn a worker thread for the offloaded module
+            offloaded_module.spawn_worker(file_name)
+            setattr(self, "model", offloaded_module)
 
     def send_request(self, request_type, args):
         """
@@ -757,6 +761,18 @@ class DistributedModel(nn.Module):
         self.create_optimizer = lambda **kwargs: create_distributed_optimizer(
             self, optimizer_type, **kwargs
         )
+
+    def _load_model_skeleton(self):
+        """Load the HF model structure with empty weights"""
+        model_config = AutoConfig.from_pretrained(self.name)
+        with init_empty_weights():
+            self.model = AutoModel.from_config(model_config)
+
+    def _load_assigned_weights(self, config: Dict):
+        """Load weights only for modules assigned to us"""
+        for module_path, cfg in config:
+            if cfg.get("type", "") == "loaded":
+                self.my_modules.add()
 
 
 class OffloadedModule(nn.Module):

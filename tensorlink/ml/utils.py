@@ -24,6 +24,95 @@ def format_memory_size(number: int) -> str:
     return f"{number:.2f} TB"
 
 
+def estimate_memory(
+    module: nn.Module,
+    training: bool = True,
+    batch_size: int = 256,
+    seq_length: int = 128,
+    dtype: torch.dtype = torch.float16,
+    optimizer_type: str = "adam",
+    include_kv_cache: bool = True,
+) -> tuple[float, dict]:
+    """
+    Estimate total memory usage (in bytes) for a PyTorch nn.Module, including
+    parameters, gradients, activations, optimizer state, and KV cache if applicable.
+
+    Returns (total_bytes, breakdown_dict).
+    """
+    if not training:
+        batch_size = 1
+
+    # --- Basic dtype sizing ---
+    dtype_size = torch.tensor([], dtype=dtype).element_size()
+
+    breakdown = {
+        "parameters": 0,
+        "gradients": 0,
+        "optimizer": 0,
+        "activations": 0,
+        "kv_cache": 0,
+    }
+
+    # --- Parameter + gradient size ---
+    param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
+
+    breakdown["parameters"] = param_bytes
+
+    if training:
+        grad_bytes = param_bytes  # same size as params
+        breakdown["gradients"] = grad_bytes
+
+        # Optimizer multiplier (depends on optimizer type)
+        if optimizer_type.lower() in {"adam", "adamw"}:
+            opt_mult = 2  # two moments per param
+        elif optimizer_type.lower() in {"sgd", "momentum"}:
+            opt_mult = 1
+        else:
+            opt_mult = 1.5
+        breakdown["optimizer"] = param_bytes * opt_mult
+
+    # --- Activation estimate ---
+    # Try to infer hidden size / intermediate shape
+    hidden_size = None
+    num_layers = 1
+
+    # if transformer-like, pick up clues
+    for name, submodule in module.named_modules():
+        if isinstance(submodule, nn.MultiheadAttention):
+            hidden_size = submodule.embed_dim
+            num_layers += 1
+        elif hasattr(submodule, "hidden_size"):
+            hidden_size = getattr(submodule, "hidden_size")
+        elif isinstance(submodule, nn.TransformerEncoderLayer):
+            hidden_size = submodule.linear1.in_features
+            num_layers += 1
+
+    if hidden_size is None:
+        # heuristic based on roughly quadratic parameter scaling in transformers
+        hidden_size = int((param_bytes / dtype_size) ** 0.5)
+        hidden_size = max(256, min(hidden_size, 8192))
+
+    # Activation memory (forward + backward)
+    activation_bytes = batch_size * seq_length * hidden_size * dtype_size * 2
+    if training:
+        activation_bytes *= 2  # backward retains activations
+
+    breakdown["activations"] = activation_bytes
+
+    # --- KV cache (for transformers during inference) ---
+    if include_kv_cache and not training:
+        # assume num_heads ~ hidden_size/64
+        num_heads = max(1, hidden_size // 64)
+        head_dim = hidden_size // num_heads
+        kv_bytes = (
+            2 * num_layers * num_heads * head_dim * seq_length * batch_size * dtype_size
+        )
+        breakdown["kv_cache"] = kv_bytes
+
+    total = sum(breakdown.values())
+    return total, breakdown
+
+
 def estimate_hf_model_memory(
     model_name: str,
     batch_size: int = 1,
@@ -56,8 +145,9 @@ def estimate_hf_model_memory(
         config_path = hf_hub_download(repo_id=model_name, filename="config.json")
         with open(config_path, "r") as f:
             config = json.load(f)
-        ATTN_SCALE = 0.5  # was counting roughly 2× too many
-        FF_SCALE = 2 / 3  # reduces triple-count to 2×hidden×intermediate
+
+        ATTN_SCALE = 0.5
+        FF_SCALE = 2 / 3
 
         # Safe extraction with GPT/BERT naming variants
         hidden_size = (
@@ -97,16 +187,16 @@ def estimate_hf_model_memory(
 
         param_bytes = total_params * dtype_size
         breakdown = {
-            "parameters_gb": param_bytes / 1e9,
-            "activations_gb": 0,
-            "kv_cache_gb": 0,
-            "optimizer_gb": 0,
-            "gradients_gb": 0,
+            "parameters": param_bytes,
+            "activations": 0,
+            "kv_cache": 0,
+            "optimizer": 0,
+            "gradients": 0,
         }
 
         # Inference activations
         activation_bytes = batch_size * seq_length * hidden_size * dtype_size * 2
-        breakdown["activations_gb"] = activation_bytes / 1e9
+        breakdown["activations"] = activation_bytes
 
         # KV cache (optional)
         if include_kv_cache:
@@ -120,10 +210,10 @@ def estimate_hf_model_memory(
                 * batch_size
                 * dtype_size
             )
-            breakdown["kv_cache_gb"] = kv_bytes / 1e9
+            breakdown["kv_cache"] = kv_bytes
 
-        total_gb = sum(breakdown.values())
-        return total_gb, breakdown
+        total = sum(breakdown.values())
+        return total, breakdown
 
     except Exception as e:
         print(f"Error estimating memory for {model_name}: {e}")
@@ -160,49 +250,9 @@ def get_gpu_memory():
             memory += free
 
     else:
-        # TODO CPU should be able to handle 2 GB? (temporary fix)
-        memory += 2e9
+        memory += 3e8
 
     return memory
-
-
-def estimate_memory(
-    module: nn.Module,
-    training: bool = True,
-    batch_size: int = 256,
-    max_input_size=(3, 224, 224),
-):
-    """
-    Estimate the memory usage of a module in bytes, considering parameters and approximations
-    for activations without performing a forward pass.
-
-    Args:
-        module (nn.Module): The PyTorch module.
-        training (bool): True if training is required during module usage.
-        batch_size (int): The batch size of input data.
-        max_input_size (tuple): The size of a single input (C, H, W).
-
-    Returns:
-        int: The estimated memory usage in bytes.
-    """
-    element_size = next(module.parameters()).element_size()
-    memory_usage = sum([p.numel() * p.element_size() for p in module.parameters()])
-
-    # Estimate memory for gradients (same size as parameters during training)
-    if training:
-        memory_usage *= 2  # Gradients
-        memory_usage *= 2  # Optimizer estimate
-
-    input_size = batch_size
-    for i in range(len(max_input_size)):
-        input_size *= max_input_size[i]
-
-    activation_state = input_size * element_size
-
-    memory_usage += input_size
-    memory_usage += activation_state
-
-    return int(memory_usage)
 
 
 def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):

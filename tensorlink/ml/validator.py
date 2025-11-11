@@ -1,3 +1,5 @@
+import hashlib
+
 from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.module import DistributedModel
@@ -133,7 +135,11 @@ class DistributedValidator(DistributedWorker):
     def __init__(self, node, trusted=False):
         super().__init__(node, trusted)
         self.model_cache = load_models_cache()
-        self.models = {}
+        self.models = (
+            {}
+        )  # model_name -> list of module_ids or DistributedModel instance
+        self.model_state = {}  # "initializing" | "distributing" | "ready"
+
         self.tokenizers = {}
         self.GC_CHECK_INTERVAL = 1000
         self.CHECK_COUNTER = 1
@@ -251,6 +257,10 @@ class DistributedValidator(DistributedWorker):
         model_popularity.sort(key=lambda x: x[1], reverse=True)
         return [model_name for model_name, _ in model_popularity]
 
+    def _is_model_ready(self, model_name: str) -> bool:
+        """Check if a model is ready for inference"""
+        return model_name in self.models and self.model_state.get(model_name) == "ready"
+
     def _manage_auto_loaded_models(self):
         """Manage auto-loaded models based on popularity from JSON cache, falling back to DEFAULT_MODELS"""
         popular_models = self._get_popular_models()
@@ -283,7 +293,7 @@ class DistributedValidator(DistributedWorker):
 
         # Remove models not in the current priority list
         currently_loaded = [
-            name for name in self.models.keys() if isinstance(self.models[name], str)
+            name for name in self.models.keys() if self._is_model_ready(name)
         ]
         for model_name in currently_loaded:
             if model_name not in models_to_load:
@@ -308,11 +318,17 @@ class DistributedValidator(DistributedWorker):
         parser = ModelParser()
         model_name: str = job_data.get("model_name", model_name)
 
+        # Get network worker information to assign modules
+        workers = self.send_request("get_workers", None)
+
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
             model_name,
+            workers=workers,
             training=job_data.get("training", False),
             trusted=False,
+            handle_layers=False,
+            input_obfuscation=False,
         )
         job_data["distribution"] = distribution
 
@@ -353,9 +369,7 @@ class DistributedValidator(DistributedWorker):
 
                     # Check if jobs are still active
                     for model_name in list(self.models.keys()):
-                        if isinstance(
-                            self.models[model_name], str
-                        ):  # Only check fully loaded models
+                        if self._is_model_ready(model_name):
                             is_active = self.send_request("check_job", (model_name,))
                             if not is_active:
                                 self._remove_hosted_job(model_name)
@@ -395,15 +409,15 @@ class DistributedValidator(DistributedWorker):
                     self.inspect_model(model_name, job_data)
 
             # Check for inference generate calls
-            for model_name, module_id in self.models.items():
-                if (
-                    isinstance(module_id, str) and module_id in self.modules
-                ):  # Only process fully loaded models
-                    generate_request = self.send_request(
-                        "update_api_request", (model_name, module_id)
-                    )
-                    if generate_request:
-                        self._handle_generate_request(generate_request)
+            for model_name, module_ids in self.models.items():
+                if self._is_model_ready(model_name):
+                    for module_id in module_ids:
+                        if module_id in self.modules:
+                            generate_request = self.send_request(
+                                "update_api_request", (model_name, module_id)
+                            )
+                            if generate_request:
+                                self._handle_generate_request(generate_request)
 
         except Exception as e:
             logging.error(f"Error checking for jobs: {str(e)}")
@@ -413,13 +427,14 @@ class DistributedValidator(DistributedWorker):
     def _handle_check_model_status(self, model_name: str):
         """Check the loading status of a model"""
         if model_name in self.models:
-            module_id = self.models[model_name]
-            if isinstance(module_id, str):
+            module_ids = self.models[model_name]
+            if self._is_model_ready(model_name):
                 # Model is fully loaded
                 return {
                     "status": "loaded",
                     "message": f"Model {model_name} is loaded and ready",
-                    "module_id": module_id,
+                    "module_ids": module_ids,
+                    "num_modules": len(module_ids),
                 }
             else:
                 # Model is in the process of loading
@@ -427,6 +442,7 @@ class DistributedValidator(DistributedWorker):
                     "status": "loading",
                     "message": f"Model {model_name} is currently loading",
                 }
+
         elif model_name in self.models_initializing:
             return {
                 "status": "loading",
@@ -472,15 +488,12 @@ class DistributedValidator(DistributedWorker):
         # Record the request for tracking
         self._record_request(request.hf_name)
 
-        if request.hf_name not in self.models or not isinstance(
-            self.models[request.hf_name], str
-        ):
+        if not self._is_model_ready(request.hf_name):
             request.output = (
                 "Model is currently not available through the Tensorlink API."
             )
         else:
-            module_id = self.models[request.hf_name]
-            model = self.modules[module_id]
+            distributed_model = self.models[request.hf_name]
             tokenizer = self.tokenizers[request.hf_name]
 
             # Format chat history into a standardized prompt
@@ -498,7 +511,7 @@ class DistributedValidator(DistributedWorker):
 
             # Generate
             with torch.no_grad():
-                outputs = model.generate(
+                outputs = distributed_model.generate(
                     inputs.input_ids,
                     max_new_tokens=(
                         request.max_new_tokens
@@ -557,8 +570,13 @@ class DistributedValidator(DistributedWorker):
                 return
 
             # Create distributed model instance
-            distributed_model = DistributedModel(model_name, node=self.node)
+            distributed_model = DistributedModel(
+                model_name,
+                node=self.node,
+                training=False,
+            )
             self.models[model_name] = distributed_model
+            self.model_state[model_name] = "initializing"
 
             # Prepare job data for inspection
             job_data = {
@@ -590,6 +608,8 @@ class DistributedValidator(DistributedWorker):
             self.models_initializing.discard(model_name)
             if model_name in self.models:
                 del self.models[model_name]
+            if model_name in self.model_state:
+                del self.model_state[model_name]
 
     def _finalize_hosted_job(self, model_name: str):
         """Finalize a hosted job by setting up the distributed model with workers."""
@@ -597,31 +617,32 @@ class DistributedValidator(DistributedWorker):
             # Check if we have module info ready
             args = self.send_request("check_module", None)
 
-            if not args or not isinstance(args, tuple):
+            if not args or not isinstance(args, dict):
                 # Module not ready yet
                 return False
+
+            model_name = args["model_name"]
+            distribution = args["distribution"]
+            optimizer_name = args["optimizer"]
+            training = args["training"]
 
             # Check if model is in initialization state
             if model_name not in self.models:
                 return False
 
-            # Unpack module information
-            (
-                file_name,
-                module_id,
-                distribution,
-                module_name,
-                optimizer_name,
-                training,
-            ) = args
+            # Get the DistributedModel instance
+            distributed_model = self.models[model_name]
 
-            # Move from initialization to active state
-            distributed_model = self.models.pop(model_name)
-            self.modules[module_id] = distributed_model
-            self.models[model_name] = module_id
+            # Update state
+            self.model_state[model_name] = "distributing"
+
+            # Register the distributed model's modules
+            for module_id, module_info in distribution.items():
+                module_id = hashlib.sha256(json.dumps(module_info).encode()).hexdigest()
+                self.modules[module_id] = module_info
 
             # Distribute the model across workers
-            self.modules[module_id].distribute_model(distribution)
+            distributed_model.distribute_model(distribution)
 
             # Ensure workers are registered
             for dist_module_id, dist_module_info in distribution.items():
@@ -636,7 +657,8 @@ class DistributedValidator(DistributedWorker):
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
-            # Remove from initializing set
+            # Mark as ready
+            self.model_state[model_name] = "ready"
             self.models_initializing.discard(model_name)
 
             self.send_request(
@@ -663,11 +685,6 @@ class DistributedValidator(DistributedWorker):
             # Remove from initializing set if present
             self.models_initializing.discard(model_name)
 
-            # Get the module_id if the model is tracked
-            module_id = None
-            if model_name in self.models:
-                module_id = self.models[model_name]
-
             # Clean up tokenizer
             if model_name in self.tokenizers:
                 del self.tokenizers[model_name]
@@ -678,32 +695,47 @@ class DistributedValidator(DistributedWorker):
 
             # Clean up model reference
             if model_name in self.models:
-                del self.models[model_name]
-                self.send_request(
-                    "debug_print",
-                    (
-                        f"Removed model reference for {model_name}",
-                        "yellow",
-                        logging.INFO,
-                    ),
-                )
+                distributed_model = self.models[model_name]
 
-            # Clean up module if it exists
-            if isinstance(module_id, str) and module_id in self.modules:
-                # Notify the module to clean up its distributed components
+                # Call cleanup on the distributed model - it handles all internal module cleanup
                 try:
-                    if hasattr(self.modules[module_id], 'cleanup_distributed_model'):
-                        self.modules[module_id].cleanup_distributed_model()
+                    if hasattr(distributed_model, 'cleanup_distributed_model'):
+                        distributed_model.cleanup_distributed_model()
                 except Exception as e:
                     logging.warning(
                         f"Error during distributed model cleanup for {model_name}: {str(e)}"
                     )
 
+                del self.models[model_name]
+                self.send_request(
+                    "debug_print",
+                    (
+                        f"Removed distributed model for {model_name}",
+                        "yellow",
+                        logging.INFO,
+                    ),
+                )
+
+            # Clean up state tracking
+            if model_name in self.model_state:
+                del self.model_state[model_name]
+
+            # Find and remove any module entries that reference this model
+            modules_to_remove = []
+            for module_id, module_data in self.modules.items():
+                # Check if this module belongs to the model we're removing
+                if isinstance(module_data, DistributedModel) and hasattr(
+                    module_data, 'model_name'
+                ):
+                    if module_data.model_name == model_name:
+                        modules_to_remove.append(module_id)
+
+            for module_id in modules_to_remove:
                 del self.modules[module_id]
                 self.send_request(
                     "debug_print",
                     (
-                        f"Removed module {module_id} for {model_name}",
+                        f"Removed module reference {module_id} for {model_name}",
                         "yellow",
                         logging.INFO,
                     ),
@@ -762,4 +794,4 @@ class DistributedValidator(DistributedWorker):
 
     def main_loop(self):
         self.check_node()
-        time.sleep(0.005)
+        time.sleep(0.001)

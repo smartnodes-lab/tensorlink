@@ -6,6 +6,7 @@ import io
 import time
 import torch
 import torch.amp as amp
+from accelerate import init_empty_weights
 from huggingface_hub import HfApi
 from transformers import (
     AutoConfig,
@@ -129,7 +130,7 @@ class DistributedWorker:
         finally:
             self.mpc_lock.release()
 
-    def handle_backward(self, module_id, tag, loss_relay):
+    def _handle_backward(self, module_id, tag, loss_relay):
         """Handle backward pass with mixed precision support"""
         module = self.modules[module_id]
         n_batch = module.n_batch
@@ -296,10 +297,9 @@ class DistributedWorker:
 
     def load_module(
         self,
-        file_name=None,
         module_id=None,
         node_id=None,
-        module_name=None,
+        model_name=None,
         optimizer_name=None,
         training=False,
     ):
@@ -309,43 +309,30 @@ class DistributedWorker:
         For direct HuggingFace loading without a file, just provide module_name.
         Default parameters allow for simplified calling when loading generic models.
         """
-        # Special case: Loading directly from HuggingFace with just module_name
-        if file_name is None and module_name is not None:
-            # Generate unique module_id if not provided
-            if module_id is None:
-                module_id = (
-                    f"hf_model_{module_name.replace('/', '_')}_{int(time.time())}"
-                )
+        if module_id is None:
+            raise ValueError("For standard loading, module_id must be provided")
 
-            # Load from HuggingFace
-            module = self._load_huggingface_model(module_name)
+        # Try to load the module based on trusted status
+        if self.trusted:
+            with open(module_id, "rb") as f:
+                module = pickle.load(f)
+                module = module.to(self.device)
 
-        # Standard loading from file path
+        # Else try Hugging Face for model info
         else:
-            if file_name is None or module_id is None:
-                raise ValueError(
-                    "For standard loading, file_name and module_id must be provided"
-                )
+            self._load_model_skeleton(model_name, module_id)
 
-            # Try to load the module based on trusted status
-            if self.trusted:
-                with open(file_name, "rb") as f:
-                    module = pickle.load(f)
-                    module = module.to(self.device)
+            module = self._initialize_model_from_config(module_name, file_name)
 
-            # Else try Hugging Face for model info
-            elif len(module_name) > 0:
-                module = self._load_huggingface_model(module_name, file_name)
+        #   else:
+        #     # Load TorchScript model
+        #     if self.device.type == "cuda":
+        #         module = torch.jit.load(file_name, map_location=self.device)
+        #     else:
+        #         module = torch.jit.load(file_name)
 
-            #   else:
-            #     # Load TorchScript model with device placement
-            #     if self.device.type == "cuda":
-            #         module = torch.jit.load(file_name, map_location=self.device)
-            #     else:
-            #         module = torch.jit.load(file_name)
-
-            # Cleanup file
-            os.remove(file_name)
+        # Cleanup file
+        os.remove(module_id)
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -372,7 +359,7 @@ class DistributedWorker:
 
         self.send_request("module_loaded", module_id)
 
-    def _load_huggingface_model(self, module_name, file_name: str = None):
+    def _initialize_model_from_config(self, module_name, file_name: str = None):
         """Load any Hugging Face model using config to pick the right class."""
         try:
             config = AutoConfig.from_pretrained(module_name)
@@ -529,16 +516,13 @@ class DistributedWorker:
         # If we have received model info now load the model in this process
         if isinstance(args, tuple):
             (
-                file_name,
                 module_id,
                 node_id,
-                module_name,
+                model_name,
                 optimizer_name,
                 training,
             ) = args
-            self.load_module(
-                file_name, module_id, node_id, module_name, optimizer_name, training
-            )
+            self.load_module(module_id, node_id, model_name, optimizer_name, training)
 
         # For workers that have received model info, now load the model in this process
         elif isinstance(args, str):
@@ -606,10 +590,19 @@ class DistributedWorker:
                 backward_task = self.send_request("check_backward", module_id)
                 if backward_task:
                     tag, loss_relay = backward_task
-                    self.handle_backward(module_id, tag, loss_relay)
+                    self._handle_backward(module_id, tag, loss_relay)
 
         # Small sleep to prevent CPU hogging
         time.sleep(0.001)
+
+    def _load_model_skeleton(self, model_name: str, module_id: str):
+        """Load the full model structure with empty weights"""
+        model_config = AutoConfig.from_pretrained(model_name)
+        with init_empty_weights():
+            skeleton_model = AutoModel.from_config(model_config)
+
+        skeleton_model.eval()  # Set to eval mode initially
+        self.modules[module_id] = skeleton_model
 
     def run(self):
         """Main execution thread"""
