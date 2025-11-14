@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Literal
 
 
@@ -29,6 +29,8 @@ class GenerationRequest(BaseModel):
 
 
 class ModelStatusResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_name: str
     status: str  # "loaded", "loading", "not_loaded", "error"
     message: str
