@@ -9,12 +9,125 @@ import textwrap
 import hashlib
 import inspect
 import random
+import re
 
 
 class AssignmentError(Exception):
     """Raised when a module cannot be assigned to any worker."""
 
     pass
+
+
+def _create_grouped_entry(parent_path: str, group: list) -> dict:
+    """
+    Create a single config entry for a group of consecutive layers.
+    """
+    if len(group) == 1:
+        # Single layer, return as-is
+        _, path, cfg = group[0]
+        return {path: cfg}
+
+    # Multiple layers - create grouped entry
+    layer_indices = [idx for idx, _, _ in group]
+    paths = [path for _, path, _ in group]
+    configs = [cfg for _, _, cfg in group]
+
+    start_idx = min(layer_indices)
+    end_idx = max(layer_indices)
+
+    # Use range notation in the key
+    grouped_path = f"{parent_path}{start_idx}-{end_idx}"
+
+    # Merge configurations
+    total_memory = sum(cfg.get("memory", 0) for cfg in configs)
+    worker = configs[0]["assigned_workers"][0]
+
+    grouped_config = {
+        "type": "offloaded_group",
+        "name": configs[0].get("name", ""),
+        "assigned_workers": [worker],
+        "layer_range": (start_idx, end_idx),
+        "layer_paths": paths,
+        "memory": total_memory,
+        "module": configs[0].get("module", ""),
+        "training": configs[0].get("training", False),
+        "optimizer_type": configs[0].get("optimizer_type", "adam"),
+        "num_layers": len(group),
+    }
+
+    # Preserve parent_forward_code if present
+    if "parent_forward_code" in configs[0]:
+        grouped_config["parent_forward_code"] = configs[0]["parent_forward_code"]
+        grouped_config["parent_module_path"] = configs[0]["parent_module_path"]
+
+    return {grouped_path: grouped_config}
+
+
+def _group_sequential_layers(config: dict) -> dict:
+    """
+    Group consecutive layers assigned to the same worker into single entries.
+
+    For example:
+    model.layers.0 -> worker1
+    model.layers.1 -> worker1
+    model.layers.2 -> worker1
+
+    Becomes:
+    model.layers.0-2 -> worker1
+    """
+    # Group paths by their parent and extract layer patterns
+    layer_groups = defaultdict(list)
+
+    for path, cfg in config.items():
+        if cfg.get("type") != "offloaded":
+            continue
+
+        # Match patterns like "model.layers.0", "model.encoder.layer.5", etc.
+        match = re.match(r'^(.+\.)(\d+)$', path)
+        if match:
+            parent_path = match.group(1)  # e.g., "model.layers."
+            layer_idx = int(match.group(2))
+            layer_groups[parent_path].append((layer_idx, path, cfg))
+
+    # Create new grouped config
+    new_config = {}
+    processed_paths = set()
+
+    for parent_path, layers in layer_groups.items():
+        # Sort by layer index
+        layers.sort(key=lambda x: x[0])
+
+        # Group consecutive layers with same worker
+        current_group = []
+        current_worker = None
+
+        for layer_idx, path, cfg in layers:
+            worker = cfg["assigned_workers"][0] if cfg["assigned_workers"] else None
+
+            if worker == current_worker and current_group:
+                # Extend current group
+                current_group.append((layer_idx, path, cfg))
+            else:
+                # Save previous group if exists
+                if current_group:
+                    new_config.update(_create_grouped_entry(parent_path, current_group))
+                    processed_paths.update(p for _, p, _ in current_group)
+
+                # Start new group
+                current_group = [(layer_idx, path, cfg)]
+                current_worker = worker
+
+        # Don't forget the last group
+        if current_group:
+            new_config.update(_create_grouped_entry(parent_path, current_group))
+            processed_paths.update(p for _, p, _ in current_group)
+
+    # Add all non-layer modules that weren't grouped
+    for path, cfg in config.items():
+        if path not in processed_paths:
+            new_config[path] = cfg
+
+    return new_config
 
 
 class ModelParser:
@@ -76,6 +189,8 @@ class ModelParser:
                 optimizer_type=optimizer_type,
             )
 
+            config = _group_sequential_layers(config)
+
         except AssignmentError:
             success = False
 
@@ -101,7 +216,7 @@ class ModelParser:
             ids = []
 
         memory, breakdown = estimate_memory(
-            module, training, batch_size=1024, optimizer_type=optimizer_type
+            module, training, seq_length=1024, optimizer_type=optimizer_type
         )
 
         assigned_worker = self._try_assign_worker(
@@ -241,3 +356,35 @@ class ModelParser:
                     f"Could not extract forward code for {module_class.__name__}: {e}"
                 )
             return None
+
+
+class ModelSegmentAnalyzer:
+    """
+    Analyzes the forward method of a model to identify three key segments:
+    1. Pre-offload: Model chunk executed on
+    """
+
+
+"""
+Example workflow
+
+
+def forward(self, x):
+    x = self.layer1(x)
+    
+    for i in range(len(self.layerlist)):
+        x = self.layerlist[i](x)  # if i > 2, worker 2 is used instead
+        
+        
+worker1: 
+x = self.layer1(x)
+for i in range(2):
+    x = self.layerslist[i](x)
+
+
+worker2:
+
+for i in range(3,5):
+    x = self.layerslist[i](x)
+    
+"""

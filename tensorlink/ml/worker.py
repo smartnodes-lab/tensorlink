@@ -4,30 +4,14 @@ import os
 import pickle
 import io
 import time
+import glob
 import torch
 import torch.amp as amp
 from accelerate import init_empty_weights
-from huggingface_hub import HfApi
-from transformers import (
-    AutoConfig,
-    AutoModel,
-    AutoModelForAudioClassification,
-    AutoModelForCausalLM,
-    AutoModelForCTC,
-    AutoModelForImageClassification,
-    AutoModelForMaskedLM,
-    AutoModelForMultipleChoice,
-    AutoModelForNextSentencePrediction,
-    AutoModelForObjectDetection,
-    AutoModelForPreTraining,
-    AutoModelForQuestionAnswering,
-    AutoModelForSemanticSegmentation,
-    AutoModelForSequenceClassification,
-    AutoModelForSpeechSeq2Seq,
-    AutoModelForTokenClassification,
-    AutoModelForVision2Seq,
-    AutoModelForSeq2SeqLM,
-)
+from typing import Optional, List, Dict, Any
+from transformers import AutoConfig, AutoModel
+from safetensors import safe_open
+from huggingface_hub import snapshot_download, HfApi
 
 from tensorlink.ml.utils import (
     get_optimizer_from_name,
@@ -41,23 +25,71 @@ from tensorlink.ml.utils import (
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 
-MODEL_TYPE_MAPPING = {
-    "ForSequenceClassification": AutoModelForSequenceClassification,
-    "ForTokenClassification": AutoModelForTokenClassification,
-    "ForQuestionAnswering": AutoModelForQuestionAnswering,
-    "ForMaskedLM": AutoModelForMaskedLM,
-    "ForNextSentencePrediction": AutoModelForNextSentencePrediction,
-    "ForMultipleChoice": AutoModelForMultipleChoice,
-    "ForPreTraining": AutoModelForPreTraining,
-    "ForCausalLM": AutoModelForCausalLM,
-    "ForImageClassification": AutoModelForImageClassification,
-    "ForSemanticSegmentation": AutoModelForSemanticSegmentation,
-    "ForObjectDetection": AutoModelForObjectDetection,
-    "ForAudioClassification": AutoModelForAudioClassification,
-    "ForCTC": AutoModelForCTC,
-    "ForSpeechSeq2Seq": AutoModelForSpeechSeq2Seq,
-    "ForVision2Seq": AutoModelForVision2Seq,
-}
+def _get_nested_module(model: torch.nn.Module, path: str) -> torch.nn.Module:
+    """
+    Navigate to a nested module using dot notation path.
+    Example: 'model.layers.0' -> returns model.layers[0]
+    """
+    parts = path.split('.')
+    current = model
+
+    if parts[0] == "model":
+        parts = parts[1:]
+
+    # Skip 'model' prefix if present (first attribute is always the model itself)
+    for part in parts:
+        if part.isdigit():
+            # Handle list/ModuleList indexing
+            current = current[int(part)]
+        else:
+            # Handle attribute access
+            current = getattr(current, part)
+
+    return current
+
+
+def _load_from_pytorch_bins(
+    model_path: str, layer_paths: List[str]
+) -> Dict[str, torch.Tensor]:
+    """
+    Fallback method to load weights from pytorch_model.bin files.
+    Uses local model_path from snapshot_download.
+    """
+    import glob
+
+    state_dict = {}
+
+    # Find all bin files in the model directory
+    bin_files = glob.glob(os.path.join(model_path, "*.bin"))
+
+    if not bin_files:
+        raise ValueError(f"No weight files found in {model_path}")
+
+    logging.info(f"Found {len(bin_files)} pytorch bin files")
+
+    layer_prefixes = set()
+    for path in layer_paths:
+        layer_prefixes.add(path + '.')
+
+    for bin_path in bin_files:
+        logging.info(f"Loading weights from {os.path.basename(bin_path)}")
+
+        # Load the bin file
+        shard_state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
+
+        # Extract only the weights we need
+        for key, tensor in shard_state_dict.items():
+            for prefix in layer_prefixes:
+                if key.startswith(prefix):
+                    relative_key = key[len(prefix.rstrip('.') + '.') :]
+                    state_dict[relative_key] = tensor
+                    break
+
+        # Clear memory
+        del shard_state_dict
+
+    logging.info(f"Loaded {len(state_dict)} weight tensors from pytorch bins")
+    return state_dict
 
 
 class DistributedWorker:
@@ -87,27 +119,109 @@ class DistributedWorker:
             self.compute_stream = torch.cuda.Stream()
             self.memory_stream = torch.cuda.Stream()
 
+        self.hf_cache_dir = os.environ.get(
+            'HF_HOME', os.path.join(os.path.expanduser('~'), '.cache', 'huggingface')
+        )
+
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
         if self.device.type == "cuda":
-            # Optimize cuDNN for stable, reproducible results
             torch.backends.cudnn.enabled = True
-            torch.backends.cudnn.benchmark = (
-                True  # Auto-optimize convolution algorithms
-            )
+            torch.backends.cudnn.benchmark = True
 
             # Set memory allocation strategy
             torch.cuda.empty_cache()
-            # Set reasonable memory fraction to avoid OOM errors
             total_memory = torch.cuda.get_device_properties(0).total_memory
-            torch.cuda.set_per_process_memory_fraction(
-                0.85
-            )  # Use up to 85% of available memory
+            torch.cuda.set_per_process_memory_fraction(0.85)
 
             # Log CUDA configuration
             logging.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
             logging.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
             logging.info(f"Total CUDA memory: {total_memory / 1e9:.2f} GB")
+
+    def _load_specific_layer_weights(
+        self, model_name: str, layer_paths: List[str]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Load only the weights for specific layers from HuggingFace.
+        Uses safetensors for efficient weight loading without loading entire model.
+        """
+
+        state_dict = {}
+
+        try:
+            # Use snapshot_download which automatically:
+            # 1. Checks the global HF cache (~/.cache/huggingface/hub)
+            # 2. Returns cached path if model exists
+            # 3. Downloads only if not cached
+            logging.info(f"Checking cache for {model_name}")
+            model_path = snapshot_download(
+                repo_id=model_name,
+                cache_dir=self.hf_cache_dir,  # Use global HF cache
+                allow_patterns=[
+                    "*.safetensors",
+                    "*.bin",
+                    "*.json",
+                ],  # Include config files
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],  # Skip other formats
+                local_files_only=False,  # Will check cache first, download if needed
+            )
+            logging.info(f"Model located at: {model_path}")
+
+            # Find all safetensors files in the model directory
+            safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
+
+            if safetensor_files:
+                logging.info(f"Found {len(safetensor_files)} safetensors files")
+
+                # Create prefix patterns for our layers
+                layer_path_to_idx = {path: idx for idx, path in enumerate(layer_paths)}
+
+                # Load only matching weights from each file
+                for shard_path in safetensor_files:
+                    logging.info(f"Reading weights from {os.path.basename(shard_path)}")
+
+                    # Open safetensor file and selectively load weights
+                    with safe_open(shard_path, framework="pt", device="cpu") as f:
+                        keys_loaded = 0
+                        for key in f.keys():
+                            # Key format: "model.layers.0.self_attn.q_proj.weight"
+                            # We need to check if this belongs to any of our layer paths
+
+                            for layer_path, layer_idx in layer_path_to_idx.items():
+                                # Check if key starts with this layer path
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    # Extract the part after the layer path
+                                    # "model.layers.0.self_attn.q_proj.weight" -> "self_attn.q_proj.weight"
+                                    subkey = key[len(layer_prefix) :]
+
+                                    # Create new key with layer index
+                                    # "layers.0.self_attn.q_proj.weight"
+                                    new_key = f"layers.{layer_idx}.{subkey}"
+                                    state_dict[new_key] = f.get_tensor(key)
+                                    keys_loaded += 1
+                                    break
+
+                        if keys_loaded > 0:
+                            logging.info(
+                                f"  Loaded {keys_loaded} tensors from this shard"
+                            )
+
+                logging.info(
+                    f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
+                )
+
+            else:
+                # Fallback: use pytorch_model.bin files
+                logging.info("No safetensors found, trying pytorch_model.bin")
+                state_dict = _load_from_pytorch_bins(model_path, layer_paths)
+
+        except Exception as e:
+            logging.error(f"Error loading weights: {e}")
+            raise ValueError(f"Failed to load layer weights: {str(e)}")
+
+        return state_dict
 
     def send_request(self, request_type, args, timeout=None):
         """Send request to coordinator node with timeout handling"""
@@ -295,20 +409,17 @@ class DistributedWorker:
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    def load_module(
-        self,
-        module_id=None,
-        node_id=None,
-        model_name=None,
-        optimizer_name=None,
-        training=False,
-    ):
+    def load_module(self, module_info: dict):
         """
         Load and prepare model from file or directly from HuggingFace.
 
         For direct HuggingFace loading without a file, just provide module_name.
         Default parameters allow for simplified calling when loading generic models.
         """
+        module_id = module_info.get("module_id")
+        model_name = module_info.get("name")
+        module_name = module_info.get("module_name")
+
         if module_id is None:
             raise ValueError("For standard loading, module_id must be provided")
 
@@ -321,8 +432,9 @@ class DistributedWorker:
         # Else try Hugging Face for model info
         else:
             self._load_model_skeleton(model_name, module_id)
-
-            module = self._initialize_model_from_config(module_name, file_name)
+            module = self._initialize_model_from_config(
+                model_name, module_name, module_info
+            )
 
         #   else:
         #     # Load TorchScript model
@@ -359,74 +471,226 @@ class DistributedWorker:
 
         self.send_request("module_loaded", module_id)
 
-    def _initialize_model_from_config(self, module_name, file_name: str = None):
-        """Load any Hugging Face model using config to pick the right class."""
+    def _initialize_model_from_config(
+        self, model_name: str, module_name: str, module_info: Dict[str, Any]
+    ) -> torch.nn.Module:
+        """
+        Load model or specific layers from HuggingFace.
+        Handles both single modules and grouped layer ranges.
+        """
         try:
-            config = AutoConfig.from_pretrained(module_name)
+            # Load base model config
+            config = AutoConfig.from_pretrained(model_name)
 
-            # Determine the model class
-            model_class = None
+            # Determine if this is a grouped layer load
+            module_type = module_info.get('type', 'offloaded')
 
-            arch = getattr(config, "architectures", [None])[0]
-            if arch is not None:
-                arch = arch.lower()
-                if "lmhead" in arch:
-                    model_class = AutoModelForCausalLM
-                elif "forseq2seqlm" in arch or "bart" in arch or "t5" in arch:
-                    model_class = AutoModelForSeq2SeqLM
-                elif "model" in arch:
-                    model_class = AutoModel
+            if module_type == 'offloaded_group':
+                # Load grouped layers
+                return self._load_grouped_layers(model_name, config, module_info)
             else:
-                # fallback by model_type
-                if getattr(config, "is_decoder", False):
-                    model_class = AutoModelForCausalLM
-                elif getattr(config, "encoder_decoder", False):
-                    model_class = AutoModelForSeq2SeqLM
-                else:
-                    model_class = AutoModel
-
-            # Load the model
-            if (
-                file_name is None
-                or os.stat(file_name).st_size == 0
-                or file_name == module_name
-            ):
-                if self.device.type == "cuda":
-                    module = model_class.from_pretrained(
-                        module_name,
-                        device_map="auto",
-                        torch_dtype=(torch.float16 if self.use_amp else torch.float32),
-                    )
-                else:
-                    module = model_class.from_pretrained(module_name)
-            else:
-                # Local file loading (same as before)
-                with open(file_name, "rb") as f:
-                    metadata_size = int.from_bytes(f.read(4), "big")
-                    f.read(metadata_size)  # skip metadata
-                    state_dict_bytes = f.read()
-                    state_dict_buffer = io.BytesIO(state_dict_bytes)
-                    map_location = self.device if self.device.type == "cuda" else "cpu"
-                    received_state_dict = torch.load(
-                        state_dict_buffer, map_location=map_location, weights_only=True
-                    )
-
-                module = model_class.from_pretrained(
-                    module_name,
-                    device_map="auto" if self.device.type == "cuda" else None,
-                )
-                model_state_dict = module.state_dict()
-                new_state_dict = {
-                    k: received_state_dict[v]
-                    for k, v in zip(model_state_dict.keys(), received_state_dict.keys())
-                }
-                module.load_state_dict(new_state_dict, strict=False)
-
-            return module
+                # Load single module
+                return self._load_single_module(model_name, config, module_info)
 
         except Exception as e:
+            logging.error(f"Failed to load model from HuggingFace: {str(e)}")
             raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
-            # TODO route error to validator for reporting
+
+    def _load_grouped_layers(
+        self, model_name: str, config: AutoConfig, module_info: Dict[str, Any]
+    ) -> torch.nn.Module:
+        """
+        Load a group of layers (e.g., layers 0-19 of a transformer) as a single module.
+        Uses empty weights initialization and only loads required layer weights.
+        """
+        layer_paths = module_info.get('layer_paths', [])
+        layer_range = module_info.get('layer_range', [])
+        parent_forward_code = module_info.get('parent_forward_code', None)
+
+        if not layer_paths:
+            raise ValueError("layer_paths must be provided for grouped layer loading")
+
+        logging.info(
+            f"Loading grouped layers {layer_range[0]}-{layer_range[1]} from {model_name}"
+        )
+
+        # Initialize model with empty weights (no memory overhead)
+        with init_empty_weights():
+            base_model = AutoModel.from_config(config)
+
+        # Create the layer group wrapper with empty weights
+        grouped_module = self._create_layer_group_wrapper(
+            base_model, layer_paths, parent_forward_code
+        )
+
+        # Now load only the weights for the assigned layers
+        logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
+        state_dict = self._load_specific_layer_weights(model_name, layer_paths)
+
+        # Load the state dict into the grouped module
+        grouped_module = grouped_module.to_empty(device=self.device)
+        missing_keys, unexpected_keys = grouped_module.load_state_dict(
+            state_dict, strict=False
+        )
+
+        # Clean up base model to free memory
+        del base_model
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logging.info(f"Successfully loaded {len(layer_paths)} layers with weights")
+
+        return grouped_module
+
+    def _load_single_module(
+        self, model_name: str, config: AutoConfig, module_info: Dict[str, Any]
+    ) -> torch.nn.Module:
+        """
+        Load a single module (e.g., just the RMSNorm layer).
+        Uses empty weights initialization and only loads required module weights.
+        """
+        parent_module_path = module_info.get('parent_module_path', '')
+        module_class_name = module_info.get('module', '')
+
+        logging.info(f"Loading single module {module_class_name} from {model_name}")
+
+        # Initialize model with empty weights
+        with init_empty_weights():
+            base_model = AutoModel.from_config(config)
+
+        # Extract the specific module with empty weights
+        if parent_module_path:
+            target_module = _get_nested_module(base_model, parent_module_path)
+        else:
+            target_module = base_model
+
+        # Load only the weights for this specific module
+        logging.info(f"Loading weights for {parent_module_path}")
+        state_dict = self._load_specific_layer_weights(model_name, [parent_module_path])
+
+        # Load the state dict
+        target_module.load_state_dict(state_dict, strict=False)
+
+        # Move to device
+        target_module = target_module.to(self.device)
+
+        # Clean up
+        del base_model
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logging.info(f"Successfully loaded single module {module_class_name}")
+
+        return target_module
+
+    def _create_layer_group_wrapper(
+        self,
+        base_model: torch.nn.Module,
+        layer_paths: List[str],
+        parent_forward_code: Optional[str] = None,
+    ) -> torch.nn.Module:
+        """
+        Create a wrapper module that processes multiple layers sequentially.
+        This allows the worker to process all layers in one forward pass.
+        """
+
+        class LayerGroupModule(torch.nn.Module):
+            def __init__(
+                self, layers: List[torch.nn.Module], forward_logic: Optional[str] = None
+            ):
+                super().__init__()
+                self.layers = torch.nn.ModuleList(layers)
+                self.forward_logic = forward_logic
+                self.num_layers = len(layers)
+
+            def forward(self, hidden_states, *args, **kwargs):
+                """
+                Process input through all layers sequentially.
+                Handles common transformer layer arguments like attention_mask, position_ids, etc.
+                """
+                # If custom forward logic is provided, use it
+                if self.forward_logic:
+                    # Create local namespace with necessary variables
+                    local_vars = {
+                        'hidden_states': hidden_states,
+                        'layers': self.layers,
+                        'torch': torch,
+                        **kwargs,
+                    }
+                    # Execute custom forward logic
+                    exec(self.forward_logic, {}, local_vars)
+                    return local_vars.get('output', local_vars.get('hidden_states'))
+
+                # Default forward pass through all layers
+                output = hidden_states
+
+                # Extract common transformer arguments
+                attention_mask = kwargs.get('attention_mask', None)
+                position_ids = kwargs.get('position_ids', None)
+                past_key_values = kwargs.get('past_key_values', None)
+                use_cache = kwargs.get('use_cache', False)
+                output_attentions = kwargs.get('output_attentions', False)
+                output_hidden_states = kwargs.get('output_hidden_states', False)
+
+                all_hidden_states = () if output_hidden_states else None
+                all_self_attentions = () if output_attentions else None
+                next_decoder_cache = () if use_cache else None
+
+                for idx, layer in enumerate(self.layers):
+                    if output_hidden_states:
+                        all_hidden_states = all_hidden_states + (output,)
+
+                    # Prepare layer inputs
+                    layer_kwargs = {}
+                    if attention_mask is not None:
+                        layer_kwargs['attention_mask'] = attention_mask
+                    if position_ids is not None:
+                        layer_kwargs['position_ids'] = position_ids
+                    if past_key_values is not None:
+                        layer_kwargs['past_key_value'] = (
+                            past_key_values[idx] if idx < len(past_key_values) else None
+                        )
+                    if use_cache:
+                        layer_kwargs['use_cache'] = use_cache
+                    if output_attentions:
+                        layer_kwargs['output_attentions'] = output_attentions
+
+                    # Process through layer
+                    layer_outputs = layer(output, **layer_kwargs)
+
+                    # Handle different output formats
+                    if isinstance(layer_outputs, tuple):
+                        output = layer_outputs[0]
+                        if use_cache:
+                            next_decoder_cache = next_decoder_cache + (
+                                layer_outputs[-1],
+                            )
+                        if output_attentions:
+                            all_self_attentions = all_self_attentions + (
+                                layer_outputs[1],
+                            )
+                    else:
+                        output = layer_outputs
+
+                # Construct return value based on requested outputs
+                if not (use_cache or output_attentions or output_hidden_states):
+                    return output
+
+                result = (output,)
+                if output_hidden_states:
+                    result = result + (all_hidden_states,)
+                if output_attentions:
+                    result = result + (all_self_attentions,)
+                if use_cache:
+                    result = result + (next_decoder_cache,)
+
+                return result
+
+        # Extract the actual layer modules
+        layers = [_get_nested_module(base_model, path) for path in layer_paths]
+
+        # Create and return the wrapper
+        return LayerGroupModule(layers, parent_forward_code)
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""
@@ -514,15 +778,8 @@ class DistributedWorker:
         args = self.send_request("check_module", None)
 
         # If we have received model info now load the model in this process
-        if isinstance(args, tuple):
-            (
-                module_id,
-                node_id,
-                model_name,
-                optimizer_name,
-                training,
-            ) = args
-            self.load_module(module_id, node_id, model_name, optimizer_name, training)
+        if isinstance(args, dict):
+            self.load_module(args)
 
         # For workers that have received model info, now load the model in this process
         elif isinstance(args, str):

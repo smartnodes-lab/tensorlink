@@ -284,7 +284,6 @@ class DistributedValidator(DistributedWorker):
                     "debug_print",
                     (f"Auto-loading model: {model_name}", "green", logging.INFO),
                 )
-                self.models_initializing.add(model_name)
                 self._initialize_hosted_job(model_name)
 
         # Try to finalize models that are initializing
@@ -313,7 +312,7 @@ class DistributedValidator(DistributedWorker):
                         )
                         self._remove_hosted_job(model_name)
 
-    def inspect_model(self, model_name: str, job_data: dict):
+    def inspect_model(self, model_name: str, job_data: dict) -> dict:
         """Inspect a model to determine network requirements and store distribution in JSON cache"""
         parser = ModelParser()
         model_name: str = job_data.get("model_name", model_name)
@@ -350,7 +349,9 @@ class DistributedValidator(DistributedWorker):
 
         # Send out job request
         try:
-            self.send_request("send_job_request", job_data)
+            new_job_data = self.send_request("send_job_request", job_data)
+            return new_job_data
+
         except Exception as e:
             print(str(e))
 
@@ -541,12 +542,12 @@ class DistributedValidator(DistributedWorker):
 
     def _try_finalize_initializing_models(self):
         """Attempt to finalize all models that are currently initializing."""
-        for model_name in list(self.models_initializing):
-            if self._finalize_hosted_job(model_name):
+        for job_id in list(self.models_initializing):
+            if self._finalize_hosted_job(job_id):
                 self.send_request(
                     "debug_print",
                     (
-                        f"Successfully finalized model: {model_name}",
+                        f"Successfully finalized model: {job_id}",
                         "green",
                         logging.INFO,
                     ),
@@ -596,8 +597,8 @@ class DistributedValidator(DistributedWorker):
             }
 
             # Inspect model to determine network requirements
-            self.inspect_model(model_name, job_data)
-
+            job_data = self.inspect_model(model_name, job_data)
+            self.models_initializing.add(job_data.get("id"))
             self.send_request(
                 "debug_print",
                 (f"Initialized hosted job for {model_name}", "green", logging.INFO),
@@ -611,11 +612,11 @@ class DistributedValidator(DistributedWorker):
             if model_name in self.model_state:
                 del self.model_state[model_name]
 
-    def _finalize_hosted_job(self, model_name: str):
+    def _finalize_hosted_job(self, job_id: str):
         """Finalize a hosted job by setting up the distributed model with workers."""
         try:
             # Check if we have module info ready
-            args = self.send_request("check_module", None)
+            args = self.send_request("check_module", job_id)
 
             if not args or not isinstance(args, dict):
                 # Module not ready yet
@@ -638,7 +639,6 @@ class DistributedValidator(DistributedWorker):
 
             # Register the distributed model's modules
             for module_id, module_info in distribution.items():
-                module_id = hashlib.sha256(json.dumps(module_info).encode()).hexdigest()
                 self.modules[module_id] = module_info
 
             # Distribute the model across workers

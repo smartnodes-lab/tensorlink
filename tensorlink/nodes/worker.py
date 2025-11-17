@@ -161,21 +161,18 @@ class Worker(Torchnode):
                 (
                     user_id,
                     job_id,
-                    modules,
+                    module_id,
+                    module_info,
                 ) = json.loads(data[7:])
 
-                first_module = list(modules.values())[0]
-                module_id = hashlib.sha256(json.dumps(modules).encode()).hexdigest()
-                module_size = sum(
-                    m.get("memory") for m in modules.values() if isinstance(m, dict)
-                )
-                module_name = first_module.get("name", "")
-                training = first_module.get("training", False)
-                optimizer_name = first_module.get("optimizer_type", "adam")
+                module_size = module_info["memory"]
+                model_name = module_info["name"]
+                training = module_info["training"]
+                optimizer_name = module_info["optimizer_type"]
 
                 if self.available_gpu_memory >= module_size:
                     # Store a request to wait for the user connection
-                    self._store_request(user_id, module_id + module_name)
+                    self._store_request(user_id, module_id + model_name)
 
                     if training:
                         self._store_request(user_id, "OPTIMIZER" + optimizer_name)

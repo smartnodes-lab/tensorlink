@@ -543,7 +543,8 @@ class DistributedModel(nn.Module):
             self._load_model_skeleton()
             self._wrap_hf_model(config)
         else:
-            self.wrap_module(config)
+            raise "Custom models are currently not supported."
+            # self.wrap_module(config)
 
         if len(config) == 1:
             module, module_name = access_module(self.model, [-1])
@@ -672,16 +673,16 @@ class DistributedModel(nn.Module):
 
     def _wrap_hf_model(self, config: dict):
         # Iterate through each worker and their assigned modules
-        for module_id, worker_modules in config.items():
-            worker_id = next(iter(worker_modules.values())).get("assigned_workers")[0]
+        for module_id, module_info in config.items():
+            worker_id = module_info["assigned_workers"][0]
             file_name = f"{module_id}_{worker_id}.pt"
-            module_info = str(PreTrainedModel)
-            offloaded_module = OffloadedModule(self, module_info, worker_id, module_id)
+            module_name = module_info["module"]
+            offloaded_module = OffloadedModule(self, module_name, worker_id, module_id)
             with open(file_name, "wb") as f:
                 f.close()
 
             # Spawn a worker thread for the offloaded module
-            offloaded_module.spawn_worker(file_name)
+            offloaded_module.spawn_worker(file_name, module_info)
             setattr(self, "model", offloaded_module)
 
     def send_request(self, request_type, args):
@@ -793,10 +794,6 @@ class OffloadedModule(nn.Module):
 
         self.entire_model = False
         self.module_name = module_name.split("(")[0]
-        try:
-            self.module_info = module_name.split("(")[1][:-1]
-        except:
-            self.module_info = self.module_name
 
         self.parent_model = parent_model
         self.worker_id = worker_id
@@ -809,7 +806,7 @@ class OffloadedModule(nn.Module):
         # Return an empty iterator to hide deeper children
         return iter([])
 
-    def spawn_worker(self, name):
+    def spawn_worker(self, name: str, module_info: dict):
         # # Initialize a threading Timer to monitor the loading process
         # timer = threading.Tier(MAX_WAIT_TIME, self.handle_timeout)
         # timer.start()
@@ -818,7 +815,7 @@ class OffloadedModule(nn.Module):
         # Send the module to the worker roles
 
         self.parent_model.send_request(
-            "send_model", (name, self.worker_id, self.module_id)
+            "send_model", (name, self.worker_id, self.module_id, module_info)
         )
 
         # Wait for the module to be loaded on worker

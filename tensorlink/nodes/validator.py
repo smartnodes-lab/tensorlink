@@ -540,34 +540,16 @@ class Validator(Torchnode):
     def _assign_workers_to_modules(self, modules, author, job_id, job_data):
         worker_connection_info = {}
         groups = {}
-        for module_name, module_info in modules.items():
-            worker_id = module_info.get("assigned_workers", [])[-1]
-            if worker_id not in groups:
-                groups[worker_id] = {}
-
-            groups[worker_id][module_name] = module_info
-
         job_data["worker_modules"] = {}
-
-        for worker_id, worker_modules in groups.items():
-            module_id = hashlib.sha256(json.dumps(worker_modules).encode()).hexdigest()
-            self.recruit_worker(worker_id, author, job_id, worker_modules, module_id)
-            # job_data["distribution"]
+        for module_name, module_info in modules.items():
+            module_id = hashlib.sha256(json.dumps(module_info).encode()).hexdigest()
+            worker_id = module_info.get("assigned_workers", [])[-1]
+            groups[module_id] = module_info
+            self.recruit_worker(worker_id, author, job_id, module_info, module_id)
             job_data["worker_modules"][worker_id] = module_id
             worker_connection_info[module_id] = worker_id
 
-        regrouped = {}
-        for module_id, worker_id in worker_connection_info.items():
-            # get all modules assigned to this worker
-            worker_modules = next(
-                (groups[worker_id] for wid in groups if wid == worker_id), {}
-            )
-            regrouped[module_id] = {
-                "worker_id": worker_id,
-                "modules": worker_modules,
-            }
-
-        job_data["distribution"] = regrouped
+        job_data["distribution"] = groups
 
         return worker_connection_info
 
@@ -595,10 +577,10 @@ class Validator(Torchnode):
         )
 
         for module_id, module_info in job_data["distribution"].items():
-            worker_id = module_info["worker_id"]
-            modules = module_info["modules"]
+            worker_id = module_info["assigned_workers"][0]
 
             self.modules[module_id] = {
+                "job_id": job_id,
                 "mem_info": module_id,
                 "host": self.rsa_key_hash,
                 "model_name": job_data.get("model_name", ""),
@@ -607,7 +589,7 @@ class Validator(Torchnode):
                 "optimizer": None,
                 "training": False,
                 "workers": [worker_id],
-                "distribution": modules,
+                "distribution": module_info,
                 "public": True,
             }
             self.state_updates[module_id] = []
@@ -623,7 +605,7 @@ class Validator(Torchnode):
                 return
 
     def _finalize_job(self, job_id, job_data):
-        self.response_queue.put({"status": "SUCCESS", "return": True})
+        self.response_queue.put({"status": "SUCCESS", "return": job_data})
 
         self.jobs.append(job_id)
 
@@ -644,15 +626,18 @@ class Validator(Torchnode):
             self.send_to_node(node, b"DECLINE-JOB" + reason.encode())
 
     def recruit_worker(
-        self, worker_id: str, user_id: str, job_id: str, modules: dict, module_id: str
+        self,
+        worker_id: str,
+        user_id: str,
+        job_id: str,
+        module_info: dict,
+        module_id: str,
     ):
         if user_id is None:
             user_id = self.rsa_key_hash
 
-        data = json.dumps([user_id, job_id, modules])
-        module_size = sum(
-            m.get("memory", 0) for m in modules.values() if isinstance(m, dict)
-        )
+        data = json.dumps([user_id, job_id, module_id, module_info])
+        module_size = module_info.get("memory", 0)
 
         data = b"JOB-REQ" + data.encode()
         node = self.nodes[worker_id]
