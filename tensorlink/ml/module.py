@@ -308,7 +308,9 @@ class DistributedModel(nn.Module):
                         loss = assoc_input.grad
 
                     start_time = time.time()
-                    worker_id = self.distributed_graph[module_id_bytes]["workers"][-1]
+                    worker_id = self.distributed_graph[module_id_bytes][
+                        "assigned_workers"
+                    ][-1]
                     key = tag[:2] + [module_id_bytes, module_id_bytes]
 
                     if self.trusted:
@@ -362,7 +364,7 @@ class DistributedModel(nn.Module):
         for info in self.distributed_graph.values():
             if mod_id == info["mod_id"]:
                 if micro:
-                    return info["id_hash"], info["workers"][micro]
+                    return info["id_hash"], info["assigned_workers"][micro]
                 else:
                     return info["id_hash"]
 

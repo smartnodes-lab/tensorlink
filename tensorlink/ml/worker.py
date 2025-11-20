@@ -25,7 +25,33 @@ from tensorlink.ml.utils import (
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 
-def _get_nested_module(model: torch.nn.Module, path: str) -> torch.nn.Module:
+def _find_module_path_by_class(
+    model: torch.nn.Module, class_name: str
+) -> Optional[str]:
+    """
+    Search the model for the first submodule whose class name matches class_name.
+    Returns the module path as returned by named_modules (empty string for root).
+    """
+    if not class_name:
+        return None
+
+    for name, mod in model.named_children():
+        # skip the root empty name if it is the same class as requested
+        if name == "":
+            # if root has the requested class, return empty string
+            if mod.__class__.__name__ == class_name:
+                return name
+            continue
+
+        if mod.__class__.__name__ == class_name:
+            return name
+
+    return None
+
+
+def _get_nested_module(
+    model: torch.nn.Module, path: str, target_class_name: str = None
+) -> torch.nn.Module:
     """
     Navigate to a nested module using dot notation path.
     Example: 'model.layers.0' -> returns model.layers[0]
@@ -140,7 +166,7 @@ class DistributedWorker:
             logging.info(f"Total CUDA memory: {total_memory / 1e9:.2f} GB")
 
     def _load_specific_layer_weights(
-        self, model_name: str, layer_paths: List[str]
+        self, model_name: str, layer_paths: List[str], single=False
     ) -> Dict[str, torch.Tensor]:
         """
         Load only the weights for specific layers from HuggingFace.
@@ -193,12 +219,9 @@ class DistributedWorker:
                                 layer_prefix = layer_path + '.'
                                 if key.startswith(layer_prefix):
                                     # Extract the part after the layer path
-                                    # "model.layers.0.self_attn.q_proj.weight" -> "self_attn.q_proj.weight"
-                                    subkey = key[len(layer_prefix) :]
-
-                                    # Create new key with layer index
-                                    # "layers.0.self_attn.q_proj.weight"
-                                    new_key = f"layers.{layer_idx}.{subkey}"
+                                    new_key = key.split(".", 1)[1]
+                                    if single:
+                                        new_key = new_key.split(".", 1)[1]
                                     state_dict[new_key] = f.get_tensor(key)
                                     keys_loaded += 1
                                     break
@@ -419,13 +442,16 @@ class DistributedWorker:
         module_id = module_info.get("module_id")
         model_name = module_info.get("name")
         module_name = module_info.get("module_name")
+        training = module_info.get("training", False)
+        our_id = module_info.get("assigned_workers")[0]
+        file_name = module_id + our_id
 
         if module_id is None:
             raise ValueError("For standard loading, module_id must be provided")
 
         # Try to load the module based on trusted status
         if self.trusted:
-            with open(module_id, "rb") as f:
+            with open(file_name, "rb") as f:
                 module = pickle.load(f)
                 module = module.to(self.device)
 
@@ -444,7 +470,10 @@ class DistributedWorker:
         #         module = torch.jit.load(file_name)
 
         # Cleanup file
-        os.remove(module_id)
+        try:
+            os.remove(file_name)
+        except:
+            pass
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -452,23 +481,23 @@ class DistributedWorker:
             if hasattr(module, 'to_bettertransformer'):
                 try:
                     module = module.to_bettertransformer()
-                    print("Using BetterTransformer optimization")
-
                 except:
                     pass
 
         # Initialize storage structures
         module = module.to(self.device)
         module.intermediates = {}
-        module.host = node_id
+        module.host = module_info.get('host')
         module.n_batch = 0
 
         self.modules[module_id] = module
         if training:
+            optimizer_name = module_info.get("optimizer_type")
             optimizer_cls = get_optimizer_from_name(optimizer_name)
             # Placeholder - actual initialization happens in state_update
             self.optimizers[module_id] = optimizer_cls
 
+        print(f"module: {module_id}, worker: {our_id}")
         self.send_request("module_loaded", module_id)
 
     def _initialize_model_from_config(
@@ -500,8 +529,8 @@ class DistributedWorker:
         self, model_name: str, config: AutoConfig, module_info: Dict[str, Any]
     ) -> torch.nn.Module:
         """
-        Load a group of layers (e.g., layers 0-19 of a transformer) as a single module.
-        Uses empty weights initialization and only loads required layer weights.
+        Load a group of layers as a single module. Uses empty weights initialization
+        and only loads required layer weights.
         """
         layer_paths = module_info.get('layer_paths', [])
         layer_range = module_info.get('layer_range', [])
@@ -559,17 +588,40 @@ class DistributedWorker:
             base_model = AutoModel.from_config(config)
 
         # Extract the specific module with empty weights
-        if parent_module_path:
+        if parent_module_path and parent_module_path != "model":
+            # explicit path provided
             target_module = _get_nested_module(base_model, parent_module_path)
+            effective_layer_path = parent_module_path
         else:
-            target_module = base_model
+            # parent_module_path is 'model' or empty -> try to find by class name
+            found_path = _find_module_path_by_class(base_model, module_class_name)
+            if found_path is None:
+                # if not found, as a safe fallback return the root module but warn the caller
+                logging.warning(
+                    "Could not find submodule by class name; falling back to root model. "
+                    "This will load the whole model's matching keys."
+                )
+                target_module = base_model
+                effective_layer_paths = [parent_module_path or "model"]
+            else:
+                if found_path == "":
+                    effective_layer_path = "model"
+                else:
+                    effective_layer_path = f"model.{found_path}"
+                target_module = _get_nested_module(base_model, effective_layer_path)
 
         # Load only the weights for this specific module
         logging.info(f"Loading weights for {parent_module_path}")
-        state_dict = self._load_specific_layer_weights(model_name, [parent_module_path])
+        state_dict = self._load_specific_layer_weights(
+            model_name, [effective_layer_path], single=True
+        )
+
+        target_module = target_module.to_empty(device=self.device)
 
         # Load the state dict
-        target_module.load_state_dict(state_dict, strict=False)
+        missing_keys, unexpected_keys = target_module.load_state_dict(
+            state_dict, strict=False
+        )
 
         # Move to device
         target_module = target_module.to(self.device)

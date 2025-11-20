@@ -359,7 +359,7 @@ class Smartnode(threading.Thread):
 
         # Handle module or parameter stream
         if b"MODULE" in data[11:]:
-            os.rename(file_name, data[17:].decode())
+            os.rename(file_name, data[17:81].decode() + self.rsa_key_hash)
             streamed_bytes = data[11:]
         elif b"PARAMETERS" in data[11:]:
             os.rename(file_name, f"tmp/{data[21:].decode()}_parameters")

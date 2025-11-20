@@ -210,9 +210,9 @@ class User(Torchnode):
                 for mod_id, mod_info in distribution.items():
                     if mod_id not in self.modules:
                         self.modules[mod_id] = mod_info.copy()
-                        self.modules[mod_id]["workers"] = []
+                        self.modules[mod_id]["assigned_workers"] = []
 
-                    for worker in mod_info["workers"]:
+                    for worker in mod_info["assigned_workers"]:
                         worker_info = self.dht.query(worker)
 
                         # Connect to workers for each model
@@ -228,7 +228,9 @@ class User(Torchnode):
                                 f"Module: {mod_id} has connected to Worker: {worker_info}",
                                 tag="User",
                             )
-                            self.modules[mod_id]["workers"].append(worker_info["id"])
+                            self.modules[mod_id]["assigned_workers"].append(
+                                worker_info["id"]
+                            )
                         else:
                             self.debug_print(
                                 f"Error connecting Module: {mod_id} to Worker: {worker_info}",
@@ -378,8 +380,8 @@ class User(Torchnode):
         dist_model_config = {}
         for mod_id, module in distribution.items():
             # Wait for loading confirmation from worker roles
-            worker_info = self.modules[mod_id]
-            if len(worker_info["workers"]) < 1:
+            module_info = self.modules[mod_id]
+            if len(module_info["assigned_workers"]) < 1:
                 self.debug_print(
                     "Network could not find workers for job.",
                     level=logging.INFO,

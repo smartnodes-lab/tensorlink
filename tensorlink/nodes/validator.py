@@ -588,13 +588,13 @@ class Validator(Torchnode):
                 "backward_queue": {},
                 "optimizer": None,
                 "training": False,
-                "workers": [worker_id],
+                "assigned_workers": [worker_id],
                 "distribution": module_info,
                 "public": True,
             }
             self.state_updates[module_id] = []
 
-            if len(self.modules[module_id]["workers"]) < 1:
+            if len(self.modules[module_id]["assigned_workers"]) < 1:
                 self.debug_print(
                     f"Network could not find workers for job '{job_id}' module {module_id}.",
                     level=logging.INFO,

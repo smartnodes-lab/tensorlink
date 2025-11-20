@@ -644,16 +644,6 @@ class DistributedValidator(DistributedWorker):
             # Distribute the model across workers
             distributed_model.distribute_model(distribution)
 
-            # Ensure workers are registered
-            for dist_module_id, dist_module_info in distribution.items():
-                if dist_module_id in self.modules and isinstance(
-                    self.modules[dist_module_id], dict
-                ):
-                    # Update workers list to ensure it's current
-                    self.modules[dist_module_id]["workers"] = dist_module_info.get(
-                        "workers", []
-                    )
-
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 

@@ -1,3 +1,5 @@
+import os
+
 from tensorlink.ml.utils import get_gpu_memory
 from tensorlink.mpc.shared_memory import get_from_shared_memory
 from tensorlink.p2p.connection import Connection
@@ -229,7 +231,7 @@ class Torchnode(Smartnode):
             else:
                 module_id = None
                 for module in self.modules:
-                    if node.node_id in self.modules[module]["workers"]:
+                    if node.node_id in self.modules[module]["assigned_workers"]:
                         module_id = module
                         break
 
@@ -266,7 +268,14 @@ class Torchnode(Smartnode):
 
     def _handle_module(self, data: bytes, node: Connection):
         module_id = data[6:70].decode()
-        module_info = json.loads(data[70:])
+        file_name = module_id + self.rsa_key_hash
+        if os.path.exists(file_name):
+            with open(file_name, "rb") as f:
+                module_info = json.load(f)
+            os.remove(file_name)
+        else:
+            module_info = json.loads(data[70:])
+
         request_to_remove = []
 
         if node.node_id in self.requests:
