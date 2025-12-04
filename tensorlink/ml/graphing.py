@@ -1,14 +1,13 @@
 from tensorlink.ml.utils import estimate_memory, estimate_hf_model_memory
 
-from transformers import PreTrainedModel, AutoModel, AutoConfig
+from transformers import AutoModel, AutoConfig
 from accelerate import init_empty_weights
 from collections import defaultdict
-from typing import Union, Optional
+from typing import Union, Optional, Dict, List, Any
 import torch.nn as nn
 import textwrap
-import hashlib
+import ast
 import inspect
-import random
 import re
 
 
@@ -137,6 +136,7 @@ class ModelParser:
         self.assigned_workers = defaultdict(list)
         self.forward_code_cache = {}
         self.verbose = True
+        self.module_paths = {}  # Track all module paths
 
     def create_distributed_config(
         self,
@@ -150,15 +150,6 @@ class ModelParser:
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
-
-        :param model: The neural network model to distribute.
-        :param workers: dict of available worker candidates to offload models to.
-        :param training: Whether the model will be trained.
-        :param trusted: Whether the model is trusted (determines naming policies).
-        :param handle_layers: Whether to process individual layers for fine-grained distribution.
-        :param input_obfuscation: If True, prioritizes local execution for privacy.
-        :param optimizer_type: Name of the optimizer type.
-        :return: A dictionary representing the distributed model configuration.
         """
 
         if isinstance(model, str):
@@ -174,6 +165,16 @@ class ModelParser:
 
         config = {}
         success = True
+
+        # Log the model structure first
+        if self.verbose:
+            print("\n" + "=" * 80)
+            print("MODEL STRUCTURE:")
+            print("=" * 80)
+            self._log_model_structure(
+                model, prefix="model", training=training, optimizer_type=optimizer_type
+            )
+            print("=" * 80 + "\n")
 
         try:
             config, _ = self._recurse_module(
@@ -191,10 +192,47 @@ class ModelParser:
 
             config = _group_sequential_layers(config)
 
+            # Log final assignment summary
+            if self.verbose:
+                self._log_assignment_summary(config, workers_state)
+
         except AssignmentError:
             success = False
 
         return {"success": success, "config": config}
+
+    def _log_model_structure(
+        self,
+        module: nn.Module,
+        prefix: str = "model",
+        depth: int = 0,
+        training=False,
+        optimizer_type=None,
+    ):
+        """
+        Recursively log the entire model structure with module paths.
+
+        Args:
+            module: The module to log
+            prefix: Current path prefix
+            depth: Current depth in the hierarchy
+        """
+        indent = "  " * depth
+        module_type = type(module).__name__
+
+        memory, breakdown = estimate_memory(
+            module, training, seq_length=1024, optimizer_type=optimizer_type
+        )
+
+        print(f"{indent}{prefix} [{module_type}] (~{memory/1e6:.1f}MB)")
+
+        # Store in module_paths dict
+        self.module_paths[prefix] = {'type': module_type, 'memory_mb': memory / 1e6}
+
+        # Recurse into children
+        for child_name, child_module in module.named_children():
+            child_path = f"{prefix}.{child_name}"
+            self._log_model_structure(child_module, child_path, depth + 1)
 
     def _recurse_module(
         self,
@@ -215,9 +253,18 @@ class ModelParser:
         if ids is None:
             ids = []
 
+        indent = "  " * depth
+
+        # Log current module being processed
+        if self.verbose:
+            print(f"{indent}📦 Processing: {module_path}")
+
         memory, breakdown = estimate_memory(
             module, training, seq_length=1024, optimizer_type=optimizer_type
         )
+
+        if self.verbose:
+            print(f"{indent}   Memory required: {memory / 1e6:.2f}MB")
 
         assigned_worker = self._try_assign_worker(
             memory, module_path, workers_state, last_worker
@@ -236,25 +283,40 @@ class ModelParser:
                     if not isinstance(module, str)
                     else module
                 ),
+                "module_path": module_path,  # Add explicit module_path
                 "training": training,
                 "optimizer_type": optimizer_type,
             }
 
             self.assigned_workers[assigned_worker].append(
-                {"module_id": ids, "memory": memory, "module": module}
+                {
+                    "module_id": ids,
+                    "memory": memory,
+                    "module": module,
+                    "module_path": module_path,  # Track path in assignment
+                }
             )
+
+            if self.verbose:
+                print(f"{indent}   ✓ Assigned to {assigned_worker}")
 
             return config, assigned_worker
 
         # too large, recurse into children
         if self.verbose:
             print(
-                f"Module {module_path} ({memory / 1e9:.2f}GB) too large, recursing into children..."
+                f"{indent}   ⚠ Module {module_path} ({memory / 1e6:.2f}MB) too large, recursing into children..."
             )
 
         children = list(module.named_children())
         if not children:
-            config[module_path] = {"type": "unassigned", "required_memory": memory}
+            config[module_path] = {
+                "type": "unassigned",
+                "required_memory": memory,
+                "module_path": module_path,
+            }
+            if self.verbose:
+                print(f"{indent}   ✗ No children to recurse into - FAILED")
             raise AssignmentError(f"Unable to assign {module_path}")
 
         parent_forward_code = self._extract_forward_code(module)
@@ -327,8 +389,6 @@ class ModelParser:
         for worker_id, worker_info in worker_priority:
             if worker_info["gpu_memory"] >= memory:
                 worker_info["gpu_memory"] -= memory
-                if self.verbose:
-                    print(f"Assigned {module_path} ({memory/1e9:.2f}GB) to {worker_id}")
                 return worker_id
 
         return None
@@ -356,6 +416,268 @@ class ModelParser:
                     f"Could not extract forward code for {module_class.__name__}: {e}"
                 )
             return None
+
+    def _log_assignment_summary(self, config: dict, workers_state: dict):
+        """
+        Log a summary of the final assignment after configuration is complete.
+        """
+        print("\n" + "=" * 80)
+        print("ASSIGNMENT SUMMARY:")
+        print("=" * 80)
+
+        # Group by worker
+        worker_assignments = defaultdict(list)
+        for module_path, module_config in config.items():
+            if module_config.get("type") == "offloaded":
+                worker_id = module_config["assigned_workers"][0]
+                worker_assignments[worker_id].append(
+                    {
+                        "path": module_path,
+                        "memory": module_config.get("memory", 0),
+                        "module_type": module_config.get("module", "Unknown"),
+                    }
+                )
+
+        # Print per-worker assignments
+        for worker_id in sorted(worker_assignments.keys()):
+            assignments = worker_assignments[worker_id]
+            total_memory = sum(a["memory"] for a in assignments)
+
+            print(f"\n{worker_id}:")
+            print(f"  Total Memory: {total_memory / 1e6:.2f}MB")
+            print(f"  Remaining: {workers_state[worker_id]['gpu_memory'] / 1e6:.2f}MB")
+            print(f"  Modules ({len(assignments)}):")
+
+            for assignment in assignments:
+                print(f"    • {assignment['path']}")
+                print(
+                    f"      [{assignment['module_type']}] - {assignment['memory'] / 1e6:.2f}MB"
+                )
+
+        # Print unassigned modules if any
+        unassigned = [
+            path for path, cfg in config.items() if cfg.get("type") == "unassigned"
+        ]
+        if unassigned:
+            print(f"\n⚠ UNASSIGNED MODULES ({len(unassigned)}):")
+            for path in unassigned:
+                print(f"  • {path}")
+
+        print("=" * 80 + "\n")
+
+    def get_module_path_info(self, module_path: str) -> dict:
+        """
+        Get information about a specific module path.
+
+        Args:
+            module_path: The path to query (e.g., "model.layers.0")
+
+        Returns:
+            Dictionary with module information
+        """
+        return self.module_paths.get(module_path, {})
+
+    def list_all_module_paths(self) -> List[str]:
+        """
+        Get a list of all module paths in the model.
+
+        Returns:
+            Sorted list of module paths
+        """
+        return sorted(self.module_paths.keys())
+
+    def export_module_hierarchy(self, filename: str = "model_hierarchy.txt"):
+        """
+        Export the complete module hierarchy to a file.
+
+        Args:
+            filename: Output filename
+        """
+        with open(filename, 'w') as f:
+            f.write("MODEL HIERARCHY\n")
+            f.write("=" * 80 + "\n\n")
+
+            for path in sorted(self.module_paths.keys()):
+                info = self.module_paths[path]
+                depth = path.count('.')
+                indent = "  " * depth
+
+                f.write(f"{indent}{path}\n")
+                f.write(f"{indent}  Type: {info['type']}\n")
+                f.write(f"{indent}  Params: {info['param_count']:,}\n")
+                f.write(f"{indent}  Memory: ~{info['memory_mb']:.1f}MB\n")
+                f.write("\n")
+
+        print(f"Module hierarchy exported to {filename}")
+
+
+def extract_loop_components(for_node: ast.For, tree: ast.AST) -> Dict[str, str]:
+    """Extract code before loop, in loop, and after loop"""
+    # This is a simplified version - you'd need more robust extraction
+    return {
+        'pre_loop_code': '',  # Code before the loop
+        'loop_var': ast.unparse(for_node.target),  # Loop variable name
+        'loop_body': ast.unparse(for_node.body),  # What happens in loop
+        'post_loop_code': '',  # Code after the loop
+    }
+
+
+def resolve_module_from_path(model: nn.Module, path: str):
+    """Return (parent_module, child_module, child_name)."""
+    parts = path.split(".")
+    parent = model
+    for p in parts[:-1]:
+        parent = getattr(parent, p)
+    child_name = parts[-1]
+    child = getattr(parent, child_name)
+    return parent, child, child_name
+
+
+def is_layer_loop(for_node: ast.For, layer_range: List[int]) -> bool:
+    """Check if this for loop iterates over the layer range we're offloading"""
+    # Look for patterns like:
+    # for layer in self.layers:
+    # for i, layer in enumerate(self.layers):
+    # for i in range(len(self.layers)):
+
+    if isinstance(for_node.iter, ast.Attribute):
+        # for layer in self.layers
+        return for_node.iter.attr in [
+            'layers',
+            'layer',
+            'blocks',
+            'h',
+            'encoder',
+            'decoder',
+        ]
+
+    elif isinstance(for_node.iter, ast.Subscript):
+        # for layer in self.layers[start:end]
+        # for layer in self.layers[0:12]
+        if isinstance(for_node.iter.value, ast.Attribute):
+            attr_name = for_node.iter.value.attr
+            if attr_name in ['layers', 'layer', 'blocks', 'h', 'encoder', 'decoder']:
+                return True
+        return False
+
+    elif isinstance(for_node.iter, ast.Call):
+        # for i, layer in enumerate(self.layers)
+        # for i, layer in enumerate(self.layers[start:end])
+        # for i in range(start, end)
+        # for i in range(len(self.layers))
+        if isinstance(for_node.iter.func, ast.Name):
+            func_name = for_node.iter.func.id
+
+            if func_name == 'enumerate':
+                # Check what's being enumerated
+                if for_node.iter.args:
+                    enum_target = for_node.iter.args[0]
+                    if isinstance(enum_target, ast.Attribute):
+                        return enum_target.attr in ['layers', 'layer', 'blocks', 'h']
+                    elif isinstance(enum_target, ast.Subscript):
+                        return _is_layer_subscript(enum_target)
+                return False
+
+            elif func_name == 'range':
+                # Check if range matches our layer range
+                return _range_matches_layers(for_node.iter, layer_range)
+
+    return False
+
+
+def _range_matches_layers(range_call: ast.Call, layer_range: List[int]) -> bool:
+    """Check if a range() call matches our layer range"""
+    try:
+        if not range_call.args:
+            return False
+
+        # range(n) - single argument
+        if len(range_call.args) == 1:
+            end = _eval_node(range_call.args[0])
+            # Could be range(len(self.layers)) or range(12)
+            return end is not None
+
+        # range(start, end) - two arguments
+        elif len(range_call.args) == 2:
+            start = _eval_node(range_call.args[0])
+            end = _eval_node(range_call.args[1])
+
+            if start is not None and end is not None:
+                return start == layer_range[0] and end == layer_range[1]
+            return True
+
+        # range(start, end, step) - three arguments
+        elif len(range_call.args) == 3:
+            start = _eval_node(range_call.args[0])
+            end = _eval_node(range_call.args[1])
+            step = _eval_node(range_call.args[2])
+
+            # Only accept step=1 for our purposes
+            if step is not None and step != 1:
+                return False
+
+            if start is not None and end is not None:
+                return start == layer_range[0] and end == layer_range[1]
+            return True
+    except:
+        pass
+
+    return False
+
+
+def _is_layer_subscript(subscript: ast.Subscript) -> bool:
+    """Check if a subscript accesses a layer container"""
+    if isinstance(subscript.value, ast.Attribute):
+        return subscript.value.attr in [
+            'layers',
+            'layer',
+            'blocks',
+            'h',
+            'encoder',
+            'decoder',
+        ]
+    return False
+
+
+def _eval_node(node: ast.AST) -> Any:
+    """Safely evaluate a constant AST node"""
+    try:
+        if isinstance(node, ast.Constant):
+            return node.value
+        elif isinstance(node, ast.Num):  # Older Python versions
+            return node.n
+        elif isinstance(node, ast.Call):
+            # Handle len(self.layers) pattern
+            if isinstance(node.func, ast.Name) and node.func.id == 'len':
+                # Can't evaluate len() without the actual object, return None
+                return None
+        return None
+    except:
+        return None
+
+
+def analyze_forward_loop(forward_method, layer_range: List[int]) -> Dict[str, Any]:
+    """
+    Analyze the forward method to extract loop structure.
+    Returns dict with pre_loop_code, loop_var, post_loop_code.
+    """
+    try:
+        source = inspect.getsource(forward_method)
+        source = textwrap.dedent(source)
+        tree = ast.parse(source)
+
+        # Find the for loop over layers
+        for node in ast.walk(tree):
+            if isinstance(node, ast.For):
+                # Check if this loops over a range or module list
+                if is_layer_loop(node, layer_range):
+                    return extract_loop_components(node, tree)
+
+        return None
+
+    except Exception as e:
+        print(f"Could not analyze forward method: {e}")
+        return None
 
 
 class ModelSegmentAnalyzer:

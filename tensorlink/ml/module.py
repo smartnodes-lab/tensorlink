@@ -1,5 +1,9 @@
+import ast
+import inspect
 import logging
-from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
+import textwrap
+import types
+from typing import Generator, OrderedDict, List, Optional, Type, Dict, Any, Union
 from collections import defaultdict
 
 from accelerate import init_empty_weights
@@ -20,9 +24,16 @@ import gc
 import io
 import os
 
+from tensorlink.ml.injector import generate_new_forward_method, get_loop_io_signature
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
-from tensorlink.ml.graphing import ModelParser
+from tensorlink.ml.graphing import (
+    ModelParser,
+    analyze_forward_loop,
+    extract_loop_components,
+    is_layer_loop,
+)
 from tensorlink.ml.utils import (
+    resolve_module_from_path,
     get_gpu_memory,
     get_batch_size,
     chunk,
@@ -35,6 +46,7 @@ from tensorlink.ml.utils import (
     bytes_to_tensor,
     tensor_to_bytes,
     enable_grad,
+    get_nested_module,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -143,10 +155,10 @@ class DistributedModel(nn.Module):
 
         if isinstance(model, nn.Module):
             self.name = str(model).split("(")[0]
-            self.model = model.to(dtype=dtype)
+            self.model: nn.Module = model.to(dtype=dtype)
         else:
-            self.name = model
-            self.model = model
+            self.model_name = model
+            self.model = None
 
         # Store model and training resources
         self.user_memory = get_gpu_memory()
@@ -541,16 +553,27 @@ class DistributedModel(nn.Module):
 
         self.distributed_graph = config
 
-        if isinstance(self.model, str):
+        if self.model_name:
             self._load_model_skeleton()
-            self._wrap_hf_model(config)
-        else:
-            raise "Custom models are currently not supported."
-            # self.wrap_module(config)
 
-        if len(config) == 1:
-            module, module_name = access_module(self.model, [-1])
-            setattr(module, "entire_model", True)
+        grouped_layers = {}
+
+        for module_id, module_info in config.items():
+            if self.model_name:
+                module_type = module_info.get('type', 'offloaded')
+
+                if module_type == 'offloaded_group':
+                    grouped_layers[module_id] = module_info
+                else:
+                    self._wrap_hf_module(module_id, module_info)
+            else:
+                # self.wrap_module(config)
+                raise "Custom models are currently not supported."
+
+        if grouped_layers:
+            self._wrap_grouped_layers(grouped_layers)
+
+        assert isinstance(self.model, nn.Module), "Model Distribution Failed!"
 
         self.model.n_batch = 0
         self.model.forward_queues = {}
@@ -563,8 +586,7 @@ class DistributedModel(nn.Module):
         return 0, 0
 
     def generate(self, *args, **kwargs):
-        if isinstance(self.model, OffloadedModule):
-            return self.model.generate(*args, **kwargs)
+        return self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -673,19 +695,87 @@ class DistributedModel(nn.Module):
         else:
             setattr(self, "model", offloaded_module)
 
-    def _wrap_hf_model(self, config: dict):
-        # Iterate through each worker and their assigned modules
-        for module_id, module_info in config.items():
+    def _wrap_hf_module(self, module_id: str, module_info: dict):
+        """Handle single module offloading"""
+        # Get worker and their assigned modules
+        worker_id = module_info["assigned_workers"][0]
+        file_name = f"{module_id}_{worker_id}.pt"
+        module_path = module_info.get("module_path")
+        module_class = module_info.get("module")
+
+        offloaded_module = OffloadedModule(self, module_class, worker_id, module_id)
+
+        with open(file_name, "wb") as f:
+            f.close()
+
+        # Spawn a worker thread for the offloaded module
+        offloaded_module.spawn_worker(file_name, module_info)
+
+        if module_path == "model":
+            setattr(self, module_path, offloaded_module)
+        else:
+            target_module = module_path.split(".")[
+                -1
+            ]  # Handles cases where path = model.module or model_name.module
+            setattr(self.model, target_module, offloaded_module)
+
+    def _wrap_grouped_layers(self, grouped_layers: dict):
+        """
+        Replace a ModuleList loop with direct calls to offloaded worker(s).
+        This handles the case where layers 0-11 might be on one worker,
+        and we need to replace the parent's loop with a single call.
+        """
+        # Gather ordered calls to OffloadedModules to replace the existing loop in the forward pass
+        offloaded_modules = []
+
+        for module_id, module_info in sorted(
+            grouped_layers.items(), key=lambda x: x[1]["layer_range"][0]
+        ):
             worker_id = module_info["assigned_workers"][0]
-            file_name = f"{module_id}_{worker_id}.pt"
+            layer_range = module_info.get("layer_range", [])
+
+            # Create offloaded module wrapper
             module_name = module_info["module"]
             offloaded_module = OffloadedModule(self, module_name, worker_id, module_id)
+            offloaded_module.layer_range = layer_range
+            offloaded_module.is_layer_group = True
+
+            # Get expected input and output args and add to module_info
+            io_signature = get_loop_io_signature(self.model)
+            module_info["expected_inputs"] = list(io_signature["all_inputs"])
+            module_info["expected_outputs"] = list(io_signature["all_outputs"])
+
+            file_name = f"{module_id}_{worker_id}.pt"
             with open(file_name, "wb") as f:
                 f.close()
 
-            # Spawn a worker thread for the offloaded module
             offloaded_module.spawn_worker(file_name, module_info)
-            setattr(self, "model", offloaded_module)
+            offloaded_modules.append(offloaded_module)
+
+        self._inject_grouped_layer_forward(grouped_layers, offloaded_modules)
+
+    def _inject_grouped_layer_forward(
+        self,
+        grouped_layers: Dict,
+        offloaded_modules: List["OffloadedModule"],
+    ):
+        """
+        Modify the parent module's forward method to call the offloaded
+        layer group instead of looping through individual layers.
+        """
+        parent_path = list(grouped_layers.values())[0].get("parent_module_path", "")
+
+        if parent_path and parent_path != "model":
+            assert isinstance(self.model, nn.Module), "Invalid model type"
+            parent_module = get_nested_module(self.model, parent_path)
+        else:
+            parent_module = self.model
+
+        parent_module.offloaded_modules = offloaded_modules
+
+        new_forward = generate_new_forward_method(parent_module, offloaded_modules)
+
+        parent_module.forward = types.MethodType(new_forward, parent_module)
 
     def send_request(self, request_type, args):
         """
@@ -767,15 +857,15 @@ class DistributedModel(nn.Module):
 
     def _load_model_skeleton(self):
         """Load the HF model structure with empty weights"""
-        model_config = AutoConfig.from_pretrained(self.name)
+        model_config = AutoConfig.from_pretrained(self.model_name)
         with init_empty_weights():
             self.model = AutoModel.from_config(model_config)
 
-    def _load_assigned_weights(self, config: Dict):
-        """Load weights only for modules assigned to us"""
-        for module_path, cfg in config:
-            if cfg.get("type", "") == "loaded":
-                self.my_modules.add()
+    # def _load_assigned_weights(self, config: Dict):
+    #     """Load weights only for modules assigned to us"""
+    #     for module_path, cfg in config:
+    #         if cfg.get("type", "") == "loaded":
+    #             self.my_modules.add()
 
 
 class OffloadedModule(nn.Module):
@@ -801,6 +891,9 @@ class OffloadedModule(nn.Module):
         self.worker_id = worker_id
         self.module_id = module_id
         self.n_batch = 0
+
+        self.is_layer_group = False
+        self.layer_range = None
 
     def children(self):
         # Print the offloaded module and the original model name

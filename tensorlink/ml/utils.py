@@ -32,6 +32,7 @@ def estimate_memory(
     dtype: torch.dtype = torch.float16,
     optimizer_type: str = "adam",
     include_kv_cache: bool = True,
+    recursive: bool = True,
 ) -> tuple[float, dict]:
     """
     Estimate total memory usage (in bytes) for a PyTorch nn.Module, including
@@ -54,7 +55,19 @@ def estimate_memory(
     }
 
     # --- Parameter + gradient size ---
-    param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
+    # Count only direct parameters if not recursive
+    if recursive:
+        # Count all parameters (for top-level module estimate)
+        param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
+    else:
+        # Count only parameters directly registered to this module
+        param_bytes = sum(
+            p.numel() * p.element_size() for p in module.parameters(recurse=False)
+        )
+        # Also count buffers (like running_mean, running_var in BatchNorm)
+        param_bytes += sum(
+            b.numel() * b.element_size() for b in module.buffers(recurse=False)
+        )
 
     breakdown["parameters"] = param_bytes
 
@@ -250,82 +263,9 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 3e8
+        memory += 4e9
 
     return memory
-
-
-def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
-    """
-    Profile a PyTorch model to estimate overhead in terms of memory usage and FLOPs.
-    Args:
-        model (nn.Module): The model to be profiled.
-        input_size (tuple): The input size for the model.
-    Returns:
-        dict: A dictionary containing the analysis of each layer.
-    """
-    # Dictionary to hold the analysis of each layer
-    analysis = {}
-
-    # Initialize dummy input to calculate FLOPs
-    dummy_input = torch.zeros(*input_size)
-
-    # Total parameter count
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total Parameters: {total_params:,}")
-
-    # Recursively analyze each layer
-    def analyze_layer(module: nn.Module, input_shape):
-        layer_info = {
-            "parameters": sum(p.numel() for p in module.parameters()),
-            "flops": 0,
-            "memory": 0,
-        }
-
-        # Estimate memory for parameters
-        for param in module.parameters():
-            layer_info["memory"] += estimate_memory(param)
-
-        # Estimate FLOPs
-        if isinstance(module, nn.Linear):
-            layer_info["flops"] = 2 * module.in_features * module.out_features
-        elif isinstance(module, nn.Conv2d):
-            out_channels, in_channels, kh, kw = module.weight.shape
-            _, _, h, w = input_shape
-            flops_per_instance = 2 * in_channels * kh * kw * out_channels
-            layer_info["flops"] = flops_per_instance * h * w
-        elif isinstance(module, nn.MultiheadAttention):
-            embed_dim = module.embed_dim
-            num_heads = module.num_heads
-            seq_length = input_shape[0]  # assuming (seq_len, batch_size, embed_dim)
-            # Rough estimation for self-attention FLOPs
-            layer_info["flops"] = (
-                4 * seq_length * embed_dim * embed_dim
-                + seq_length * num_heads * embed_dim
-            )
-        elif isinstance(module, nn.Transformer):
-            # Estimating FLOPs for Transformer model
-            num_layers = module.encoder.num_layers
-            embed_dim = module.d_model
-            seq_length = input_shape[0]
-            # Each encoder layer typically involves two self-attention layers and one feed-forward layer
-            layer_info["flops"] = (
-                4 * seq_length * embed_dim * embed_dim + seq_length * embed_dim
-            ) * num_layers
-
-        # Add the layer analysis to the global analysis dictionary
-        analysis[module] = layer_info
-
-        return layer_info
-
-    # Traverse the model and analyze each layer
-    for name, module in model.named_modules():
-        if len(list(module.children())) == 0:  # Leaf module
-            layer_input_shape = dummy_input.shape
-            layer_info = analyze_layer(module, layer_input_shape)
-            print(f"{name}: {layer_info}")
-
-    return analysis
 
 
 def get_first_layer(model: nn.Module):
@@ -472,11 +412,6 @@ def enable_grad(tensor):
 
     else:
         raise TypeError(f"Unsupported input type: {type(tensor)}")
-
-
-# Example usage:
-# Assuming `model_output` is a ModelOutput instance with various nested structures
-# enabled_output = enable_grad(model_output)
 
 
 def handle_output(tensor):
@@ -1196,3 +1131,41 @@ def get_model_detailed_stats(model_name: str) -> Dict:
             "generated_at": current_time,
         },
     }
+
+
+def get_nested_module(
+    model: torch.nn.Module, path: str, target_class_name: str = None
+) -> torch.nn.Module:
+    """
+    Navigate to a nested module using dot notation path.
+    Example: 'model.layers.0' -> returns model.layers[0]
+    """
+    parts = path.split('.')
+    current = model
+
+    if parts[0] == "model":
+        parts = parts[1:]
+
+    # Skip 'model' prefix if present (first attribute is always the model itself)
+    for part in parts:
+        if part.isdigit():
+            # Handle list/ModuleList indexing
+            current = current[int(part)]
+        else:
+            # Handle attribute access
+            current = getattr(current, part)
+
+    return current
+
+
+def resolve_module_from_path(model: nn.Module, path: str):
+    """Return (parent_module, child_module, child_name)."""
+    parts = path.split(".")
+    parent = model
+    for p in parts[:-1]:
+        if p == "model":
+            continue
+        parent = getattr(parent, p)
+    child_name = parts[-1]
+    child = getattr(parent, child_name)
+    return parent, child, child_name

@@ -377,7 +377,7 @@ class DistributedValidator(DistributedWorker):
 
                     self.CHECK_COUNTER = 1
 
-                elif self.models_initializing:
+                if self.models_initializing:
                     # Only call model management if we have models actively initializing
                     self._manage_auto_loaded_models()
 
@@ -646,6 +646,8 @@ class DistributedValidator(DistributedWorker):
 
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
+
+            distributed_model.forward(torch.zeros((10, 1), dtype=torch.long))
 
             # Mark as ready
             self.model_state[model_name] = "ready"

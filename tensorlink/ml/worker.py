@@ -21,6 +21,7 @@ from tensorlink.ml.utils import (
     attach_tensor,
     handle_output,
     enable_grad,
+    get_nested_module,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -47,31 +48,6 @@ def _find_module_path_by_class(
             return name
 
     return None
-
-
-def _get_nested_module(
-    model: torch.nn.Module, path: str, target_class_name: str = None
-) -> torch.nn.Module:
-    """
-    Navigate to a nested module using dot notation path.
-    Example: 'model.layers.0' -> returns model.layers[0]
-    """
-    parts = path.split('.')
-    current = model
-
-    if parts[0] == "model":
-        parts = parts[1:]
-
-    # Skip 'model' prefix if present (first attribute is always the model itself)
-    for part in parts:
-        if part.isdigit():
-            # Handle list/ModuleList indexing
-            current = current[int(part)]
-        else:
-            # Handle attribute access
-            current = getattr(current, part)
-
-    return current
 
 
 def _load_from_pytorch_bins(
@@ -164,87 +140,6 @@ class DistributedWorker:
             logging.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
             logging.info(f"CUDA capability: {torch.cuda.get_device_capability(0)}")
             logging.info(f"Total CUDA memory: {total_memory / 1e9:.2f} GB")
-
-    def _load_specific_layer_weights(
-        self, model_name: str, layer_paths: List[str], single=False
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Load only the weights for specific layers from HuggingFace.
-        Uses safetensors for efficient weight loading without loading entire model.
-        """
-
-        state_dict = {}
-
-        try:
-            # Use snapshot_download which automatically:
-            # 1. Checks the global HF cache (~/.cache/huggingface/hub)
-            # 2. Returns cached path if model exists
-            # 3. Downloads only if not cached
-            logging.info(f"Checking cache for {model_name}")
-            model_path = snapshot_download(
-                repo_id=model_name,
-                cache_dir=self.hf_cache_dir,  # Use global HF cache
-                allow_patterns=[
-                    "*.safetensors",
-                    "*.bin",
-                    "*.json",
-                ],  # Include config files
-                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],  # Skip other formats
-                local_files_only=False,  # Will check cache first, download if needed
-            )
-            logging.info(f"Model located at: {model_path}")
-
-            # Find all safetensors files in the model directory
-            safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
-
-            if safetensor_files:
-                logging.info(f"Found {len(safetensor_files)} safetensors files")
-
-                # Create prefix patterns for our layers
-                layer_path_to_idx = {path: idx for idx, path in enumerate(layer_paths)}
-
-                # Load only matching weights from each file
-                for shard_path in safetensor_files:
-                    logging.info(f"Reading weights from {os.path.basename(shard_path)}")
-
-                    # Open safetensor file and selectively load weights
-                    with safe_open(shard_path, framework="pt", device="cpu") as f:
-                        keys_loaded = 0
-                        for key in f.keys():
-                            # Key format: "model.layers.0.self_attn.q_proj.weight"
-                            # We need to check if this belongs to any of our layer paths
-
-                            for layer_path, layer_idx in layer_path_to_idx.items():
-                                # Check if key starts with this layer path
-                                layer_prefix = layer_path + '.'
-                                if key.startswith(layer_prefix):
-                                    # Extract the part after the layer path
-                                    new_key = key.split(".", 1)[1]
-                                    if single:
-                                        new_key = new_key.split(".", 1)[1]
-                                    state_dict[new_key] = f.get_tensor(key)
-                                    keys_loaded += 1
-                                    break
-
-                        if keys_loaded > 0:
-                            logging.info(
-                                f"  Loaded {keys_loaded} tensors from this shard"
-                            )
-
-                logging.info(
-                    f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
-                )
-
-            else:
-                # Fallback: use pytorch_model.bin files
-                logging.info("No safetensors found, trying pytorch_model.bin")
-                state_dict = _load_from_pytorch_bins(model_path, layer_paths)
-
-        except Exception as e:
-            logging.error(f"Error loading weights: {e}")
-            raise ValueError(f"Failed to load layer weights: {str(e)}")
-
-        return state_dict
 
     def send_request(self, request_type, args, timeout=None):
         """Send request to coordinator node with timeout handling"""
@@ -457,9 +352,9 @@ class DistributedWorker:
 
         # Else try Hugging Face for model info
         else:
-            self._load_model_skeleton(model_name, module_id)
-            module = self._initialize_model_from_config(
-                model_name, module_name, module_info
+            model_config = self._load_model_skeleton(model_name, module_id)
+            module = self._initialize_module_from_config(
+                model_config, model_name, module_name, module_info
             )
 
         #   else:
@@ -485,7 +380,6 @@ class DistributedWorker:
                     pass
 
         # Initialize storage structures
-        module = module.to(self.device)
         module.intermediates = {}
         module.host = module_info.get('host')
         module.n_batch = 0
@@ -497,26 +391,128 @@ class DistributedWorker:
             # Placeholder - actual initialization happens in state_update
             self.optimizers[module_id] = optimizer_cls
 
-        print(f"module: {module_id}, worker: {our_id}")
         self.send_request("module_loaded", module_id)
 
-    def _initialize_model_from_config(
-        self, model_name: str, module_name: str, module_info: Dict[str, Any]
+    def _load_specific_layer_weights(
+        self,
+        model_name: str,
+        layer_paths: List[str],
+        single: bool = False,
+        base_model_prefix: str = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Load only the weights for specific layers from HuggingFace.
+        Uses safetensors for efficient weight loading without loading entire model.
+
+        If layer_paths contains 'model' or is empty, loads all weights.
+        """
+        state_dict = {}
+
+        try:
+            # Use snapshot_download for efficient caching
+            logging.info(f"Checking cache for {model_name}")
+            model_path = snapshot_download(
+                repo_id=model_name,
+                cache_dir=self.hf_cache_dir,
+                allow_patterns=[
+                    "*.safetensors",
+                    "*.bin",
+                    "*.json",
+                ],
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+                local_files_only=False,
+            )
+            logging.info(f"Model located at: {model_path}")
+
+            # Find all safetensors files
+            safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
+
+            if safetensor_files:
+                logging.info(f"Found {len(safetensor_files)} safetensors files")
+
+                # Load only specific layers
+                layer_path_to_idx = {path: idx for idx, path in enumerate(layer_paths)}
+
+                for shard_path in safetensor_files:
+                    logging.info(f"Reading weights from {os.path.basename(shard_path)}")
+
+                    with safe_open(shard_path, framework="pt", device="cpu") as f:
+                        keys_loaded = 0
+                        for key in f.keys():
+                            # Check if key starts with any of our layer paths
+                            for layer_path, layer_idx in layer_path_to_idx.items():
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    # Extract the part after the layer path
+                                    new_key = key[len(layer_prefix) :]
+                                    if single and '.' in new_key:
+                                        # For single modules, remove one more level
+                                        new_key = new_key.split('.', 1)[1]
+                                    state_dict[new_key] = f.get_tensor(key)
+                                    keys_loaded += 1
+                                    break
+
+                        if keys_loaded > 0:
+                            logging.info(
+                                f"  Loaded {keys_loaded} tensors from this shard"
+                            )
+
+                logging.info(
+                    f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
+                )
+
+            else:
+                # Fallback: use pytorch_model.bin files
+                logging.info("No safetensors found, trying pytorch_model.bin")
+                bin_files = glob.glob(os.path.join(model_path, "pytorch_model*.bin"))
+
+                if bin_files:
+                    for bin_path in bin_files:
+                        logging.info(f"Loading from {os.path.basename(bin_path)}")
+                        shard_dict = torch.load(bin_path, map_location="cpu")
+
+                        # Load only matching keys
+                        for key, value in shard_dict.items():
+                            for layer_path in layer_paths:
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    new_key = key[len(layer_prefix) :]
+                                    if single and '.' in new_key:
+                                        new_key = new_key.split('.', 1)[1]
+                                    state_dict[new_key] = value
+                                    break
+
+                    logging.info(f"Loaded {len(state_dict)} tensors from .bin files")
+                else:
+                    raise ValueError(f"No weight files found in {model_path}")
+
+        except Exception as e:
+            logging.error(f"Error loading weights: {e}")
+            raise ValueError(f"Failed to load layer weights: {str(e)}")
+
+        return state_dict
+
+    def _initialize_module_from_config(
+        self,
+        config: AutoConfig,
+        model_name: str,
+        module_name: str,
+        module_info: Dict[str, Any],
     ) -> torch.nn.Module:
         """
         Load model or specific layers from HuggingFace.
         Handles both single modules and grouped layer ranges.
         """
         try:
-            # Load base model config
-            config = AutoConfig.from_pretrained(model_name)
-
             # Determine if this is a grouped layer load
             module_type = module_info.get('type', 'offloaded')
+            module_id = module_info.get("module_id")
 
             if module_type == 'offloaded_group':
                 # Load grouped layers
-                return self._load_grouped_layers(model_name, config, module_info)
+                return self._load_grouped_layers(
+                    model_name, config, module_id, module_info
+                )
             else:
                 # Load single module
                 return self._load_single_module(model_name, config, module_info)
@@ -526,7 +522,11 @@ class DistributedWorker:
             raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
 
     def _load_grouped_layers(
-        self, model_name: str, config: AutoConfig, module_info: Dict[str, Any]
+        self,
+        model_name: str,
+        config: AutoConfig,
+        module_id: str,
+        module_info: Dict[str, Any],
     ) -> torch.nn.Module:
         """
         Load a group of layers as a single module. Uses empty weights initialization
@@ -534,7 +534,8 @@ class DistributedWorker:
         """
         layer_paths = module_info.get('layer_paths', [])
         layer_range = module_info.get('layer_range', [])
-        parent_forward_code = module_info.get('parent_forward_code', None)
+        expected_inputs = module_info.get('expected_inputs', [])
+        expected_outputs = module_info.get('expected_outputs', [])
 
         if not layer_paths:
             raise ValueError("layer_paths must be provided for grouped layer loading")
@@ -549,12 +550,17 @@ class DistributedWorker:
 
         # Create the layer group wrapper with empty weights
         grouped_module = self._create_layer_group_wrapper(
-            base_model, layer_paths, parent_forward_code
+            base_model, layer_paths, expected_inputs, expected_outputs
         )
+
+        # Get name of model for loading weights
+        base_model_prefix = getattr(base_model, "base_model_prefix", None)
 
         # Now load only the weights for the assigned layers
         logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
-        state_dict = self._load_specific_layer_weights(model_name, layer_paths)
+        state_dict = self._load_specific_layer_weights(
+            model_name, layer_paths, base_model_prefix=base_model_prefix
+        )
 
         # Load the state dict into the grouped module
         grouped_module = grouped_module.to_empty(device=self.device)
@@ -583,6 +589,10 @@ class DistributedWorker:
 
         logging.info(f"Loading single module {module_class_name} from {model_name}")
 
+        if parent_module_path == "":
+            logging.info("Parent module is entire model — loading full model.")
+            return AutoModel.from_config(config).to(self.device)
+
         # Initialize model with empty weights
         with init_empty_weights():
             base_model = AutoModel.from_config(config)
@@ -590,30 +600,30 @@ class DistributedWorker:
         # Extract the specific module with empty weights
         if parent_module_path and parent_module_path != "model":
             # explicit path provided
-            target_module = _get_nested_module(base_model, parent_module_path)
+            target_module = get_nested_module(base_model, parent_module_path)
             effective_layer_path = parent_module_path
         else:
             # parent_module_path is 'model' or empty -> try to find by class name
             found_path = _find_module_path_by_class(base_model, module_class_name)
             if found_path is None:
                 # if not found, as a safe fallback return the root module but warn the caller
-                logging.warning(
-                    "Could not find submodule by class name; falling back to root model. "
-                    "This will load the whole model's matching keys."
-                )
                 target_module = base_model
-                effective_layer_paths = [parent_module_path or "model"]
+                effective_layer_path = parent_module_path or "model"
             else:
-                if found_path == "":
-                    effective_layer_path = "model"
-                else:
-                    effective_layer_path = f"model.{found_path}"
-                target_module = _get_nested_module(base_model, effective_layer_path)
+                effective_layer_path = f"model.{found_path}"
+                target_module = get_nested_module(base_model, effective_layer_path)
+
+        # Get name of model for loading weights
+        base_model_prefix = getattr(base_model, "base_model_prefix", None)
 
         # Load only the weights for this specific module
         logging.info(f"Loading weights for {parent_module_path}")
+
         state_dict = self._load_specific_layer_weights(
-            model_name, [effective_layer_path], single=True
+            model_name,
+            [effective_layer_path],
+            single=True,
+            base_model_prefix=base_model_prefix,
         )
 
         target_module = target_module.to_empty(device=self.device)
@@ -639,7 +649,8 @@ class DistributedWorker:
         self,
         base_model: torch.nn.Module,
         layer_paths: List[str],
-        parent_forward_code: Optional[str] = None,
+        expected_inputs: List[str],
+        expected_outputs: List[str],
     ) -> torch.nn.Module:
         """
         Create a wrapper module that processes multiple layers sequentially.
@@ -648,101 +659,111 @@ class DistributedWorker:
 
         class LayerGroupModule(torch.nn.Module):
             def __init__(
-                self, layers: List[torch.nn.Module], forward_logic: Optional[str] = None
+                self,
+                layers: List[torch.nn.Module],
+                input_vars: List[str],
+                output_vars: List[str],
+                forward_logic: Optional[str] = None,
             ):
                 super().__init__()
                 self.layers = torch.nn.ModuleList(layers)
+                self.input_vars = input_vars
+                self.output_vars = output_vars
                 self.forward_logic = forward_logic
                 self.num_layers = len(layers)
 
-            def forward(self, hidden_states, *args, **kwargs):
+            def forward(self, *args, **kwargs):
                 """
                 Process input through all layers sequentially.
-                Handles common transformer layer arguments like attention_mask, position_ids, etc.
+
+                The parent's injected forward will call this as:
+                    output1, output2, ... = worker(input1, input2, ...)
+
+                We need to:
+                1. Map positional args to the expected variable names
+                2. Process through all layers
+                3. Return outputs in the expected order
                 """
-                # If custom forward logic is provided, use it
-                if self.forward_logic:
-                    # Create local namespace with necessary variables
-                    local_vars = {
-                        'hidden_states': hidden_states,
-                        'layers': self.layers,
-                        'torch': torch,
-                        **kwargs,
-                    }
-                    # Execute custom forward logic
-                    exec(self.forward_logic, {}, local_vars)
-                    return local_vars.get('output', local_vars.get('hidden_states'))
+                # Map positional args to named variables
+                input_dict = {}
+                for i, var_name in enumerate(self.input_vars):
+                    if i < len(args):
+                        input_dict[var_name] = args[i]
 
-                # Default forward pass through all layers
-                output = hidden_states
+                # Add any keyword args
+                input_dict.update(kwargs)
 
-                # Extract common transformer arguments
-                attention_mask = kwargs.get('attention_mask', None)
-                position_ids = kwargs.get('position_ids', None)
-                past_key_values = kwargs.get('past_key_values', None)
-                use_cache = kwargs.get('use_cache', False)
-                output_attentions = kwargs.get('output_attentions', False)
-                output_hidden_states = kwargs.get('output_hidden_states', False)
+                # Extract the main state variable (usually hidden_states)
+                # This is what flows through the layers
+                hidden_states = input_dict.get('hidden_states')
+                if hidden_states is None:
+                    raise ValueError("Expected 'hidden_states' in inputs")
 
-                all_hidden_states = () if output_hidden_states else None
-                all_self_attentions = () if output_attentions else None
-                next_decoder_cache = () if use_cache else None
+                # Initialize accumulators for outputs
+                all_hidden_states = input_dict.get('all_hidden_states', ())
+                all_self_attns = input_dict.get('all_self_attns', ())
 
+                # Extract control flags
+                output_hidden_states = input_dict.get('output_hidden_states', False)
+                output_attentions = input_dict.get('output_attentions', False)
+                use_cache = input_dict.get('use_cache', False)
+
+                # Process through layers
                 for idx, layer in enumerate(self.layers):
+                    # Add current hidden state if needed
                     if output_hidden_states:
-                        all_hidden_states = all_hidden_states + (output,)
+                        all_hidden_states = all_hidden_states + (hidden_states,)
 
-                    # Prepare layer inputs
+                    # Prepare layer inputs from input_dict
                     layer_kwargs = {}
-                    if attention_mask is not None:
-                        layer_kwargs['attention_mask'] = attention_mask
-                    if position_ids is not None:
-                        layer_kwargs['position_ids'] = position_ids
-                    if past_key_values is not None:
-                        layer_kwargs['past_key_value'] = (
-                            past_key_values[idx] if idx < len(past_key_values) else None
-                        )
+
+                    # Common layer arguments
+                    for key in [
+                        'attention_mask',
+                        'position_ids',
+                        'position_embeddings',
+                        'past_key_value',
+                        'cache_position',
+                        'causal_mask_mapping',
+                    ]:
+                        if key in input_dict:
+                            layer_kwargs[key] = input_dict[key]
+
+                    # Control flags
                     if use_cache:
                         layer_kwargs['use_cache'] = use_cache
                     if output_attentions:
                         layer_kwargs['output_attentions'] = output_attentions
 
-                    # Process through layer
-                    layer_outputs = layer(output, **layer_kwargs)
+                    # Call the layer
+                    layer_outputs = layer(hidden_states, **layer_kwargs)
 
-                    # Handle different output formats
+                    # Handle layer outputs
                     if isinstance(layer_outputs, tuple):
-                        output = layer_outputs[0]
-                        if use_cache:
-                            next_decoder_cache = next_decoder_cache + (
-                                layer_outputs[-1],
-                            )
-                        if output_attentions:
-                            all_self_attentions = all_self_attentions + (
-                                layer_outputs[1],
-                            )
+                        hidden_states = layer_outputs[0]
+                        if output_attentions and len(layer_outputs) > 1:
+                            all_self_attns = all_self_attns + (layer_outputs[1],)
                     else:
-                        output = layer_outputs
+                        hidden_states = layer_outputs
 
-                # Construct return value based on requested outputs
-                if not (use_cache or output_attentions or output_hidden_states):
-                    return output
+                # Build output dictionary
+                output_dict = {
+                    'hidden_states': hidden_states,
+                    'all_hidden_states': all_hidden_states,
+                    'all_self_attns': all_self_attns,
+                }
 
-                result = (output,)
-                if output_hidden_states:
-                    result = result + (all_hidden_states,)
-                if output_attentions:
-                    result = result + (all_self_attentions,)
-                if use_cache:
-                    result = result + (next_decoder_cache,)
-
-                return result
+                # Return outputs in the expected order
+                if len(self.output_vars) == 1:
+                    return output_dict[self.output_vars[0]]
+                else:
+                    return tuple(output_dict.get(var) for var in self.output_vars)
 
         # Extract the actual layer modules
-        layers = [_get_nested_module(base_model, path) for path in layer_paths]
+        layers = [get_nested_module(base_model, path) for path in layer_paths]
 
         # Create and return the wrapper
-        return LayerGroupModule(layers, parent_forward_code)
+        return LayerGroupModule(layers, expected_inputs, expected_outputs)
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""
@@ -912,6 +933,7 @@ class DistributedWorker:
 
         skeleton_model.eval()  # Set to eval mode initially
         self.modules[module_id] = skeleton_model
+        return model_config
 
     def run(self):
         """Main execution thread"""
