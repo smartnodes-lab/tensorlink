@@ -48,6 +48,7 @@ transformers = "^4.52.4"
 uvicorn = "0.34.0"
 web3 = "7.3.0"
 huggingface-hub = "^0.32.3"
+accelerate = "^1.12.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.4"
