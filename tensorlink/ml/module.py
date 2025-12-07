@@ -1,24 +1,16 @@
-import ast
-import inspect
-import logging
-import textwrap
-import types
-from typing import Generator, OrderedDict, List, Optional, Type, Dict, Any, Union
-from collections import defaultdict
-
 from accelerate import init_empty_weights
 from transformers import PreTrainedModel, AutoConfig, AutoModel
-from transformers.utils import ModelOutput
+from typing import Generator, List, Optional, Type, Dict, Any, Union
+from contextlib import contextmanager
 import torch.optim as optim
 import torch.nn as nn
 import torch
 import threading
-import hashlib
+import logging
 import pickle
+import types
 import queue
-import random
 import time
-import base64
 import json
 import gc
 import io
@@ -89,6 +81,20 @@ def _confirm_action():
             exit(1)
         else:
             print("Invalid input. Please type 'yes'/'y' or 'no'/'n'.")
+
+
+@contextmanager
+def _set_micro(local: threading.local, micro: int):
+    """Context manager to set thread-local micro id and remove it on exit."""
+    setattr(local, "micro", micro)
+    try:
+        yield
+    finally:
+        # remove attribute so thread reuse won't leak it
+        try:
+            delattr(local, "micro")
+        except AttributeError:
+            pass
 
 
 class CustomAutogradRouter(torch.autograd.Function):
@@ -195,6 +201,7 @@ class DistributedModel(nn.Module):
         self.node_requests = self.node.node_requests
         self.node_responses = self.node.node_responses
         self.mpc_lock = self.node.mpc_lock
+        self._thread_local = threading.local()
 
         if verbose:
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
@@ -258,9 +265,9 @@ class DistributedModel(nn.Module):
         return replace_output_with_custom_grad(combined_output, custom_grad_output)
 
     def _perform_micro_forward(self, micro, *args, **kwargs):
-        kwargs["micro"] = micro
-        x = self.model(*args, **kwargs)
-        self.model.outputs[micro] = x
+        with _set_micro(self._thread_local, micro):
+            x = self.model(*args, **kwargs)
+            self.model.outputs[micro] = x
 
     def backward(self, loss):
         """
@@ -289,88 +296,90 @@ class DistributedModel(nn.Module):
 
     def _perform_micro_backward(self, micro, loss):
         """
-        Process each backwards stream
+        Process each backward stream
         """
+        with _set_micro(self._thread_local, micro):
+            # Get the oldest epoch intermediates from storage via dict key lookup (todo)
+            while len(self.model.intermediates[micro]) > 0:
+                vals = self.model.intermediates[micro].pop(-1)
 
-        # Get the oldest epoch intermediates from storage via dict key lookup (todo)
-        while len(self.model.intermediates[micro]) > 0:
-            vals = self.model.intermediates[micro].pop(-1)
+                # Len vals 2 means backwards pass of first & last submodule
+                if len(vals) == 2:
+                    val1, val2 = vals
 
-            # Len vals 2 means backwards pass of first & last submodule
-            if len(vals) == 2:
-                val1, val2 = vals
+                    # Pass of the first submodule / section contains tensor in the first position
+                    if isinstance(val1, torch.Tensor):
+                        assoc_output, _ = vals
+                        loss = assoc_output.backward(loss, retain_graph=True)
 
-                # Pass of the first submodule / section contains tensor in the first position
-                if isinstance(val1, torch.Tensor):
-                    assoc_output, _ = vals
-                    loss = assoc_output.backward(loss, retain_graph=True)
+                        if loss is None:
+                            # If loss is None, use the associated output for backward pass
+                            loss = assoc_output
 
-                    if loss is None:
-                        # If loss is None, use the associated output for backward pass
-                        loss = assoc_output
-
-                # Pass of the last section
-                else:
-                    module_id_bytes, assoc_input = vals
-                    tag = [self.model.n_batch, micro, module_id_bytes]
-
-                    # If there are remaining computations between output and last submodule
-                    if loss.grad_fn is not None:
-                        loss.backward()
-                        loss = assoc_input.grad
-
-                    start_time = time.time()
-                    worker_id = self.distributed_graph[module_id_bytes][
-                        "assigned_workers"
-                    ][-1]
-                    key = tag[:2] + [module_id_bytes, module_id_bytes]
-
-                    if self.trusted:
-                        size, shm_name = store_in_shared_memory(
-                            (detach_tensor(loss), None)
-                        )
+                    # Pass of the last section
                     else:
-                        loss_bytes = tensor_to_bytes(loss)
-                        size, shm_name = store_in_shared_memory(
-                            loss_bytes, encoded=True
+                        module_id_bytes, assoc_input = vals
+                        tag = [self.model.n_batch, micro, module_id_bytes]
+
+                        # If there are remaining computations between output and last submodule
+                        if loss.grad_fn is not None:
+                            loss.backward()
+                            loss = assoc_input.grad
+
+                        start_time = time.time()
+                        worker_id = self.distributed_graph[module_id_bytes][
+                            "assigned_workers"
+                        ][-1]
+                        key = tag[:2] + [module_id_bytes, module_id_bytes]
+
+                        if self.trusted:
+                            size, shm_name = store_in_shared_memory(
+                                (detach_tensor(loss), None)
+                            )
+                        else:
+                            loss_bytes = tensor_to_bytes(loss)
+                            size, shm_name = store_in_shared_memory(
+                                loss_bytes, encoded=True
+                            )
+
+                        self.send_request(
+                            "send_backward", (worker_id, size, shm_name, tag)
                         )
 
-                    self.send_request("send_backward", (worker_id, size, shm_name, tag))
+                        # Wait for response, change to appending waiting thread to list in master
+                        waiting = True
+                        while waiting:
+                            time.sleep(0.1)
+                            args = self.send_request("check_backward", key)
 
-                    # Wait for response, change to appending waiting thread to list in master
-                    waiting = True
-                    while waiting:
-                        time.sleep(0.1)
-                        args = self.send_request("check_backward", key)
+                            if args is not None:
+                                waiting = False
+                                size, name = args
 
-                        if args is not None:
-                            waiting = False
-                            size, name = args
+                                if self.trusted:
+                                    loss = get_from_shared_memory(size, name)
 
-                            if self.trusted:
-                                loss = get_from_shared_memory(size, name)
+                                else:
+                                    loss_bytes = get_from_shared_memory(
+                                        size, name, encoded=True
+                                    )
+                                    loss = bytes_to_tensor(loss_bytes)
 
-                            else:
-                                loss_bytes = get_from_shared_memory(
-                                    size, name, encoded=True
-                                )
-                                loss = bytes_to_tensor(loss_bytes)
+                            if time.time() - start_time >= MAX_WAIT_TIME:
+                                # Logic here to request another worker take his place
+                                waiting = False
 
-                        if time.time() - start_time >= MAX_WAIT_TIME:
-                            # Logic here to request another worker take his place
-                            waiting = False
+                        self.send_request(
+                            "release_memory",
+                            ("backward_queue", module_id_bytes, tuple(tag)),
+                        )
 
-                    self.send_request(
-                        "release_memory",
-                        ("backward_queue", module_id_bytes, tuple(tag)),
-                    )
-
-            elif len(vals) == 1:
-                assoc_input = vals[0]
-                if isinstance(assoc_input, torch.Tensor):
-                    assoc_input.backward(loss)
-            else:
-                raise "Expect vals to be of length 1 or 2."
+                elif len(vals) == 1:
+                    assoc_input = vals[0]
+                    if isinstance(assoc_input, torch.Tensor):
+                        assoc_input.backward(loss)
+                else:
+                    raise "Expect vals to be of length 1 or 2."
 
     def get_info_from_module_id(self, mod_id: list, micro: int = None):
         for info in self.distributed_graph.values():
@@ -744,6 +753,8 @@ class DistributedModel(nn.Module):
             io_signature = get_loop_io_signature(self.model)
             module_info["expected_inputs"] = list(io_signature["all_inputs"])
             module_info["expected_outputs"] = list(io_signature["all_outputs"])
+            module_info["loop_body_source"] = io_signature["loop_body_source"]
+            module_info["loop_iterator_name"] = io_signature["loop_iterator_name"]
 
             file_name = f"{module_id}_{worker_id}.pt"
             with open(file_name, "wb") as f:
@@ -965,9 +976,11 @@ class OffloadedModule(nn.Module):
         return output
 
     def forward(self, *args, **kwargs):
+        from tensorlink.ml.utils import handle_output
+
         start_time = time.time()
         n_batch = self.parent_model.model.n_batch
-        n_micro = kwargs.pop("micro")
+        n_micro = getattr(self.parent_model._thread_local, "micro", None)
         n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
         tag = [n_batch, n_micro, self.module_id]
@@ -978,7 +991,8 @@ class OffloadedModule(nn.Module):
                 [handle_output(args), self.module_id]
             )
 
-        detached_args = handle_output(args).clone().detach()
+        args = handle_output(args)
+        detached_args = detach_tensor(args, clone=True)
         args_bytes = tensor_to_bytes(detached_args)
         kwargs_bytes = tensor_to_bytes(kwargs)
         forward_bytes = args_bytes + b"|" + kwargs_bytes

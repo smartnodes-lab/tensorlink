@@ -647,8 +647,6 @@ class DistributedValidator(DistributedWorker):
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
-            distributed_model.forward(torch.zeros((10, 1), dtype=torch.long))
-
             # Mark as ready
             self.model_state[model_name] = "ready"
             self.models_initializing.discard(model_name)

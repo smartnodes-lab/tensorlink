@@ -23,6 +23,7 @@ from tensorlink.ml.utils import (
     enable_grad,
     get_nested_module,
 )
+from tensorlink.ml.injector import LayerGroupModule
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 
@@ -50,48 +51,29 @@ def _find_module_path_by_class(
     return None
 
 
-def _load_from_pytorch_bins(
-    model_path: str, layer_paths: List[str]
-) -> Dict[str, torch.Tensor]:
+def _create_layer_group_wrapper(
+    base_model: torch.nn.Module,
+    layer_paths: List[str],
+    expected_inputs: List[str],
+    expected_outputs: List[str],
+    loop_body_source: str,
+    loop_iterator_name: str,
+) -> torch.nn.Module:
     """
-    Fallback method to load weights from pytorch_model.bin files.
-    Uses local model_path from snapshot_download.
+    Create a wrapper module that processes multiple layers sequentially.
+    This allows the worker to process all layers in one forward pass.
     """
-    import glob
+    # Extract the actual layer modules
+    layers = [get_nested_module(base_model, path) for path in layer_paths]
 
-    state_dict = {}
-
-    # Find all bin files in the model directory
-    bin_files = glob.glob(os.path.join(model_path, "*.bin"))
-
-    if not bin_files:
-        raise ValueError(f"No weight files found in {model_path}")
-
-    logging.info(f"Found {len(bin_files)} pytorch bin files")
-
-    layer_prefixes = set()
-    for path in layer_paths:
-        layer_prefixes.add(path + '.')
-
-    for bin_path in bin_files:
-        logging.info(f"Loading weights from {os.path.basename(bin_path)}")
-
-        # Load the bin file
-        shard_state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
-
-        # Extract only the weights we need
-        for key, tensor in shard_state_dict.items():
-            for prefix in layer_prefixes:
-                if key.startswith(prefix):
-                    relative_key = key[len(prefix.rstrip('.') + '.') :]
-                    state_dict[relative_key] = tensor
-                    break
-
-        # Clear memory
-        del shard_state_dict
-
-    logging.info(f"Loaded {len(state_dict)} weight tensors from pytorch bins")
-    return state_dict
+    # Create and return the wrapper
+    return LayerGroupModule(
+        layers=layers,
+        input_vars=expected_inputs,
+        output_vars=expected_outputs,
+        loop_body_source=loop_body_source,
+        loop_iterator_name=loop_iterator_name,
+    )
 
 
 class DistributedWorker:
@@ -232,13 +214,20 @@ class DistributedWorker:
         inp = enable_grad(attach_tensor(args, self.device))
         kwargs = enable_grad(attach_tensor(kwargs, self.device))
 
+        if not isinstance(inp, (list, tuple)):
+            inp = (inp,)
+
         # Forward pass
         if self.use_amp and module.training:
             with amp.autocast():
-                out = module(inp, **kwargs)
+                out = module(*inp, **kwargs)
         else:
             with torch.set_grad_enabled(module.training):
-                out = module(inp, **kwargs)
+                # we only use kwargs if this is a layer group module
+                if hasattr(module, "num_layers"):
+                    out = module(**kwargs)
+                else:
+                    out = module(*inp, **kwargs)
 
         # Store intermediate results if training
         if module.training:
@@ -448,6 +437,8 @@ class DistributedWorker:
                                     if single and '.' in new_key:
                                         # For single modules, remove one more level
                                         new_key = new_key.split('.', 1)[1]
+                                    else:
+                                        new_key = key.split('.', 1)[1]
                                     state_dict[new_key] = f.get_tensor(key)
                                     keys_loaded += 1
                                     break
@@ -536,6 +527,8 @@ class DistributedWorker:
         layer_range = module_info.get('layer_range', [])
         expected_inputs = module_info.get('expected_inputs', [])
         expected_outputs = module_info.get('expected_outputs', [])
+        loop_body_source = module_info.get('loop_body_source')
+        loop_iterator_name = module_info.get('loop_iterator_name')
 
         if not layer_paths:
             raise ValueError("layer_paths must be provided for grouped layer loading")
@@ -549,8 +542,13 @@ class DistributedWorker:
             base_model = AutoModel.from_config(config)
 
         # Create the layer group wrapper with empty weights
-        grouped_module = self._create_layer_group_wrapper(
-            base_model, layer_paths, expected_inputs, expected_outputs
+        grouped_module = _create_layer_group_wrapper(
+            base_model,
+            layer_paths,
+            expected_inputs,
+            expected_outputs,
+            loop_body_source,
+            loop_iterator_name,
         )
 
         # Get name of model for loading weights
@@ -644,126 +642,6 @@ class DistributedWorker:
         logging.info(f"Successfully loaded single module {module_class_name}")
 
         return target_module
-
-    def _create_layer_group_wrapper(
-        self,
-        base_model: torch.nn.Module,
-        layer_paths: List[str],
-        expected_inputs: List[str],
-        expected_outputs: List[str],
-    ) -> torch.nn.Module:
-        """
-        Create a wrapper module that processes multiple layers sequentially.
-        This allows the worker to process all layers in one forward pass.
-        """
-
-        class LayerGroupModule(torch.nn.Module):
-            def __init__(
-                self,
-                layers: List[torch.nn.Module],
-                input_vars: List[str],
-                output_vars: List[str],
-                forward_logic: Optional[str] = None,
-            ):
-                super().__init__()
-                self.layers = torch.nn.ModuleList(layers)
-                self.input_vars = input_vars
-                self.output_vars = output_vars
-                self.forward_logic = forward_logic
-                self.num_layers = len(layers)
-
-            def forward(self, *args, **kwargs):
-                """
-                Process input through all layers sequentially.
-
-                The parent's injected forward will call this as:
-                    output1, output2, ... = worker(input1, input2, ...)
-
-                We need to:
-                1. Map positional args to the expected variable names
-                2. Process through all layers
-                3. Return outputs in the expected order
-                """
-                # Map positional args to named variables
-                input_dict = {}
-                for i, var_name in enumerate(self.input_vars):
-                    if i < len(args):
-                        input_dict[var_name] = args[i]
-
-                # Add any keyword args
-                input_dict.update(kwargs)
-
-                # Extract the main state variable (usually hidden_states)
-                # This is what flows through the layers
-                hidden_states = input_dict.get('hidden_states')
-                if hidden_states is None:
-                    raise ValueError("Expected 'hidden_states' in inputs")
-
-                # Initialize accumulators for outputs
-                all_hidden_states = input_dict.get('all_hidden_states', ())
-                all_self_attns = input_dict.get('all_self_attns', ())
-
-                # Extract control flags
-                output_hidden_states = input_dict.get('output_hidden_states', False)
-                output_attentions = input_dict.get('output_attentions', False)
-                use_cache = input_dict.get('use_cache', False)
-
-                # Process through layers
-                for idx, layer in enumerate(self.layers):
-                    # Add current hidden state if needed
-                    if output_hidden_states:
-                        all_hidden_states = all_hidden_states + (hidden_states,)
-
-                    # Prepare layer inputs from input_dict
-                    layer_kwargs = {}
-
-                    # Common layer arguments
-                    for key in [
-                        'attention_mask',
-                        'position_ids',
-                        'position_embeddings',
-                        'past_key_value',
-                        'cache_position',
-                        'causal_mask_mapping',
-                    ]:
-                        if key in input_dict:
-                            layer_kwargs[key] = input_dict[key]
-
-                    # Control flags
-                    if use_cache:
-                        layer_kwargs['use_cache'] = use_cache
-                    if output_attentions:
-                        layer_kwargs['output_attentions'] = output_attentions
-
-                    # Call the layer
-                    layer_outputs = layer(hidden_states, **layer_kwargs)
-
-                    # Handle layer outputs
-                    if isinstance(layer_outputs, tuple):
-                        hidden_states = layer_outputs[0]
-                        if output_attentions and len(layer_outputs) > 1:
-                            all_self_attns = all_self_attns + (layer_outputs[1],)
-                    else:
-                        hidden_states = layer_outputs
-
-                # Build output dictionary
-                output_dict = {
-                    'hidden_states': hidden_states,
-                    'all_hidden_states': all_hidden_states,
-                    'all_self_attns': all_self_attns,
-                }
-
-                # Return outputs in the expected order
-                if len(self.output_vars) == 1:
-                    return output_dict[self.output_vars[0]]
-                else:
-                    return tuple(output_dict.get(var) for var in self.output_vars)
-
-        # Extract the actual layer modules
-        layers = [get_nested_module(base_model, path) for path in layer_paths]
-
-        # Create and return the wrapper
-        return LayerGroupModule(layers, expected_inputs, expected_outputs)
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""

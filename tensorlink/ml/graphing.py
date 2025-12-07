@@ -130,12 +130,12 @@ def _group_sequential_layers(config: dict) -> dict:
 
 
 class ModelParser:
-    def __init__(self, user_memory: int = 0):
+    def __init__(self, user_memory: int = 0, verbose=False):
         self.user_memory = user_memory
         self.model_name = ""
         self.assigned_workers = defaultdict(list)
         self.forward_code_cache = {}
-        self.verbose = True
+        self.verbose = verbose
         self.module_paths = {}  # Track all module paths
 
     def create_distributed_config(
@@ -147,6 +147,9 @@ class ModelParser:
         handle_layers: bool = True,
         input_obfuscation: bool = False,
         optimizer_type: str = "adam",
+        host_load_small: bool = False,
+        host_threshold_mb: int = 50,
+        host_max_depth: int = 1,
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
@@ -188,6 +191,9 @@ class ModelParser:
                 input_obfuscation=input_obfuscation,
                 last_worker=None,
                 optimizer_type=optimizer_type,
+                host_load_small=host_load_small,
+                host_threshold_mb=host_threshold_mb,
+                host_max_depth=host_max_depth,
             )
 
             config = _group_sequential_layers(config)
@@ -248,6 +254,9 @@ class ModelParser:
         depth: int = 0,
         ids: list = None,
         optimizer_type="adam",
+        host_load_small: bool = False,
+        host_threshold_mb: int = 50,
+        host_max_depth: int = 1,
     ):
         config = {}
         if ids is None:
@@ -265,6 +274,32 @@ class ModelParser:
 
         if self.verbose:
             print(f"{indent}   Memory required: {memory / 1e6:.2f}MB")
+
+        # Local host small module logic
+        if (
+            host_load_small
+            and (memory / 1e6) <= host_threshold_mb
+            and depth <= host_max_depth
+        ):
+            config[module_path] = {
+                "type": "loaded",
+                "device": "host",
+                "name": self.model_name,
+                "module_id": ids,
+                "memory": memory,
+                "module": (
+                    f"{type(module)}".split(".")[-1].split(">")[0][:-1]
+                    if not isinstance(module, str)
+                    else module
+                ),
+                "module_path": module_path,
+                "training": training,
+                "optimizer_type": optimizer_type,
+            }
+
+            if self.verbose:
+                print(f"{indent} ✓ Kept on host (local) — {memory / 1e6:.2f}MB")
+            return config, None
 
         assigned_worker = self._try_assign_worker(
             memory, module_path, workers_state, last_worker
@@ -678,13 +713,6 @@ def analyze_forward_loop(forward_method, layer_range: List[int]) -> Dict[str, An
     except Exception as e:
         print(f"Could not analyze forward method: {e}")
         return None
-
-
-class ModelSegmentAnalyzer:
-    """
-    Analyzes the forward method of a model to identify three key segments:
-    1. Pre-offload: Model chunk executed on
-    """
 
 
 """

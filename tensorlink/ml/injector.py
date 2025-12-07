@@ -4,6 +4,8 @@ import textwrap
 import ast
 import inspect
 
+import torch.nn
+
 
 class VariableUsageAnalyzer(ast.NodeVisitor):
     """Analyzes variable reads and writes within a code block"""
@@ -11,22 +13,56 @@ class VariableUsageAnalyzer(ast.NodeVisitor):
     def __init__(self):
         self.variables_read = set()
         self.variables_written = set()
+        self.first_access = {}  # Track whether first access is read or write
+        self.access_order = []  # Track order of all accesses
 
     def visit_Name(self, node):
+        var_name = node.id
+
         if isinstance(node.ctx, ast.Load):
-            self.variables_read.add(node.id)
+            self.variables_read.add(var_name)
+            self.access_order.append(('read', var_name))
+            if var_name not in self.first_access:
+                self.first_access[var_name] = 'read'
+
         elif isinstance(node.ctx, ast.Store):
-            self.variables_written.add(node.id)
+            self.variables_written.add(var_name)
+            self.access_order.append(('write', var_name))
+            if var_name not in self.first_access:
+                self.first_access[var_name] = 'write'
+
         self.generic_visit(node)
+
+    def visit_NamedExpr(self, node):
+        """Handle walrus operator assignments like: if (x := value)"""
+        # The target of a walrus operator is always a write
+        if isinstance(node.target, ast.Name):
+            var_name = node.target.id
+            self.variables_written.add(var_name)
+            self.access_order.append(('write', var_name))
+            if var_name not in self.first_access:
+                self.first_access[var_name] = 'write'
+
+        # Visit the value expression (might read other variables)
+        self.visit(node.value)
 
     def visit_Attribute(self, node):
         """Track attribute access like self.x or decoder_layer.attention_type"""
         if isinstance(node.value, ast.Name):
             full_name = f"{node.value.id}.{node.attr}"
+
             if isinstance(node.ctx, ast.Load):
                 self.variables_read.add(full_name)
+                self.access_order.append(('read', full_name))
+                if full_name not in self.first_access:
+                    self.first_access[full_name] = 'read'
+
             elif isinstance(node.ctx, ast.Store):
                 self.variables_written.add(full_name)
+                self.access_order.append(('write', full_name))
+                if full_name not in self.first_access:
+                    self.first_access[full_name] = 'write'
+
         self.generic_visit(node)
 
 
@@ -104,15 +140,99 @@ class FunctionArgExtractor(ast.NodeVisitor):
 
     def __init__(self):
         self.args = set()
+        self.kwarg_name = None
 
     def visit_FunctionDef(self, node):
         for arg in node.args.args:
             if arg.arg != 'self':
                 self.args.add(arg.arg)
 
+            if node.args.kwarg:
+                self.kwarg_name = node.args.kwarg.arg
+
+
+class LayerGroupModule(torch.nn.Module):
+    """
+    Generic wrapper that executes the exact loop body for a subset of layers.
+    Works for any model by reconstructing the original loop logic.
+    """
+
+    def __init__(
+        self,
+        layers: List[torch.nn.Module],
+        input_vars: List[str],
+        output_vars: List[str],
+        loop_body_source: str,
+        loop_iterator_name: str,
+    ):
+        super().__init__()
+        self.layers = torch.nn.ModuleList(layers)
+        self.input_vars = input_vars
+        self.output_vars = output_vars
+        self.loop_iterator_name = loop_iterator_name
+        self.num_layers = len(layers)
+
+        # Generate the forward function from the loop body
+        self.forward_func = self._generate_forward_from_loop(loop_body_source)
+
+    def _generate_forward_from_loop(self, loop_body_source: str) -> types.FunctionType:
+        """
+        Generate a forward function that executes the original loop body
+        for each layer in self.layers.
+        """
+        # Build function signature
+        func_lines = [
+            "def forward(self, **kwargs):",
+            "    # Extract input variables",
+        ]
+
+        # Extract each input variable from kwargs
+        for var in self.input_vars:
+            if var.endswith('_kwargs') or var == 'flash_attn_kwargs':
+                func_lines.append(f"    {var} = kwargs.get('{var}', {{}})")
+            else:
+                func_lines.append(f"    {var} = kwargs.get('{var}')")
+
+        func_lines.append("")
+        func_lines.append("    # Process through layers")
+        func_lines.append(f"    for {self.loop_iterator_name} in self.layers:")
+
+        # Add the original loop body (indented appropriately)
+        loop_lines = loop_body_source.strip().split('\n')
+        for line in loop_lines:
+            func_lines.append(f"        {line}")
+
+        func_lines.append("")
+        func_lines.append("    # Return outputs as a dictionary")
+
+        if len(self.output_vars) == 0:
+            func_lines.append(f"    return {{}}")
+        else:
+            # Build a dictionary with all output variables
+            output_items = [f"'{var}': {var}" for var in sorted(self.output_vars)]
+            func_lines.append(f"    return {{{', '.join(output_items)}}}")
+
+        forward_source = '\n'.join(func_lines)
+
+        # Compile and return
+        namespace = {'self': self, 'torch': torch}
+        exec(forward_source, namespace)
+        return namespace['forward']
+
+    def forward(self, **kwargs):
+        """
+        Execute the generated forward function.
+        This gets replaced by _generate_forward_from_loop.
+        """
+        return self.forward_func(self, **kwargs)
+
 
 def _determine_loop_variables(
-    var_analyzer: VariableUsageAnalyzer, loop_node: ast.For, function_args: Set[str]
+    var_analyzer: VariableUsageAnalyzer,
+    loop_node: ast.For,
+    function_args: Set[str],
+    pre_loop_vars: Set[str],
+    kwarg_name: str = None,
 ) -> Dict:
     """
     Determine which variables need to be passed to workers and returned.
@@ -127,46 +247,67 @@ def _determine_loop_variables(
     else:
         iterator_var = ast.unparse(loop_node.target)
 
-    # Filter out:
-    # 1. Iterator variable and its attributes (decoder_layer, decoder_layer.attention_type)
-    # 2. self.* attributes (module state)
-    # 3. Any dotted names (only keep simple variable names)
+    # Filter out iterator, self.*, and dotted names
     variables_read = set()
     for v in var_analyzer.variables_read:
-        # Skip iterator and its attributes
         if v == iterator_var or v.startswith(f"{iterator_var}."):
             continue
-        # Skip self.* attributes
         if v.startswith('self.'):
             continue
-        # Only include simple variable names (no dots)
         if '.' not in v:
             variables_read.add(v)
 
     variables_written = set()
     for v in var_analyzer.variables_written:
-        # Skip iterator
         if v == iterator_var or v.startswith(f"{iterator_var}."):
             continue
-        # Skip self.*
         if v.startswith('self.'):
             continue
-        # Only simple names
         if '.' not in v:
             variables_written.add(v)
 
+    # A variable must exist before the loop if:
+    # 1. It's first accessed via READ (not write), OR
+    # 2. It's a function argument, OR
+    # 3. It was created before the loop (NEW)
+    read_before_write = set()
+    for var in variables_read:
+        if var in var_analyzer.first_access:
+            if var_analyzer.first_access[var] == 'read':
+                read_before_write.add(var)
+
+    # Add variables that were created before the loop and are read in the loop
+    read_before_write.update(variables_read & pre_loop_vars)
+
+    # Add kwargs parameter if it exists and is used
+    if kwarg_name and kwarg_name in variables_read:
+        read_before_write.add(kwarg_name)
+        function_args.add(kwarg_name)
+
+    pre_loop_written_in_loop = pre_loop_vars & variables_written
+
     # Passthrough: variables both read and written (state that accumulates)
-    passthrough_vars = variables_read & variables_written
+    # OR variables created before loop and modified in loop
+    passthrough_vars = (
+        (read_before_write & variables_written)
+        | (function_args & variables_written)
+        | pre_loop_written_in_loop
+    )
 
     # Input-only: read but never written
-    input_only_vars = variables_read - variables_written
+    input_only_vars = (read_before_write - variables_written) | (
+        function_args - variables_written
+    )
 
-    # Output-only: written but never read (rare)
-    output_only_vars = variables_written - variables_read
+    # Output-only: created in loop (written first) and never read
+    output_only_vars = set()
+    for var in variables_written:
+        if var in var_analyzer.first_access:
+            if var_analyzer.first_access[var] == 'write' and var not in variables_read:
+                output_only_vars.add(var)
 
-    # Filter inputs to only include function arguments or passthrough vars
-    # This excludes loop-created variables like 'layer_outputs'
-    valid_input_only = input_only_vars & function_args
+    # Filter inputs to only include function arguments or passthrough vars or pre-loop vars
+    valid_input_only = input_only_vars & (function_args | pre_loop_vars)
 
     return {
         'input_vars': valid_input_only,
@@ -175,72 +316,6 @@ def _determine_loop_variables(
         'all_inputs': valid_input_only | passthrough_vars,
         'all_outputs': output_only_vars | passthrough_vars,
     }
-
-
-def generate_new_forward_method(
-    parent_module, offloaded_modules: List
-) -> types.FunctionType:
-    """
-    Generate a new forward method with loop replaced by worker calls.
-
-    Args:
-        parent_module: The module whose forward pass contains the loop
-        offloaded_modules: List of OffloadedModule instances to call sequentially
-        original_globals: Global namespace to use for the new function (optional)
-
-    Returns:
-        New forward function (unbound)
-    """
-    # Get original forward source
-    original_forward = parent_module.forward
-    source = inspect.getsource(original_forward)
-    source = textwrap.dedent(source)
-
-    # Parse and analyze
-    tree = ast.parse(source)
-
-    # Extract function arguments
-    arg_extractor = FunctionArgExtractor()
-    arg_extractor.visit(tree)
-
-    # Find the loop
-    loop_finder = LoopFinder()
-    loop_finder.visit(tree)
-
-    if not loop_finder.loop_node:
-        raise ValueError("No suitable loop found in forward pass")
-
-    # Analyze variable usage in loop
-    var_analyzer = VariableUsageAnalyzer()
-    for stmt in loop_finder.loop_node.body:
-        var_analyzer.visit(stmt)
-
-    # Extract the layer call to preserve kwargs
-    layer_call_info = _extract_layer_call(loop_finder.loop_node)
-
-    # Determine input and output variables
-    loop_vars = _determine_loop_variables(
-        var_analyzer, loop_finder.loop_node, arg_extractor.args
-    )
-
-    # Generate new forward code
-    new_forward_code = _generate_new_forward_source(
-        source, loop_finder.loop_node, layer_call_info, loop_vars, offloaded_modules
-    )
-
-    # Prepare namespace
-    namespace = _get_model_module_globals(parent_module, original_forward)
-
-    try:
-        exec(new_forward_code, namespace)
-        return namespace['forward']
-    except Exception as e:
-        print("=" * 80)
-        print("ERROR COMPILING NEW FORWARD")
-        print("=" * 80)
-        print(new_forward_code)
-        print("=" * 80)
-        raise RuntimeError(f"Failed to compile: {e}")
 
 
 def _extract_layer_call(loop_node: ast.For) -> Dict:
@@ -392,21 +467,12 @@ def _generate_worker_calls(
         calls.append(f"{indent}# Worker {idx}: layers {layer_range}")
 
         # Build the call
-        call_str = f"{indent}"
+        call_str = f"{indent}_worker_output = self.offloaded_modules[{idx}]("
 
-        # Handle outputs (unpack if multiple)
-        if len(all_outputs) > 1:
-            outputs_str = ", ".join(all_outputs)
-            call_str += f"{outputs_str} = self.offloaded_modules[{idx}]("
-        elif len(all_outputs) == 1:
-            call_str += f"{list(all_outputs)[0]} = self.offloaded_modules[{idx}]("
-        else:
-            call_str += f"self.offloaded_modules[{idx}]("
-
-        # Add all input variables as arguments
+        # Add all input variables as keyword arguments
         arg_parts = []
         for var in all_inputs:
-            arg_parts.append(f"{indent}    {var}")
+            arg_parts.append(f"{indent}    {var}={var}")
 
         # Add keyword arguments from original call that aren't already in inputs
         for kw_arg, kw_value in layer_call_info['kwargs'].items():
@@ -421,29 +487,31 @@ def _generate_worker_calls(
             call_str += "\n" + ",\n".join(arg_parts) + f"\n{indent}"
 
         call_str += ")"
-
         calls.append(call_str)
+
+        # Unpack the dictionary output
+        if all_outputs:
+            for var in all_outputs:
+                calls.append(f"{indent}{var} = _worker_output.get('{var}', {var})")
+
+        calls.append("")
 
     return calls
 
 
-def get_loop_io_signature(parent_module) -> Dict:
+def generate_new_forward_method(
+    parent_module, offloaded_modules: List
+) -> types.FunctionType:
     """
-    Analyze the forward pass loop and return expected inputs/outputs without injecting.
-
-    Returns a dictionary with:
-    - 'input_vars': Variables read but not written (function args only)
-    - 'passthrough_vars': Variables both read and written (accumulating state)
-    - 'output_vars': Variables written but not read
-    - 'all_inputs': All variables that should be passed in
-    - 'all_outputs': All variables that should be returned
-    - 'layer_call_info': Information about the original layer call signature
+    Generate a new forward method with loop replaced by worker calls.
 
     Args:
         parent_module: The module whose forward pass contains the loop
+        offloaded_modules: List of OffloadedModule instances to call sequentially
+        original_globals: Global namespace to use for the new function (optional)
 
     Returns:
-        Dict containing input/output variable information
+        New forward function (unbound)
     """
     # Get original forward source
     original_forward = parent_module.forward
@@ -465,9 +533,104 @@ def get_loop_io_signature(parent_module) -> Dict:
         raise ValueError("No suitable loop found in forward pass")
 
     # Analyze variable usage in loop
-    var_analyzer = VariableUsageAnalyzer()
+    loop_analyzer = VariableUsageAnalyzer()
     for stmt in loop_finder.loop_node.body:
-        var_analyzer.visit(stmt)
+        loop_analyzer.visit(stmt)
+
+    # Analyze variables created BEFORE the loop
+    func_node = tree.body[0]  # The forward function
+    pre_loop_analyzer = VariableUsageAnalyzer()
+    for stmt in func_node.body:
+        # Stop when we reach the loop
+        if stmt == loop_finder.loop_node:
+            break
+        pre_loop_analyzer.visit(stmt)
+
+    # Variables that exist before the loop are those written before it
+    pre_loop_vars = pre_loop_analyzer.variables_written
+
+    # Extract the layer call to preserve kwargs
+    layer_call_info = _extract_layer_call(loop_finder.loop_node)
+
+    # Determine input and output variables
+    loop_vars = _determine_loop_variables(
+        loop_analyzer,
+        loop_finder.loop_node,
+        arg_extractor.args,
+        pre_loop_vars,
+        arg_extractor.kwarg_name,
+    )
+
+    # Generate new forward code
+    new_forward_code = _generate_new_forward_source(
+        source, loop_finder.loop_node, layer_call_info, loop_vars, offloaded_modules
+    )
+
+    # Prepare namespace
+    namespace = _get_model_module_globals(parent_module, original_forward)
+
+    try:
+        exec(new_forward_code, namespace)
+        return namespace['forward']
+    except Exception as e:
+        print("=" * 80)
+        print("ERROR COMPILING NEW FORWARD")
+        print("=" * 80)
+        print(new_forward_code)
+        print("=" * 80)
+        raise RuntimeError(f"Failed to compile: {e}")
+
+
+def get_loop_io_signature(parent_module) -> Dict:
+    """
+    Analyze the forward pass loop and return all information needed
+    to create model-agnostic layer group wrappers.
+
+    Returns a dictionary with:
+    - 'input_vars': Variables read but not written (function args only)
+    - 'passthrough_vars': Variables both read and written (accumulating state)
+    - 'output_vars': Variables written but not read
+    - 'all_inputs': All variables that should be passed in
+    - 'all_outputs': All variables that should be returned
+    - 'layer_call_info': Information about the original layer call signature
+    - 'loop_body_source': The exact source code of the loop body
+    - 'loop_iterator_name': Name of the loop iterator variable
+    """
+    # Get original forward source
+    original_forward = parent_module.forward
+    source = inspect.getsource(original_forward)
+    source = textwrap.dedent(source)
+
+    # Parse and analyze
+    tree = ast.parse(source)
+
+    # Extract function arguments
+    arg_extractor = FunctionArgExtractor()
+    arg_extractor.visit(tree)
+
+    # Find the loop
+    loop_finder = LoopFinder()
+    loop_finder.visit(tree)
+
+    if not loop_finder.loop_node:
+        raise ValueError("No suitable loop found in forward pass")
+
+    # Analyze variable usage in loop
+    loop_analyzer = VariableUsageAnalyzer()  # FIXED: renamed from var_analyzer
+    for stmt in loop_finder.loop_node.body:
+        loop_analyzer.visit(stmt)
+
+    # Analyze variables created BEFORE the loop
+    func_node = tree.body[0]  # The forward function
+    pre_loop_analyzer = VariableUsageAnalyzer()
+    for stmt in func_node.body:
+        # Stop when we reach the loop
+        if stmt == loop_finder.loop_node:
+            break
+        pre_loop_analyzer.visit(stmt)
+
+    # Variables that exist before the loop are those written before it
+    pre_loop_vars = pre_loop_analyzer.variables_written
 
     # Extract the layer call to preserve kwargs
     call_extractor = LayerCallExtractor()
@@ -480,11 +643,24 @@ def get_loop_io_signature(parent_module) -> Dict:
 
     # Determine input and output variables
     loop_vars = _determine_loop_variables(
-        var_analyzer, loop_finder.loop_node, arg_extractor.args
+        loop_analyzer,
+        loop_finder.loop_node,
+        arg_extractor.args,
+        pre_loop_vars,
+        arg_extractor.kwarg_name,
     )
 
-    # Add layer call info
-    result = {**loop_vars, 'layer_call_info': layer_call_info}
+    # Extract loop body source and iterator name
+    loop_body_source = _extract_loop_body_source(loop_finder.loop_node, source)
+    loop_iterator_name = _extract_loop_iterator_name(loop_finder.loop_node)
+
+    # Add all extracted info
+    result = {
+        **loop_vars,
+        'layer_call_info': layer_call_info,
+        'loop_body_source': loop_body_source,
+        'loop_iterator_name': loop_iterator_name,
+    }
 
     return result
 
@@ -525,3 +701,49 @@ def _get_model_module_globals(parent_module, original_forward) -> dict:
                 return vars(sys.modules[class_module_name])
 
     return func_globals
+
+
+def _extract_loop_body_source(loop_node: ast.For, original_source: str) -> str:
+    """
+    Extract the exact source code of the loop body.
+    This preserves the original logic for model-agnostic execution.
+    """
+    lines = original_source.split('\n')
+
+    # Get the first and last line of the loop body
+    first_stmt = loop_node.body[0]
+    last_stmt = loop_node.body[-1]
+
+    start_line = first_stmt.lineno - 1  # 0-indexed
+    end_line = last_stmt.end_lineno  # inclusive, 1-indexed, so no -1
+
+    # Extract the body lines
+    body_lines = lines[start_line:end_line]
+
+    # Determine the base indentation (from first line)
+    if body_lines:
+        first_line = body_lines[0]
+        base_indent = len(first_line) - len(first_line.lstrip())
+
+        # Remove base indentation from all lines
+        dedented_lines = []
+        for line in body_lines:
+            if line.strip():  # Non-empty line
+                dedented_lines.append(line[base_indent:])
+            else:  # Empty line
+                dedented_lines.append('')
+
+        return '\n'.join(dedented_lines)
+
+    return ''
+
+
+def _extract_loop_iterator_name(loop_node: ast.For) -> str:
+    """
+    Extract the name of the loop iterator variable.
+    Example: for decoder_layer in self.layers: -> 'decoder_layer'
+    """
+    if isinstance(loop_node.target, ast.Name):
+        return loop_node.target.id
+    else:
+        return ast.unparse(loop_node.target)

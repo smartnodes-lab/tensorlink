@@ -233,23 +233,6 @@ def estimate_hf_model_memory(
         return 0.0, {}
 
 
-def get_hf_model(model_name: str, tokenizer: bool = False):
-    try:
-        # Get model information from Hugging Face api
-        model = AutoModelForCausalLM.from_pretrained(model_name)
-
-        if tokenizer:
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-        else:
-            tokenizer = None
-
-        return model, tokenizer
-
-    except Exception as e:
-        # TODO route error to validator for reporting
-        return
-
-
 def get_gpu_memory():
     # Check how much available mpc we can allocate to the roles
     memory = 0
@@ -266,14 +249,6 @@ def get_gpu_memory():
         memory += 4e9
 
     return memory
-
-
-def get_first_layer(model: nn.Module):
-    if len(list(model.children())) > 0:
-        submodule = next(model.children())
-        return get_first_layer(submodule)
-    else:
-        return model
 
 
 def find_module(module: nn.Module, target_name: str, ids: list = []):
@@ -315,41 +290,53 @@ def access_module(module: nn.Module, indices: list):
     return current_module, module_name
 
 
-def detach_tensor(tensor):
-    if isinstance(tensor, torch.Tensor):
-        detached_tensor = tensor.detach().cpu()
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_tensor
-    elif isinstance(tensor, ModelOutput):
-        for key, value in tensor.items():
-            if isinstance(value, torch.Tensor):
-                tensor[key] = value.detach().cpu()
-                del value
-                torch.cuda.empty_cache()
-        return tensor
-    elif isinstance(tensor, (list, tuple)):
-        detached_list = type(tensor)(
-            detach_tensor(t) if isinstance(t, (ModelOutput, torch.Tensor)) else t
-            for t in tensor
-        )
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_list
-    elif isinstance(tensor, dict):
-        detached_dict = {
-            key: (
-                detach_tensor(value)
-                if isinstance(value, (ModelOutput, torch.Tensor))
-                else value
+def detach_tensor(obj, clone: bool = False):
+    """
+    Recursively detach tensors (and optionally clone them) from GPU to CPU.
+    Supports Tensor, ModelOutput, list, tuple, and dict.
+    """
+    # Case 1: torch.Tensor
+    if isinstance(obj, torch.Tensor):
+        t = obj.detach().cpu()
+        if clone:
+            t = t.clone()
+        return t
+
+    # Case 2: ModelOutput (transformers container)
+    elif isinstance(obj, ModelOutput):
+        new_out = obj.__class__()  # create same output class
+        for key, value in obj.items():
+            if isinstance(value, (torch.Tensor, ModelOutput, list, tuple, dict)):
+                new_out[key] = detach_tensor(value, clone=clone)
+            else:
+                new_out[key] = value
+        return new_out
+
+    # Case 3: list or tuple
+    elif isinstance(obj, (list, tuple)):
+        new_seq = [
+            (
+                detach_tensor(v, clone=clone)
+                if isinstance(v, (torch.Tensor, ModelOutput, list, tuple, dict))
+                else v
             )
-            for key, value in tensor.items()
+            for v in obj
+        ]
+        return type(obj)(new_seq)
+
+    # Case 4: dictionary
+    elif isinstance(obj, dict):
+        return {
+            k: (
+                detach_tensor(v, clone=clone)
+                if isinstance(v, (torch.Tensor, ModelOutput, list, tuple, dict))
+                else v
+            )
+            for k, v in obj.items()
         }
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_dict
+
     else:
-        raise TypeError("Unsupported input type")
+        raise TypeError(f"Unsupported input type: {type(obj)}")
 
 
 def attach_tensor(tensor, device):
@@ -411,7 +398,7 @@ def enable_grad(tensor):
         return {key: enable_grad(value) for key, value in tensor.items()}
 
     else:
-        raise TypeError(f"Unsupported input type: {type(tensor)}")
+        return tensor
 
 
 def handle_output(tensor):
@@ -426,9 +413,11 @@ def handle_output(tensor):
         return tensor.logits
     elif hasattr(tensor, "last_hidden_state"):
         return tensor.last_hidden_state
-    elif isinstance(tensor, tuple):
-        if len(tensor) > 0:
+    elif isinstance(tensor, (tuple, list)):
+        if len(tensor) == 1:
             return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        elif len(tensor) > 1:
+            return type(tensor)(t for t in tensor if isinstance(t, torch.Tensor))
         return tensor
     elif isinstance(tensor, dict):
         # Look for common keys like 'logits' or 'last_hidden_state'
