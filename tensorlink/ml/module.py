@@ -1,5 +1,13 @@
 from accelerate import init_empty_weights
-from transformers import PreTrainedModel, AutoConfig, AutoModel
+from transformers import (
+    PreTrainedModel,
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
+    AutoModelForVision2Seq,
+    AutoModelForSpeechSeq2Seq,
+)
 from typing import Generator, List, Optional, Type, Dict, Any, Union
 from contextlib import contextmanager
 import torch.optim as optim
@@ -554,7 +562,7 @@ class DistributedModel(nn.Module):
         )
         return key, self.master_node.nodes[key]["mpc"]
 
-    def distribute_model(self, config=None):
+    def distribute_model(self, config=None, model_type: str = "chat"):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
         if config is None:
@@ -563,7 +571,7 @@ class DistributedModel(nn.Module):
         self.distributed_graph = config
 
         if self.model_name:
-            self._load_model_skeleton()
+            self._load_model_skeleton(model_type)
 
         grouped_layers = {}
 
@@ -866,17 +874,20 @@ class DistributedModel(nn.Module):
             self, optimizer_type, **kwargs
         )
 
-    def _load_model_skeleton(self):
+    def _load_model_skeleton(self, model_type: str = "chat"):
         """Load the HF model structure with empty weights"""
-        model_config = AutoConfig.from_pretrained(self.model_name)
         with init_empty_weights():
-            self.model = AutoModel.from_config(model_config)
-
-    # def _load_assigned_weights(self, config: Dict):
-    #     """Load weights only for modules assigned to us"""
-    #     for module_path, cfg in config:
-    #         if cfg.get("type", "") == "loaded":
-    #             self.my_modules.add()
+            if model_type in ("causal", "chat"):
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+            elif model_type == "seq2seq":
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+            elif model_type == "vision2text":
+                self.model = AutoModelForVision2Seq.from_pretrained(self.model_name)
+            elif model_type == "audio2text":
+                self.model = AutoModelForSpeechSeq2Seq.from_pretrained(self.model_name)
+            else:
+                model_config = AutoConfig.from_pretrained(self.model_name)
+                self.model = AutoModel.from_config(model_config)
 
 
 class OffloadedModule(nn.Module):

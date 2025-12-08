@@ -3,7 +3,7 @@ from tensorlink.p2p.torch_node import Torchnode
 from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.nodes.keeper import Keeper
-from tensorlink.ml.utils import estimate_hf_model_memory
+from tensorlink.ml.utils import estimate_memory
 from tensorlink.api.node import TensorlinkAPI, GenerationRequest
 
 from dotenv import get_key
@@ -355,8 +355,10 @@ class Validator(Torchnode):
             self.rate_limiter.record_attempt(requesters_ip)
 
         # Huggingface model info checks
-        (vram, ram) = estimate_hf_model_memory(
-            job_info.get("model_name"), training=job_info.get("training", False)
+        (vram, ram) = estimate_memory(
+            job_info.get("model_name"),
+            training=job_info.get("training", False),
+            optimizer_type=job_info.get("optimizer"),
         )
 
         if job_info.get("payment", 0) == 0:

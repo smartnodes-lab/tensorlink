@@ -8,6 +8,7 @@ class NodeRequest(BaseModel):
 
 class JobRequest(BaseModel):
     hf_name: str
+    model_type: Optional[str] = None
     time: int = 1800
     payment: int = 0
 
@@ -16,6 +17,7 @@ class GenerationRequest(BaseModel):
     hf_name: str
     message: str
     prompt: str = None
+    model_type: Optional[str] = "auto"
     max_length: int = 2048
     max_new_tokens: int = 2048
     temperature: float = 0.4

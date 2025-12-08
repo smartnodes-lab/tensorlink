@@ -1,4 +1,4 @@
-from tensorlink.ml.utils import estimate_memory, estimate_hf_model_memory
+from tensorlink.ml.utils import estimate_memory
 
 from transformers import AutoModel, AutoConfig
 from accelerate import init_empty_weights
@@ -713,28 +713,3 @@ def analyze_forward_loop(forward_method, layer_range: List[int]) -> Dict[str, An
     except Exception as e:
         print(f"Could not analyze forward method: {e}")
         return None
-
-
-"""
-Example workflow
-
-
-def forward(self, x):
-    x = self.layer1(x)
-    
-    for i in range(len(self.layerlist)):
-        x = self.layerlist[i](x)  # if i > 2, worker 2 is used instead
-        
-        
-worker1: 
-x = self.layer1(x)
-for i in range(2):
-    x = self.layerslist[i](x)
-
-
-worker2:
-
-for i in range(3,5):
-    x = self.layerslist[i](x)
-    
-"""

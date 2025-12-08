@@ -266,6 +266,7 @@ class TensorlinkAPI:
                     "n_workers": 0,
                     "model_name": model_name,
                     "seed_validators": [self.smart_node.rsa_key_hash],
+                    "model_type": job_request.model_type,
                 }
 
                 # Store as HF job request
