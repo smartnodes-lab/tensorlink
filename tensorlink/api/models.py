@@ -1,12 +1,13 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Literal
 
-
 class NodeRequest(BaseModel):
     address: str
 
 
 class JobRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     hf_name: str
     model_type: Optional[str] = None
     time: int = 1800
@@ -14,6 +15,8 @@ class JobRequest(BaseModel):
 
 
 class GenerationRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     hf_name: str
     message: str
     prompt: str = None
@@ -34,5 +37,5 @@ class ModelStatusResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     model_name: str
-    status: str  # "loaded", "loading", "not_loaded", "error"
+    status: str
     message: str
