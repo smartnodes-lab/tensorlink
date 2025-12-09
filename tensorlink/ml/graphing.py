@@ -149,7 +149,8 @@ class ModelParser:
         optimizer_type: str = "adam",
         host_load_small: bool = False,
         host_threshold_mb: int = 50,
-        host_max_depth: int = 1,
+        host_max_depth: int = 2,
+        max_offload_depth: int = 3,
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
@@ -194,6 +195,7 @@ class ModelParser:
                 host_load_small=host_load_small,
                 host_threshold_mb=host_threshold_mb,
                 host_max_depth=host_max_depth,
+                max_offload_depth=max_offload_depth,
             )
 
             config = _group_sequential_layers(config)
@@ -257,6 +259,7 @@ class ModelParser:
         host_load_small: bool = False,
         host_threshold_mb: int = 50,
         host_max_depth: int = 1,
+        max_offload_depth: int = 3,
     ):
         config = {}
         if ids is None:
@@ -266,7 +269,7 @@ class ModelParser:
 
         # Log current module being processed
         if self.verbose:
-            print(f"{indent}📦 Processing: {module_path}")
+            print(f"{indent}Processing: {module_path}")
 
         memory, breakdown = estimate_memory(
             module, training, seq_length=1024, optimizer_type=optimizer_type
@@ -279,7 +282,7 @@ class ModelParser:
         if (
             host_load_small
             and (memory / 1e6) <= host_threshold_mb
-            and depth <= host_max_depth
+            and depth < host_max_depth
         ):
             config[module_path] = {
                 "type": "loaded",
@@ -318,7 +321,7 @@ class ModelParser:
                     if not isinstance(module, str)
                     else module
                 ),
-                "module_path": module_path,  # Add explicit module_path
+                "module_path": module_path,
                 "training": training,
                 "optimizer_type": optimizer_type,
             }
@@ -328,19 +331,33 @@ class ModelParser:
                     "module_id": ids,
                     "memory": memory,
                     "module": module,
-                    "module_path": module_path,  # Track path in assignment
+                    "module_path": module_path,
                 }
             )
 
             if self.verbose:
-                print(f"{indent}   ✓ Assigned to {assigned_worker}")
+                print(f"{indent}   Assigned to {assigned_worker}")
 
             return config, assigned_worker
+
+        # Check if we've exceeded max recursion depth
+        if depth >= max_offload_depth:
+            config[module_path] = {
+                "type": "unassigned",
+                "required_memory": memory,
+                "module_path": module_path,
+                "reason": f"Exceeded max recursion depth ({max_offload_depth})",
+            }
+            if self.verbose:
+                print(f"{indent}   Max recursion depth reached - FAILED")
 
         # too large, recurse into children
         if self.verbose:
             print(
-                f"{indent}   ⚠ Module {module_path} ({memory / 1e6:.2f}MB) too large, recursing into children..."
+                f"{indent}   Module {module_path} ({memory / 1e6:.2f}MB) too large, recursing into children..."
+            )
+            raise AssignmentError(
+                f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
             )
 
         children = list(module.named_children())
@@ -351,13 +368,14 @@ class ModelParser:
                 "module_path": module_path,
             }
             if self.verbose:
-                print(f"{indent}   ✗ No children to recurse into - FAILED")
+                print(f"{indent}   No children to recurse into - FAILED")
             raise AssignmentError(f"Unable to assign {module_path}")
 
         parent_forward_code = self._extract_forward_code(module)
         child_workers = set()
         prev_child_worker = last_worker
         last_successful_worker = last_worker
+        all_children_assigned = True
 
         for child_name, child_module in children:
             child_path = f"{module_path}.{child_name}"
@@ -375,6 +393,10 @@ class ModelParser:
                     input_obfuscation=input_obfuscation,
                     depth=depth + 1,
                     optimizer_type=optimizer_type,
+                    host_load_small=host_load_small,
+                    host_threshold_mb=host_threshold_mb,
+                    host_max_depth=host_max_depth,
+                    max_offload_depth=max_offload_depth,
                 )
 
                 config.update(child_config)
@@ -383,9 +405,11 @@ class ModelParser:
                     last_successful_worker = child_last_worker
                     child_workers.add(child_last_worker)
 
-            except AssignmentError:
-                # if recursion fails, we keep the last successful worker
-                prev_child_worker = last_successful_worker
+            except AssignmentError as e:
+                if self.verbose:
+                    print(f"{indent}   ✗ Child {child_path} failed: {e}")
+                all_children_assigned = False
+                raise
 
         if len(child_workers) > 1 and parent_forward_code:
             for child_path, child_cfg in config.items():

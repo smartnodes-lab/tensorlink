@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Literal
 
+
 class NodeRequest(BaseModel):
     address: str
 

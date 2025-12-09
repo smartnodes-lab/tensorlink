@@ -141,7 +141,7 @@ class DistributedValidator(DistributedWorker):
         self.model_state = {}  # "initializing" | "distributing" | "ready"
 
         self.tokenizers = {}
-        self.GC_CHECK_INTERVAL = 1000
+        self.GC_CHECK_INTERVAL = 1_000
         self.CHECK_COUNTER = 1
 
         # Track models that are in the process of being initialized
@@ -330,6 +330,9 @@ class DistributedValidator(DistributedWorker):
             input_obfuscation=False,
         )
         job_data["distribution"] = distribution
+
+        if len(distribution["config"]) == 0 or len(distribution["config"]) > 4:
+            return {}
 
         # Store distribution in JSON cache
         self._ensure_model_entry(model_name)
@@ -570,15 +573,6 @@ class DistributedValidator(DistributedWorker):
                 )
                 return
 
-            # Create distributed model instance
-            distributed_model = DistributedModel(
-                model_name,
-                node=self.node,
-                training=False,
-            )
-            self.models[model_name] = distributed_model
-            self.model_state[model_name] = "initializing"
-
             # Prepare job data for inspection
             job_data = {
                 "author": None,
@@ -598,7 +592,20 @@ class DistributedValidator(DistributedWorker):
 
             # Inspect model to determine network requirements
             job_data = self.inspect_model(model_name, job_data)
+
+            if not job_data:
+                return
+
+            # Create distributed model instance
+            distributed_model = DistributedModel(
+                model_name,
+                node=self.node,
+                training=False,
+            )
+            self.models[model_name] = distributed_model
+            self.model_state[model_name] = "initializing"
             self.models_initializing.add(job_data.get("id"))
+
             self.send_request(
                 "debug_print",
                 (f"Initialized hosted job for {model_name}", "green", logging.INFO),

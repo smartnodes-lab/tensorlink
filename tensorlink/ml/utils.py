@@ -28,7 +28,7 @@ def estimate_memory(
     module: nn.Module,
     training: bool = True,
     batch_size: int = 256,
-    seq_length: int = 128,
+    seq_length: int = 2048,
     dtype: torch.dtype = torch.float16,
     optimizer_type: str = "adam",
     include_kv_cache: bool = True,
@@ -57,14 +57,11 @@ def estimate_memory(
     # --- Parameter + gradient size ---
     # Count only direct parameters if not recursive
     if recursive:
-        # Count all parameters (for top-level module estimate)
         param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
     else:
-        # Count only parameters directly registered to this module
         param_bytes = sum(
             p.numel() * p.element_size() for p in module.parameters(recurse=False)
         )
-        # Also count buffers (like running_mean, running_var in BatchNorm)
         param_bytes += sum(
             b.numel() * b.element_size() for b in module.buffers(recurse=False)
         )
@@ -72,57 +69,72 @@ def estimate_memory(
     breakdown["parameters"] = param_bytes
 
     if training:
-        grad_bytes = param_bytes  # same size as params
-        breakdown["gradients"] = grad_bytes
+        breakdown["gradients"] = param_bytes
 
-        # Optimizer multiplier (depends on optimizer type)
+        # Optimizer state sizes
         if optimizer_type.lower() in {"adam", "adamw"}:
-            opt_mult = 2  # two moments per param
+            # Adam always stores fp32 moments even with fp16 model
+            opt_dtype_size = 4
+            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * opt_dtype_size
         elif optimizer_type.lower() in {"sgd", "momentum"}:
-            opt_mult = 1
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
         else:
-            opt_mult = 1.5
-        breakdown["optimizer"] = param_bytes * opt_mult
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size * 1.5
+
+        breakdown["optimizer"] = opt_bytes
 
     # --- Activation estimate ---
     # Try to infer hidden size / intermediate shape
     hidden_size = None
-    num_layers = 1
+    num_layers = 0
 
     # if transformer-like, pick up clues
-    for name, submodule in module.named_modules():
-        if isinstance(submodule, nn.MultiheadAttention):
-            hidden_size = submodule.embed_dim
-            num_layers += 1
-        elif hasattr(submodule, "hidden_size"):
-            hidden_size = getattr(submodule, "hidden_size")
-        elif isinstance(submodule, nn.TransformerEncoderLayer):
-            hidden_size = submodule.linear1.in_features
+    for name, sub in module.named_modules():
+        if isinstance(sub, nn.MultiheadAttention):
+            hidden_size = sub.embed_dim
             num_layers += 1
 
+        elif isinstance(sub, nn.TransformerEncoderLayer):
+            hidden_size = sub.linear1.in_features
+            num_layers += 1
+
+        elif hasattr(sub, "hidden_size"):
+            hidden_size = getattr(sub, "hidden_size")
+
+    # fallback heuristic
     if hidden_size is None:
-        # heuristic based on roughly quadratic parameter scaling in transformers
-        hidden_size = int((param_bytes / dtype_size) ** 0.5)
-        hidden_size = max(256, min(hidden_size, 8192))
+        total_params = sum(p.numel() for p in module.parameters())
+        # transformer rule-of-thumb: params ≈ 12 * L * d^2
+        hidden_size = int((total_params / 12) ** 0.5)
+        hidden_size = max(128, min(hidden_size, 8192))
+
+    if num_layers == 0:
+        num_layers = 1
 
     # Activation memory (forward + backward)
-    activation_bytes = batch_size * seq_length * hidden_size * dtype_size * 2
+    per_layer_act = batch_size * seq_length * hidden_size * dtype_size * 3
+    activation_bytes = per_layer_act * num_layers
+
     if training:
-        activation_bytes *= 2  # backward retains activations
+        # backward keeps a copy of activations
+        activation_bytes *= 2
 
     breakdown["activations"] = activation_bytes
 
     # --- KV cache (for transformers during inference) ---
     if include_kv_cache and not training:
-        # assume num_heads ~ hidden_size/64
+        # assume typical num_heads
         num_heads = max(1, hidden_size // 64)
         head_dim = hidden_size // num_heads
-        kv_bytes = (
-            2 * num_layers * num_heads * head_dim * seq_length * batch_size * dtype_size
-        )
-        breakdown["kv_cache"] = kv_bytes
 
-    total = sum(breakdown.values())
+        # KV cache per layer: batch * seq * num_heads * head_dim * 2 (K+V) * dtype_size
+        kv_cache = (
+            batch_size * seq_length * num_heads * head_dim * 2 * num_layers * dtype_size
+        )
+        breakdown["kv_cache"] = kv_cache
+
+    total = sum(breakdown.values()) * 1.05  # Add 5% room for overhead
+
     return total, breakdown
 
 
