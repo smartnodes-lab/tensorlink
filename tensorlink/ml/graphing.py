@@ -151,6 +151,8 @@ class ModelParser:
         host_threshold_mb: int = 50,
         host_max_depth: int = 2,
         max_offload_depth: int = 3,
+        max_seq_len: int = 2048,
+        batch_size: int = 1,
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
@@ -176,7 +178,12 @@ class ModelParser:
             print("MODEL STRUCTURE:")
             print("=" * 80)
             self._log_model_structure(
-                model, prefix="model", training=training, optimizer_type=optimizer_type
+                model,
+                prefix="model",
+                training=training,
+                optimizer_type=optimizer_type,
+                max_seq_len=max_seq_len,
+                batch_size=batch_size,
             )
             print("=" * 80 + "\n")
 
@@ -196,6 +203,8 @@ class ModelParser:
                 host_threshold_mb=host_threshold_mb,
                 host_max_depth=host_max_depth,
                 max_offload_depth=max_offload_depth,
+                max_seq_len=max_seq_len,
+                batch_size=batch_size,
             )
 
             config = _group_sequential_layers(config)
@@ -216,6 +225,8 @@ class ModelParser:
         depth: int = 0,
         training=False,
         optimizer_type=None,
+        max_seq_len: int = 2048,
+        batch_size: int = 1,
     ):
         """
         Recursively log the entire model structure with module paths.
@@ -229,7 +240,11 @@ class ModelParser:
         module_type = type(module).__name__
 
         memory, breakdown = estimate_memory(
-            module, training, seq_length=1024, optimizer_type=optimizer_type
+            module,
+            training,
+            batch_size=batch_size,
+            seq_length=max_seq_len,
+            optimizer_type=optimizer_type,
         )
 
         print(f"{indent}{prefix} [{module_type}] (~{memory/1e6:.1f}MB)")
@@ -240,7 +255,13 @@ class ModelParser:
         # Recurse into children
         for child_name, child_module in module.named_children():
             child_path = f"{prefix}.{child_name}"
-            self._log_model_structure(child_module, child_path, depth + 1)
+            self._log_model_structure(
+                child_module,
+                child_path,
+                depth + 1,
+                max_seq_len=max_seq_len,
+                batch_size=batch_size,
+            )
 
     def _recurse_module(
         self,
@@ -260,6 +281,8 @@ class ModelParser:
         host_threshold_mb: int = 50,
         host_max_depth: int = 1,
         max_offload_depth: int = 3,
+        max_seq_len: int = 2048,
+        batch_size: int = 1,
     ):
         config = {}
         if ids is None:
@@ -272,7 +295,11 @@ class ModelParser:
             print(f"{indent}Processing: {module_path}")
 
         memory, breakdown = estimate_memory(
-            module, training, seq_length=1024, optimizer_type=optimizer_type
+            module,
+            training,
+            seq_length=max_seq_len,
+            optimizer_type=optimizer_type,
+            batch_size=batch_size,
         )
 
         if self.verbose:
@@ -298,6 +325,7 @@ class ModelParser:
                 "module_path": module_path,
                 "training": training,
                 "optimizer_type": optimizer_type,
+                "batch_size": batch_size,
             }
 
             if self.verbose:
@@ -324,6 +352,7 @@ class ModelParser:
                 "module_path": module_path,
                 "training": training,
                 "optimizer_type": optimizer_type,
+                "batch_size": batch_size,
             }
 
             self.assigned_workers[assigned_worker].append(
@@ -375,7 +404,6 @@ class ModelParser:
         child_workers = set()
         prev_child_worker = last_worker
         last_successful_worker = last_worker
-        all_children_assigned = True
 
         for child_name, child_module in children:
             child_path = f"{module_path}.{child_name}"
@@ -397,6 +425,8 @@ class ModelParser:
                     host_threshold_mb=host_threshold_mb,
                     host_max_depth=host_max_depth,
                     max_offload_depth=max_offload_depth,
+                    max_seq_len=max_seq_len,
+                    batch_size=batch_size,
                 )
 
                 config.update(child_config)
@@ -408,7 +438,6 @@ class ModelParser:
             except AssignmentError as e:
                 if self.verbose:
                     print(f"{indent}   ✗ Child {child_path} failed: {e}")
-                all_children_assigned = False
                 raise
 
         if len(child_workers) > 1 and parent_forward_code:
