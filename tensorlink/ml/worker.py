@@ -1,3 +1,4 @@
+import gc
 import json
 import logging
 import os
@@ -577,6 +578,12 @@ class DistributedWorker:
         # Get name of model for loading weights
         base_model_prefix = getattr(base_model, "base_model_prefix", None)
 
+        # Delete skeleton model and force GC
+        del base_model
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
         # Now load only the weights for the assigned layers
         logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
         state_dict = self._load_specific_layer_weights(
@@ -590,7 +597,7 @@ class DistributedWorker:
         )
 
         # Clean up base model to free memory
-        del base_model
+        del state_dict
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -607,14 +614,28 @@ class DistributedWorker:
         """
         parent_module_path = module_info.get('parent_module_path', '')
         module_class_name = module_info.get('module', '')
+        module_id = module_info.get("module_id")
 
         logging.info(f"Loading single module {module_class_name} from {model_name}")
 
         if parent_module_path == "":
             logging.info("Parent module is entire model — loading full model.")
+
+            if module_id in self.modules:
+                del self.modules[module_id]
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
             state_dict = self._load_specific_layer_weights(model_name, [])
+
             base_model = base_model.to_empty(device=self.device)
             base_model.load_state_dict(state_dict, strict=False)
+
+            del state_dict
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
             return base_model.to(self.device)
 
         # Extract the specific module with empty weights
@@ -645,6 +666,11 @@ class DistributedWorker:
             single=True,
             base_model_prefix=base_model_prefix,
         )
+
+        del base_model
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         target_module = target_module.to_empty(device=self.device)
 
