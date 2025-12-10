@@ -411,7 +411,7 @@ class DistributedValidator(DistributedWorker):
                         model_name not in self.models
                         and model_name not in self.models_initializing
                     ):
-                        self.models_initializing.add(model_name)
+                        self.models_initializing.add(job_data.get("id"))
                         self._initialize_hosted_job(
                             model_name, payment=payment, time_limit=time_limit
                         )
@@ -469,36 +469,6 @@ class DistributedValidator(DistributedWorker):
                 "status": "not_loaded",
                 "message": f"Model {model_name} is not loaded",
             }
-
-    def _handle_load_model(self, model_name: str):
-        """Handle explicit request to load a model"""
-        try:
-            # Check if already loaded or loading
-            if model_name in self.models or model_name in self.models_initializing:
-                self.send_request(
-                    "debug_print",
-                    (
-                        f"Model {model_name} is already loaded or loading",
-                        "yellow",
-                        logging.INFO,
-                    ),
-                )
-                return
-
-            # Add to initializing set
-            self.models_initializing.add(model_name)
-
-            self.send_request(
-                "debug_print",
-                (f"Loading model on demand: {model_name}", "green", logging.INFO),
-            )
-
-            # Initialize the model
-            self._initialize_hosted_job(model_name)
-
-        except Exception as e:
-            logging.error(f"Error loading model {model_name}: {str(e)}")
-            self.models_initializing.discard(model_name)
 
     def _handle_generate_request(self, request: GenerationRequest):
         # Record the request for tracking
@@ -571,6 +541,8 @@ class DistributedValidator(DistributedWorker):
     def _initialize_hosted_job(
         self, model_name: str, payment: int = 0, time_limit: int = None
     ):
+        job_data = {}
+
         """Initialize a hosted job by creating the distributed model and submitting inspection request."""
         try:
             # Check if already initialized
@@ -626,7 +598,7 @@ class DistributedValidator(DistributedWorker):
 
         except Exception as e:
             logging.error(f"Error initializing hosted job for {model_name}: {str(e)}")
-            self.models_initializing.discard(model_name)
+            self.models_initializing.discard(job_data.get("id"))
             if model_name in self.models:
                 del self.models[model_name]
             if model_name in self.model_state:
@@ -669,7 +641,7 @@ class DistributedValidator(DistributedWorker):
 
             # Mark as ready
             self.model_state[model_name] = "ready"
-            self.models_initializing.discard(model_name)
+            self.models_initializing.discard(job_id)
 
             self.send_request(
                 "debug_print",
@@ -684,7 +656,7 @@ class DistributedValidator(DistributedWorker):
 
         except Exception as e:
             logging.error(f"Error finalizing hosted job for {model_name}: {str(e)}")
-            self.models_initializing.discard(model_name)
+            self.models_initializing.discard(job_id)
             if model_name in self.models:
                 del self.models[model_name]
             return False
