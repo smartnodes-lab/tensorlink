@@ -339,6 +339,7 @@ class DistributedValidator(DistributedWorker):
             max_offload_depth=3,
             batch_size=batch_size,
             max_seq_len=job_data.get("max_seq_len", 2048),
+            model_type=job_data.get("model_type", "chat"),
         )
         job_data["distribution"] = distribution
 
@@ -596,6 +597,7 @@ class DistributedValidator(DistributedWorker):
                 "n_pipelines": 1,
                 "dp_factor": 1,
                 "distribution": {"model_name": model_name},
+                "model_type": "chat",
                 "n_workers": 0,
                 "model_name": model_name,
                 "seed_validators": [],

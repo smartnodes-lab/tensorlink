@@ -153,6 +153,7 @@ class ModelParser:
         max_offload_depth: int = 3,
         max_seq_len: int = 2048,
         batch_size: int = 1,
+        model_type: str = "chat",
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
@@ -205,6 +206,7 @@ class ModelParser:
                 max_offload_depth=max_offload_depth,
                 max_seq_len=max_seq_len,
                 batch_size=batch_size,
+                model_type=model_type,
             )
 
             config = _group_sequential_layers(config)
@@ -283,6 +285,7 @@ class ModelParser:
         max_offload_depth: int = 3,
         max_seq_len: int = 2048,
         batch_size: int = 1,
+        model_type: str = "chat",
     ):
         config = {}
         if ids is None:
@@ -326,6 +329,7 @@ class ModelParser:
                 "training": training,
                 "optimizer_type": optimizer_type,
                 "batch_size": batch_size,
+                "model_type": model_type,
             }
 
             if self.verbose:
@@ -353,6 +357,7 @@ class ModelParser:
                 "training": training,
                 "optimizer_type": optimizer_type,
                 "batch_size": batch_size,
+                "model_type": model_type,
             }
 
             self.assigned_workers[assigned_worker].append(

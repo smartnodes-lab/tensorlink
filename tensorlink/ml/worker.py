@@ -84,6 +84,25 @@ def _create_layer_group_wrapper(
     )
 
 
+def _load_model_skeleton(model_name: str, module_id: str, model_type: str = "chat"):
+    """Load the HF model structure with empty weights"""
+    with init_empty_weights():
+        if model_type in ("causal", "chat"):
+            skeleton_model = AutoModelForCausalLM.from_pretrained(model_name)
+        elif model_type == "seq2seq":
+            skeleton_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        elif model_type == "vision2text":
+            skeleton_model = AutoModelForVision2Seq.from_pretrained(model_name)
+        elif model_type == "audio2text":
+            skeleton_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name)
+        else:
+            model_config = AutoConfig.from_pretrained(model_name)
+            skeleton_model = AutoModel.from_config(model_config)
+
+    skeleton_model.eval()  # Set to eval mode initially
+    return skeleton_model
+
+
 class DistributedWorker:
     def __init__(self, node, trusted=False):
         self.node = node
@@ -349,17 +368,17 @@ class DistributedWorker:
 
         # Else try Hugging Face for model info
         else:
-            skeleton_module = self._load_model_skeleton(model_name, module_id)
+            skeleton_module = _load_model_skeleton(model_name, module_id)
             module = self._initialize_module_from_config(
                 skeleton_module, model_name, module_name, module_info
             )
 
-        #   else:
-        #     # Load TorchScript model
-        #     if self.device.type == "cuda":
-        #         module = torch.jit.load(file_name, map_location=self.device)
-        #     else:
-        #         module = torch.jit.load(file_name)
+            # skeleton_module should be deleted inside _initialize_module_from_config
+            # but make sure with explicit cleanup
+            try:
+                del skeleton_module
+            except:
+                pass
 
         # Cleanup file
         try:
@@ -404,7 +423,6 @@ class DistributedWorker:
         If layer_paths contains 'model' or is empty, loads all weights.
         """
         state_dict = {}
-        load_all = not layer_paths
 
         try:
             # Use snapshot_download for efficient caching
@@ -428,55 +446,38 @@ class DistributedWorker:
             if safetensor_files:
                 logging.info(f"Found {len(safetensor_files)} safetensors files")
 
-                if load_all:
-                    for shard_path in safetensor_files:
-                        logging.info(
-                            f"Reading all weights from {os.path.basename(shard_path)}"
-                        )
-                        with safe_open(shard_path, framework="pt", device="cpu") as f:
-                            for key in f.keys():
-                                state_dict[key] = f.get_tensor(key)
-                    logging.info(
-                        f"Total: Loaded {len(state_dict)} weight tensors (all weights)"
-                    )
+                # Load only specific layers
+                layer_path_to_idx = {path: idx for idx, path in enumerate(layer_paths)}
 
-                else:
-                    # Load only specific layers
-                    layer_path_to_idx = {
-                        path: idx for idx, path in enumerate(layer_paths)
-                    }
+                for shard_path in safetensor_files:
+                    logging.info(f"Reading weights from {os.path.basename(shard_path)}")
 
-                    for shard_path in safetensor_files:
-                        logging.info(
-                            f"Reading weights from {os.path.basename(shard_path)}"
-                        )
+                    with safe_open(shard_path, framework="pt", device="cpu") as f:
+                        keys_loaded = 0
+                        for key in f.keys():
+                            # Check if key starts with any of our layer paths
+                            for layer_path, layer_idx in layer_path_to_idx.items():
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    # Extract the part after the layer path
+                                    new_key = key[len(layer_prefix) :]
+                                    if single and '.' in new_key:
+                                        # For single modules, remove one more level
+                                        new_key = new_key.split('.', 1)[1]
+                                    else:
+                                        new_key = key.split('.', 1)[1]
+                                    state_dict[new_key] = f.get_tensor(key)
+                                    keys_loaded += 1
+                                    break
 
-                        with safe_open(shard_path, framework="pt", device="cpu") as f:
-                            keys_loaded = 0
-                            for key in f.keys():
-                                # Check if key starts with any of our layer paths
-                                for layer_path, layer_idx in layer_path_to_idx.items():
-                                    layer_prefix = layer_path + '.'
-                                    if key.startswith(layer_prefix):
-                                        # Extract the part after the layer path
-                                        new_key = key[len(layer_prefix) :]
-                                        if single and '.' in new_key:
-                                            # For single modules, remove one more level
-                                            new_key = new_key.split('.', 1)[1]
-                                        else:
-                                            new_key = key.split('.', 1)[1]
-                                        state_dict[new_key] = f.get_tensor(key)
-                                        keys_loaded += 1
-                                        break
+                        if keys_loaded > 0:
+                            logging.info(
+                                f"  Loaded {keys_loaded} tensors from this shard"
+                            )
 
-                            if keys_loaded > 0:
-                                logging.info(
-                                    f"  Loaded {keys_loaded} tensors from this shard"
-                                )
-
-                    logging.info(
-                        f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
-                    )
+                logging.info(
+                    f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
+                )
 
             else:
                 # Fallback: use pytorch_model.bin files
@@ -537,6 +538,15 @@ class DistributedWorker:
                 )
 
         except Exception as e:
+            # Make sure skeleton is cleaned up even on error
+            try:
+                del skeleton_module
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+            except:
+                pass
+
             logging.error(f"Failed to load model from HuggingFace: {str(e)}")
             raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
 
@@ -621,22 +631,24 @@ class DistributedWorker:
         if parent_module_path == "":
             logging.info("Parent module is entire model — loading full model.")
 
+            # Ensure garbage from model info has been collected
             if module_id in self.modules:
                 del self.modules[module_id]
+            del base_model
             gc.collect()
             if self.device.type == "cuda":
                 torch.cuda.empty_cache()
 
-            state_dict = self._load_specific_layer_weights(model_name, [])
+            final_model = self._load_full_model(model_name, module_info)
 
-            base_model = base_model.to_empty(device=self.device)
-            base_model.load_state_dict(state_dict, strict=False)
+            # Only move to device if not already there (from device_map)
+            if (
+                not next(final_model.parameters()).is_cuda
+                and self.device.type == "cuda"
+            ):
+                final_model = final_model.to(self.device)
 
-            del state_dict
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
-
-            return base_model.to(self.device)
+            return final_model
 
         # Extract the specific module with empty weights
         if parent_module_path and parent_module_path != "model":
@@ -690,6 +702,51 @@ class DistributedWorker:
         logging.info(f"Successfully loaded single module {module_class_name}")
 
         return target_module
+
+    def _load_full_model(self, model_name: str, module_info: dict) -> torch.nn.Module:
+        """
+        Load a complete model from HuggingFace with optimal memory usage.
+        Uses HF's native loading which is more memory-efficient than manual skeleton+weights.
+        """
+        model_type = module_info.get('model_type', 'chat')
+
+        # Common loading kwargs for memory optimization
+        load_kwargs = {
+            'low_cpu_mem_usage': True,  # Reduces CPU memory footprint
+            'torch_dtype': torch.float16 if self.use_amp else torch.float32,
+        }
+
+        # Only add device_map if CUDA is available
+        if self.device.type == "cuda":
+            load_kwargs['device_map'] = self.device
+
+        logging.info(f"Loading full model {model_name} with type {model_type}")
+
+        if model_type in ("causal", "chat"):
+            final_model = AutoModelForCausalLM.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "seq2seq":
+            final_model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "vision2text":
+            final_model = AutoModelForVision2Seq.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "audio2text":
+            final_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_name, **load_kwargs
+            )
+        else:
+            # For generic models, we need to load config first, then use from_config
+            model_config = AutoConfig.from_pretrained(model_name)
+            final_model = AutoModel.from_pretrained(
+                model_name, config=model_config, **load_kwargs
+            )
+
+        logging.info(f"Successfully loaded full model {model_name}")
+        return final_model
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""
@@ -850,27 +907,6 @@ class DistributedWorker:
 
         # Small sleep to prevent CPU hogging
         time.sleep(0.001)
-
-    def _load_model_skeleton(
-        self, model_name: str, module_id: str, model_type: str = "chat"
-    ):
-        """Load the HF model structure with empty weights"""
-        with init_empty_weights():
-            if model_type in ("causal", "chat"):
-                skeleton_model = AutoModelForCausalLM.from_pretrained(model_name)
-            elif model_type == "seq2seq":
-                skeleton_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
-            elif model_type == "vision2text":
-                skeleton_model = AutoModelForVision2Seq.from_pretrained(model_name)
-            elif model_type == "audio2text":
-                skeleton_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name)
-            else:
-                model_config = AutoConfig.from_pretrained(model_name)
-                skeleton_model = AutoModel.from_config(model_config)
-
-        skeleton_model.eval()  # Set to eval mode initially
-        self.modules[module_id] = skeleton_model
-        return skeleton_model
 
     def run(self):
         """Main execution thread"""
