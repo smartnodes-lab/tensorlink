@@ -337,7 +337,11 @@ class User(Torchnode):
                 "distribution": {},
                 "n_workers": 0,
                 "model_name": distribution.get("model_name"),
-                "optimizer": f"{optimizer_type.__module__}.{optimizer_type.__name__}",
+                "optimizer": (
+                    f"{optimizer_type.__module__}.{optimizer_type.__name__}"
+                    if optimizer_type
+                    else ""
+                ),
                 "seed_validators": validator_ids,
             }
 

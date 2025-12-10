@@ -1,5 +1,3 @@
-import hashlib
-
 from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.worker import DistributedWorker
 from tensorlink.ml.module import DistributedModel
@@ -312,13 +310,21 @@ class DistributedValidator(DistributedWorker):
                         )
                         self._remove_hosted_job(model_name)
 
-    def inspect_model(self, model_name: str, job_data: dict) -> dict:
+    def inspect_model(self, model_name: str, job_data: dict, hosted=False) -> dict:
         """Inspect a model to determine network requirements and store distribution in JSON cache"""
         parser = ModelParser()
         model_name: str = job_data.get("model_name", model_name)
 
         # Get network worker information to assign modules
         workers = self.send_request("get_workers", None)
+
+        batch_size = job_data.get("batch_size", None)
+
+        if batch_size is None:
+            if job_data.get("training", False):
+                batch_size = 256
+            else:
+                batch_size = 4
 
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
@@ -328,6 +334,11 @@ class DistributedValidator(DistributedWorker):
             trusted=False,
             handle_layers=False,
             input_obfuscation=False,
+            optimizer_type=job_data.get("optimizer_type"),
+            host_load_small=True if hosted else False,
+            max_offload_depth=3,
+            batch_size=batch_size,
+            max_seq_len=job_data.get("max_seq_len", 2048),
         )
         job_data["distribution"] = distribution
 
@@ -410,7 +421,7 @@ class DistributedValidator(DistributedWorker):
 
                 else:
                     # If request via user node, begin the model reqs inspection for the job request
-                    self.inspect_model(model_name, job_data)
+                    self.inspect_model(model_name, job_data, hosted=False)
 
             # Check for inference generate calls
             for model_name, module_ids in self.models.items():
@@ -591,7 +602,7 @@ class DistributedValidator(DistributedWorker):
             }
 
             # Inspect model to determine network requirements
-            job_data = self.inspect_model(model_name, job_data)
+            job_data = self.inspect_model(model_name, job_data, hosted=True)
 
             if not job_data:
                 return

@@ -40,9 +40,6 @@ def estimate_memory(
 
     Returns (total_bytes, breakdown_dict).
     """
-    if not training:
-        batch_size = 1
-
     # --- Basic dtype sizing ---
     dtype_size = torch.tensor([], dtype=dtype).element_size()
 

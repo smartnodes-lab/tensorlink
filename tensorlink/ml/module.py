@@ -834,27 +834,11 @@ class DistributedModel(nn.Module):
             optimizer_type = self.optimizer
 
         # Create the distribution on our end if we have the model loaded
-        if isinstance(self.model, nn.Module):
-            distribution = self.model_parser.create_distributed_config(
-                self.model, training=self.training, trusted=False, handle_layers=False
-            )
-
-            # Configure modules for distribution
-            for module_id, module in distribution.items():
-                if module["type"] == "offloaded":
-                    if optimizer_type is None:
-                        optimizer_type = torch.optim.Adam
-                    module["optimizer"] = (
-                        f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                    )
-                    module["training"] = self.training
-
-        else:
-            distribution = {
-                "model_name": self.model,
-                "training": self.training,
-                "optimizer": optimizer_type,
-            }
+        distribution = {
+            "model_name": self.model_name,
+            "training": self.training,
+            "optimizer": optimizer_type,
+        }
 
         # Request job from network
         distributed_config = self.node.send_request(
