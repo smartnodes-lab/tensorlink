@@ -5,6 +5,7 @@ from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.models import GenerationRequest
 
 from transformers import AutoTokenizer
+from collections import defaultdict
 import torch
 import logging
 import json
@@ -133,9 +134,7 @@ class DistributedValidator(DistributedWorker):
     def __init__(self, node, trusted=False):
         super().__init__(node, trusted)
         self.model_cache = load_models_cache()
-        self.models = (
-            {}
-        )  # model_name -> list of module_ids or DistributedModel instance
+        self.models = defaultdict(list)  # model_name -> [distributed model instances]
         self.model_state = {}  # "initializing" | "distributing" | "ready"
 
         self.tokenizers = {}
@@ -425,15 +424,14 @@ class DistributedValidator(DistributedWorker):
                     self.inspect_model(model_name, job_data, hosted=False)
 
             # Check for inference generate calls
-            for model_name, module_ids in self.models.items():
+            for model_name, distributed_models in self.models.items():
                 if self._is_model_ready(model_name):
-                    for module_id in module_ids:
-                        if module_id in self.modules:
-                            generate_request = self.send_request(
-                                "update_api_request", (model_name, module_id)
-                            )
-                            if generate_request:
-                                self._handle_generate_request(generate_request)
+                    model_id = distributed_models[-1].job_id
+                    generate_request = self.send_request(
+                        "update_api_request", (model_name, model_id)
+                    )
+                    if generate_request:
+                        self._handle_generate_request(generate_request)
 
         except Exception as e:
             logging.error(f"Error checking for jobs: {str(e)}")
@@ -443,14 +441,11 @@ class DistributedValidator(DistributedWorker):
     def _handle_check_model_status(self, model_name: str):
         """Check the loading status of a model"""
         if model_name in self.models:
-            module_ids = self.models[model_name]
             if self._is_model_ready(model_name):
                 # Model is fully loaded
                 return {
                     "status": "loaded",
                     "message": f"Model {model_name} is loaded and ready",
-                    "module_ids": module_ids,
-                    "num_modules": len(module_ids),
                 }
             else:
                 # Model is in the process of loading
@@ -479,7 +474,11 @@ class DistributedValidator(DistributedWorker):
                 "Model is currently not available through the Tensorlink API."
             )
         else:
-            distributed_model = self.models[request.hf_name]
+            distributed_models = self.models[request.hf_name]
+
+            # TODO Get models that arent currently processing instead of just first
+            distributed_model = distributed_models[0]
+
             tokenizer = self.tokenizers[request.hf_name]
 
             # Format chat history into a standardized prompt
@@ -587,7 +586,7 @@ class DistributedValidator(DistributedWorker):
                 node=self.node,
                 training=False,
             )
-            self.models[model_name] = distributed_model
+            self.models[model_name].append(distributed_model)
             self.model_state[model_name] = "initializing"
             self.models_initializing.add(job_data.get("id"))
 
@@ -600,7 +599,7 @@ class DistributedValidator(DistributedWorker):
             logging.error(f"Error initializing hosted job for {model_name}: {str(e)}")
             self.models_initializing.discard(job_data.get("id"))
             if model_name in self.models:
-                del self.models[model_name]
+                self.models[model_name].pop()
             if model_name in self.model_state:
                 del self.model_state[model_name]
 
@@ -624,7 +623,7 @@ class DistributedValidator(DistributedWorker):
                 return False
 
             # Get the DistributedModel instance
-            distributed_model = self.models[model_name]
+            distributed_model = self.models[model_name][-1]
 
             # Update state
             self.model_state[model_name] = "distributing"
@@ -635,6 +634,7 @@ class DistributedValidator(DistributedWorker):
 
             # Distribute the model across workers
             distributed_model.distribute_model(distribution)
+            distributed_model.job_id = job_id
 
             # Load tokenizer
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
@@ -658,7 +658,7 @@ class DistributedValidator(DistributedWorker):
             logging.error(f"Error finalizing hosted job for {model_name}: {str(e)}")
             self.models_initializing.discard(job_id)
             if model_name in self.models:
-                del self.models[model_name]
+                self.models[model_name].pop()
             return False
 
     def _remove_hosted_job(self, model_name: str):
@@ -677,7 +677,7 @@ class DistributedValidator(DistributedWorker):
 
             # Clean up model reference
             if model_name in self.models:
-                distributed_model = self.models[model_name]
+                distributed_model = self.models[model_name][-1]
 
                 # Call cleanup on the distributed model - it handles all internal module cleanup
                 try:
@@ -688,7 +688,7 @@ class DistributedValidator(DistributedWorker):
                         f"Error during distributed model cleanup for {model_name}: {str(e)}"
                     )
 
-                del self.models[model_name]
+                self.models[model_name].pop()
                 self.send_request(
                     "debug_print",
                     (

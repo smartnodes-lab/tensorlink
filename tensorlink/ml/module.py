@@ -211,6 +211,8 @@ class DistributedModel(nn.Module):
         self.mpc_lock = self.node.mpc_lock
         self._thread_local = threading.local()
 
+        self.job_id = None
+
         if verbose:
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
 

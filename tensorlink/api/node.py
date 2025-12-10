@@ -402,7 +402,7 @@ class TensorlinkAPI:
         try:
             # Check if there is a public job with this module
             for module_id, module in self.smart_node.modules.items():
-                if module.get("name", "") == model_name:
+                if module.get("model_name", "") == model_name:
                     if module.get("public", False):
                         status = "loaded"
                         message = f"Model {model_name} is loaded and ready"
