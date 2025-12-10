@@ -481,6 +481,9 @@ class Torchnode(Smartnode):
         else:
             return_val = None
 
+        module_terminated = False
+        module_terminated_id = None
+
         for module_id, module in self.modules.items():
             if "mem_info" in module:
                 if self.role == "V":
@@ -497,9 +500,12 @@ class Torchnode(Smartnode):
 
             elif "termination" in module:
                 return_val = module_id
-                del module["termination"]
-                module["terminated"] = True
-                del self.modules[module_id]
+                module_terminated = True
+                module_terminated_id = module_id
+                break
+
+        if module_terminated:
+            del self.modules[module_terminated_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
