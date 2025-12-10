@@ -682,17 +682,13 @@ class Validator(Torchnode):
                 self.send_to_node(node, b"REQUEST-WORKERS")
                 self._store_request(node_id, "ALL-WORKER-STATS")
 
-        time.sleep(3)
-
         for worker in self.workers:
             if hasattr(self.nodes[worker], "stats"):
                 self.all_workers[worker] = self.nodes[worker].stats
 
     def _get_workers(self, request):
         """Get worker statistics"""
-        if not self.all_workers:
-            # only gather all worker information if not done so already
-            self.get_workers()
+        self.get_workers()
 
         self.response_queue.put({"status": "SUCCESS", "return": self.all_workers})
 
@@ -702,9 +698,8 @@ class Validator(Torchnode):
             message = b"STATS-REQUEST"
             self.send_to_node(connection, message)
             self._store_request(connection.node_id, b"STATS")
-            # TODO disconnect workers who do not respond/have not recently responded to request
 
-        time.sleep(2)
+        time.sleep(1)
 
         if send_to is not None:
             node = self.nodes[send_to]
