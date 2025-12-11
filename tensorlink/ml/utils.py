@@ -255,7 +255,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 4e9
+        memory += 1e9
 
     return memory
 

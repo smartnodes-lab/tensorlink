@@ -302,6 +302,7 @@ class Torchnode(Smartnode):
             module_info["host"] = node.node_id
             module_info["forward_queue"] = {}
             module_info["backward_queue"] = {}
+            module_info["status"] = "loading"
 
             self.modules[module_id] = module_info
 
@@ -411,7 +412,9 @@ class Torchnode(Smartnode):
     def _handle_module_loaded_request(self, request):
         # Send module loaded message to node
         module_id = request["args"]
-        node_id = self.modules[module_id]["host"]
+        module = self.modules[module_id]
+        node_id = module["host"]
+        module["status"] = "loaded"
         node = self.nodes[node_id]
         self.send_to_node(node, b"LOADED" + module_id.encode())
         self.response_queue.put({"status": "SUCCESS", "return": None})

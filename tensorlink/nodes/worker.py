@@ -225,9 +225,21 @@ class Worker(Torchnode):
     #     if self.training:
     #         proof["output"] = handle_output(self.model(dummy_input)).sum()
 
+    def get_available_gpu_memory(self):
+        available_gpu_memory = get_gpu_memory()
+
+        for module_id, module_info in self.modules.items():
+            if module_info.get("status", "loading") == "loading":
+                module_size = module_info["memory"]
+                available_gpu_memory -= module_size
+
+        return available_gpu_memory
+
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
-        self.available_gpu_memory = get_gpu_memory()
+        self.available_gpu_memory = self.get_available_gpu_memory()
+
+        print(f"Available memory: {round(self.available_gpu_memory/1e9, 5)}GB")
 
         # If mining is active, report total GPU memory since we'll stop mining on job acceptance
         if self.mining_active is not None and self.mining_active.value:
