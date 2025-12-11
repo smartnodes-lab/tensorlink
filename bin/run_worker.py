@@ -115,7 +115,7 @@ def main():
     local = config.get("local", False)
     trusted = config.get("trusted", False)
     mining_enabled = config.get("mining", False)
-    upnp = True if local == "false" else False
+    upnp = not local
 
     if trusted:
         _confirm_action()
