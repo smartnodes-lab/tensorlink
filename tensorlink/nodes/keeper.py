@@ -668,7 +668,7 @@ class Keeper:
                     del self.node.nodes[node_id]
 
                     # If we are a validator deleting a worker, remove it from the worker stats
-                    if role == "W" and hasattr(self.node, "all_workers"):
+                    if role.startswith("W") and hasattr(self.node, "all_workers"):
                         del self.node.all_workers[node_id]
 
             for node_id in to_remove:

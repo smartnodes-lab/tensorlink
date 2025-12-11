@@ -47,6 +47,7 @@ class BaseNode:
         print_level=logging.INFO,
         trusted=False,
         utilization=True,
+        duplicate="",
     ):
         self.node_requests = mp.Queue()
         self.node_responses = mp.Queue()
@@ -62,6 +63,7 @@ class BaseNode:
         self.trusted = trusted
         self.upnp_enabled = upnp
         self.utilization = utilization
+        self.duplicate = duplicate
 
         self.node_process = None
         self.node_instance = None
@@ -156,6 +158,7 @@ class WorkerNode(BaseNode):
                 "off_chain_test": kwargs.get("off_chain_test", False),
                 "mining_active": self.mining_active,  # Pass shared state
                 "reserved_memory": self.reserved_memory,
+                "duplicate": self.duplicate,
             }
         )
 

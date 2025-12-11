@@ -1,3 +1,5 @@
+import os
+
 from tensorlink.ml.utils import get_gpu_memory
 from tensorlink.mpc.shared_memory import get_from_shared_memory
 from tensorlink.p2p.connection import Connection
@@ -229,7 +231,7 @@ class Torchnode(Smartnode):
             else:
                 module_id = None
                 for module in self.modules:
-                    if node.node_id in self.modules[module]["workers"]:
+                    if node.node_id in self.modules[module]["assigned_workers"]:
                         module_id = module
                         break
 
@@ -266,9 +268,14 @@ class Torchnode(Smartnode):
 
     def _handle_module(self, data: bytes, node: Connection):
         module_id = data[6:70].decode()
-        module_name = None
-        optimizer_name = None
-        training = False
+        file_name = module_id + self.rsa_key_hash
+        if os.path.exists(file_name):
+            with open(file_name, "rb") as f:
+                module_info = json.load(f)
+            os.remove(file_name)
+        else:
+            module_info = json.loads(data[70:])
+
         request_to_remove = []
 
         if node.node_id in self.requests:
@@ -276,39 +283,32 @@ class Torchnode(Smartnode):
                 if module_id in req or (
                     isinstance(req, dict) and module_id == req["id"]
                 ):
-                    module_name = req[len(module_id) :]
                     request_to_remove.append(req)
 
                 if "OPTIMIZER" in req:
-                    optimizer_name = req[9:]
                     request_to_remove.append(req)
-                    training = True
 
             for req in request_to_remove:
                 self._remove_request(node.node_id, req)
 
-            if module_name is not None:
-                self.debug_print(
-                    f"Loading distributed module: {module_id}",
-                    colour="bright_cyan",
-                    level=logging.INFO,
-                    tag="Torchnode",
-                )
+            self.debug_print(
+                f"Loading distributed module: {module_id}",
+                colour="bright_cyan",
+                level=logging.INFO,
+                tag="Torchnode",
+            )
 
-                self.modules[module_id] = {
-                    "mem_info": module_id,
-                    "host": node.node_id,
-                    "forward_queue": {},
-                    "backward_queue": {},
-                    "name": module_name,
-                    "optimizer": optimizer_name,
-                    "training": training,
-                }
-                self.state_updates[module_id] = []
-                return True
+            module_info["mem_info"] = module_id
+            module_info["host"] = node.node_id
+            module_info["forward_queue"] = {}
+            module_info["backward_queue"] = {}
+            module_info["status"] = "loading"
 
-            else:
-                node.ghosts += 1
+            self.modules[module_id] = module_info
+
+            self.state_updates[module_id] = []
+            return True
+
         else:
             node.ghosts += 1
 
@@ -393,10 +393,10 @@ class Torchnode(Smartnode):
 
     def _handle_send_model(self, request):
         # Send module that is stored in shared mpc to another node
-        name, worker_id, module_id = request["args"]
+        name, worker_id, module_id, module_info = request["args"]
         node = self.nodes[worker_id]
         node.adjust_chunk_size("large")
-        self.send_module(name, module_id, node)
+        self.send_module(name, module_id, module_info, node)
         self.response_queue.put({"status": "SUCCESS", "return": None})
 
     def _handle_check_module_loaded(self, request):
@@ -412,7 +412,9 @@ class Torchnode(Smartnode):
     def _handle_module_loaded_request(self, request):
         # Send module loaded message to node
         module_id = request["args"]
-        node_id = self.modules[module_id]["host"]
+        module = self.modules[module_id]
+        node_id = module["host"]
+        module["status"] = "loaded"
         node = self.nodes[node_id]
         self.send_to_node(node, b"LOADED" + module_id.encode())
         self.response_queue.put({"status": "SUCCESS", "return": None})
@@ -471,40 +473,42 @@ class Torchnode(Smartnode):
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
     def _handle_check_module(self, request):
-        return_val = False
+        if self.role == "V":
+            return_val = {
+                "job_id": request["args"],
+                "distribution": {},
+                "model_name": None,
+                "optimizer": None,
+                "training": False,
+            }
+        else:
+            return_val = None
 
-        for module_id in list(self.modules.keys()):
-            module = self.modules[module_id]
+        module_terminated = False
+        module_terminated_id = None
 
+        for module_id, module in self.modules.items():
             if "mem_info" in module:
-                name = module["mem_info"]
-
                 if self.role == "V":
-                    return_val = (
-                        name,
-                        module_id,
-                        module["distribution"],
-                        module["name"],
-                        module["optimizer"],
-                        module["training"],
-                    )
+                    if return_val.get("job_id") == module.get("job_id"):
+                        return_val["distribution"][module_id] = module["distribution"]
+                        return_val["model_name"] = module.get("model_name", "")
+                        return_val["optimizer"] = module["optimizer"]
+                        return_val["training"] = module["training"]
                 else:
-                    return_val = (
-                        name,
-                        module_id,
-                        module["host"],
-                        module["name"],
-                        module["optimizer"],
-                        module["training"],
-                    )
+                    return_val = module
+                    return_val["module_id"] = module_id
 
                 del module["mem_info"]
 
             elif "termination" in module:
                 return_val = module_id
-                del module["termination"]
-                module["terminated"] = True
-                del self.modules[module_id]
+                module_terminated = True
+                module_terminated_id = module_id
+                break
+
+        if module_terminated:
+            del self.modules[module_terminated_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -536,7 +540,7 @@ class Torchnode(Smartnode):
         # Check if forward pass has been received and is loaded in shared mpc
         return_val = None
 
-        if self.role == "W":
+        if self.role.startswith("W"):
             module_id = request["args"]
 
             if module_id in self.modules:
@@ -576,7 +580,7 @@ class Torchnode(Smartnode):
         args = request["args"]
         return_val = None
 
-        if self.role == "W":
+        if self.role.startswith("W"):
             module_hash = args
             module = self.modules[module_hash]
             min_iter, min_micro = -1, -1
@@ -756,7 +760,9 @@ class Torchnode(Smartnode):
         mode = b"0" if mode is False else b"1"
         self.send_to_node(node, b"TRAIN-UPDATED" + mode + module_id.encode())
 
-    def send_module(self, file_name: bytes, module_id: str, node: Connection):
+    def send_module(
+        self, file_name: bytes, module_id: str, module_info: dict, node: Connection
+    ):
         self.debug_print(
             f"Sending module: {module_id} to worker: {node.node_id}",
             level=logging.INFO,
@@ -765,7 +771,10 @@ class Torchnode(Smartnode):
         )
         self._store_request(node.node_id, "MODULE" + module_id)
         self.state_updates[module_id] = []
-        self.send_to_node_from_file(node, file_name, b"MODULE" + module_id.encode())
+        module_info_bytes = json.dumps(module_info).encode()
+        self.send_to_node_from_file(
+            node, file_name, b"MODULE" + module_id.encode() + module_info_bytes
+        )
 
     def _store_request(self, node_id: str, key: str):
         super()._store_request(node_id, key)

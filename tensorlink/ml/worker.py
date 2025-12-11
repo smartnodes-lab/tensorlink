@@ -1,32 +1,25 @@
+import gc
 import json
 import logging
 import os
 import pickle
 import io
 import time
+import glob
 import torch
 import torch.amp as amp
-from huggingface_hub import HfApi
+from accelerate import init_empty_weights
+from typing import Optional, List, Dict, Any
 from transformers import (
     AutoConfig,
     AutoModel,
-    AutoModelForAudioClassification,
     AutoModelForCausalLM,
-    AutoModelForCTC,
-    AutoModelForImageClassification,
-    AutoModelForMaskedLM,
-    AutoModelForMultipleChoice,
-    AutoModelForNextSentencePrediction,
-    AutoModelForObjectDetection,
-    AutoModelForPreTraining,
-    AutoModelForQuestionAnswering,
-    AutoModelForSemanticSegmentation,
-    AutoModelForSequenceClassification,
-    AutoModelForSpeechSeq2Seq,
-    AutoModelForTokenClassification,
     AutoModelForVision2Seq,
     AutoModelForSeq2SeqLM,
+    AutoModelForSpeechSeq2Seq,
 )
+from safetensors import safe_open
+from huggingface_hub import snapshot_download
 
 from tensorlink.ml.utils import (
     get_optimizer_from_name,
@@ -36,27 +29,78 @@ from tensorlink.ml.utils import (
     attach_tensor,
     handle_output,
     enable_grad,
+    get_nested_module,
 )
+from tensorlink.ml.injector import LayerGroupModule
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 
-MODEL_TYPE_MAPPING = {
-    "ForSequenceClassification": AutoModelForSequenceClassification,
-    "ForTokenClassification": AutoModelForTokenClassification,
-    "ForQuestionAnswering": AutoModelForQuestionAnswering,
-    "ForMaskedLM": AutoModelForMaskedLM,
-    "ForNextSentencePrediction": AutoModelForNextSentencePrediction,
-    "ForMultipleChoice": AutoModelForMultipleChoice,
-    "ForPreTraining": AutoModelForPreTraining,
-    "ForCausalLM": AutoModelForCausalLM,
-    "ForImageClassification": AutoModelForImageClassification,
-    "ForSemanticSegmentation": AutoModelForSemanticSegmentation,
-    "ForObjectDetection": AutoModelForObjectDetection,
-    "ForAudioClassification": AutoModelForAudioClassification,
-    "ForCTC": AutoModelForCTC,
-    "ForSpeechSeq2Seq": AutoModelForSpeechSeq2Seq,
-    "ForVision2Seq": AutoModelForVision2Seq,
-}
+def _find_module_path_by_class(
+    model: torch.nn.Module, class_name: str
+) -> Optional[str]:
+    """
+    Search the model for the first submodule whose class name matches class_name.
+    Returns the module path as returned by named_modules (empty string for root).
+    """
+    if not class_name:
+        return None
+
+    for name, mod in model.named_children():
+        # skip the root empty name if it is the same class as requested
+        if name == "":
+            # if root has the requested class, return empty string
+            if mod.__class__.__name__ == class_name:
+                return name
+            continue
+
+        if mod.__class__.__name__ == class_name:
+            return name
+
+    return None
+
+
+def _create_layer_group_wrapper(
+    base_model: torch.nn.Module,
+    layer_paths: List[str],
+    expected_inputs: List[str],
+    expected_outputs: List[str],
+    loop_body_source: str,
+    loop_iterator_name: str,
+) -> torch.nn.Module:
+    """
+    Create a wrapper module that processes multiple layers sequentially.
+    This allows the worker to process all layers in one forward pass.
+    """
+    # Extract the actual layer modules
+    layers = [get_nested_module(base_model, path) for path in layer_paths]
+
+    # Create and return the wrapper
+    return LayerGroupModule(
+        layers=layers,
+        input_vars=expected_inputs,
+        output_vars=expected_outputs,
+        loop_body_source=loop_body_source,
+        loop_iterator_name=loop_iterator_name,
+    )
+
+
+def _load_model_skeleton(model_name: str, module_id: str, model_type: str = "chat"):
+    """Load the HF model structure with empty weights"""
+    with init_empty_weights():
+        if model_type in ("causal", "chat"):
+            skeleton_model = AutoModelForCausalLM.from_pretrained(model_name)
+        elif model_type == "seq2seq":
+            skeleton_model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+        elif model_type == "vision2text":
+            skeleton_model = AutoModelForVision2Seq.from_pretrained(model_name)
+        elif model_type == "audio2text":
+            skeleton_model = AutoModelForSpeechSeq2Seq.from_pretrained(model_name)
+        else:
+            model_config = AutoConfig.from_pretrained(model_name)
+            skeleton_model = AutoModel.from_config(model_config)
+
+    skeleton_model.eval()  # Set to eval mode initially
+    return skeleton_model
 
 
 class DistributedWorker:
@@ -86,22 +130,20 @@ class DistributedWorker:
             self.compute_stream = torch.cuda.Stream()
             self.memory_stream = torch.cuda.Stream()
 
+        self.hf_cache_dir = os.environ.get(
+            'HF_HOME', os.path.join(os.path.expanduser('~'), '.cache', 'huggingface')
+        )
+
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
         if self.device.type == "cuda":
-            # Optimize cuDNN for stable, reproducible results
             torch.backends.cudnn.enabled = True
-            torch.backends.cudnn.benchmark = (
-                True  # Auto-optimize convolution algorithms
-            )
+            torch.backends.cudnn.benchmark = True
 
             # Set memory allocation strategy
             torch.cuda.empty_cache()
-            # Set reasonable memory fraction to avoid OOM errors
             total_memory = torch.cuda.get_device_properties(0).total_memory
-            torch.cuda.set_per_process_memory_fraction(
-                0.85
-            )  # Use up to 85% of available memory
+            torch.cuda.set_per_process_memory_fraction(0.85)
 
             # Log CUDA configuration
             logging.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
@@ -129,7 +171,7 @@ class DistributedWorker:
         finally:
             self.mpc_lock.release()
 
-    def handle_backward(self, module_id, tag, loss_relay):
+    def _handle_backward(self, module_id, tag, loss_relay):
         """Handle backward pass with mixed precision support"""
         module = self.modules[module_id]
         n_batch = module.n_batch
@@ -199,13 +241,20 @@ class DistributedWorker:
         inp = enable_grad(attach_tensor(args, self.device))
         kwargs = enable_grad(attach_tensor(kwargs, self.device))
 
+        if not isinstance(inp, (list, tuple)):
+            inp = (inp,)
+
         # Forward pass
         if self.use_amp and module.training:
             with amp.autocast():
-                out = module(inp, **kwargs)
+                out = module(*inp, **kwargs)
         else:
             with torch.set_grad_enabled(module.training):
-                out = module(inp, **kwargs)
+                # we only use kwargs if this is a layer group module
+                if hasattr(module, "num_layers"):
+                    out = module(**kwargs)
+                else:
+                    out = module(*inp, **kwargs)
 
         # Store intermediate results if training
         if module.training:
@@ -294,58 +343,48 @@ class DistributedWorker:
         if self.device.type == "cuda":
             torch.cuda.empty_cache()
 
-    def load_module(
-        self,
-        file_name=None,
-        module_id=None,
-        node_id=None,
-        module_name=None,
-        optimizer_name=None,
-        training=False,
-    ):
+    def load_module(self, module_info: dict):
         """
         Load and prepare model from file or directly from HuggingFace.
 
         For direct HuggingFace loading without a file, just provide module_name.
         Default parameters allow for simplified calling when loading generic models.
         """
-        # Special case: Loading directly from HuggingFace with just module_name
-        if file_name is None and module_name is not None:
-            # Generate unique module_id if not provided
-            if module_id is None:
-                module_id = (
-                    f"hf_model_{module_name.replace('/', '_')}_{int(time.time())}"
-                )
+        module_id = module_info.get("module_id")
+        model_name = module_info.get("name")
+        module_name = module_info.get("module_name")
+        training = module_info.get("training", False)
+        our_id = module_info.get("assigned_workers")[0]
+        file_name = module_id + our_id
 
-            # Load from HuggingFace
-            module = self._load_huggingface_model(module_name)
+        if module_id is None:
+            raise ValueError("For standard loading, module_id must be provided")
 
-        # Standard loading from file path
+        # Try to load the module based on trusted status
+        if self.trusted:
+            with open(file_name, "rb") as f:
+                module = pickle.load(f)
+                module = module.to(self.device)
+
+        # Else try Hugging Face for model info
         else:
-            if file_name is None or module_id is None:
-                raise ValueError(
-                    "For standard loading, file_name and module_id must be provided"
-                )
+            skeleton_module = _load_model_skeleton(model_name, module_id)
+            module = self._initialize_module_from_config(
+                skeleton_module, model_name, module_name, module_info
+            )
 
-            # Try to load the module based on trusted status
-            if self.trusted:
-                with open(file_name, "rb") as f:
-                    module = pickle.load(f)
-                    module = module.to(self.device)
+            # skeleton_module should be deleted inside _initialize_module_from_config
+            # but make sure with explicit cleanup
+            try:
+                del skeleton_module
+            except:
+                pass
 
-            # Else try Hugging Face for model info
-            elif len(module_name) > 0:
-                module = self._load_huggingface_model(module_name, file_name)
-
-            #   else:
-            #     # Load TorchScript model with device placement
-            #     if self.device.type == "cuda":
-            #         module = torch.jit.load(file_name, map_location=self.device)
-            #     else:
-            #         module = torch.jit.load(file_name)
-
-            # Cleanup file
+        # Cleanup file
+        try:
             os.remove(file_name)
+        except:
+            pass
 
         # Apply model optimizations
         if self.device.type == "cuda":
@@ -353,93 +392,361 @@ class DistributedWorker:
             if hasattr(module, 'to_bettertransformer'):
                 try:
                     module = module.to_bettertransformer()
-                    print("Using BetterTransformer optimization")
-
                 except:
                     pass
 
         # Initialize storage structures
-        module = module.to(self.device)
         module.intermediates = {}
-        module.host = node_id
+        module.host = module_info.get('host')
         module.n_batch = 0
 
         self.modules[module_id] = module
         if training:
+            optimizer_name = module_info.get("optimizer_type")
             optimizer_cls = get_optimizer_from_name(optimizer_name)
             # Placeholder - actual initialization happens in state_update
             self.optimizers[module_id] = optimizer_cls
 
         self.send_request("module_loaded", module_id)
 
-    def _load_huggingface_model(self, module_name, file_name: str = None):
-        """Load any Hugging Face model using config to pick the right class."""
+    def _load_specific_layer_weights(
+        self,
+        model_name: str,
+        layer_paths: List[str],
+        single: bool = False,
+        base_model_prefix: str = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Load only the weights for specific layers from HuggingFace.
+        Uses safetensors for efficient weight loading without loading entire model.
+
+        If layer_paths contains 'model' or is empty, loads all weights.
+        """
+        state_dict = {}
+
         try:
-            config = AutoConfig.from_pretrained(module_name)
+            # Use snapshot_download for efficient caching
+            logging.info(f"Checking cache for {model_name}")
+            model_path = snapshot_download(
+                repo_id=model_name,
+                cache_dir=self.hf_cache_dir,
+                allow_patterns=[
+                    "*.safetensors",
+                    "*.bin",
+                    "*.json",
+                ],
+                ignore_patterns=["*.msgpack", "*.h5", "*.ot"],
+                local_files_only=False,
+            )
+            logging.info(f"Model located at: {model_path}")
 
-            # Determine the model class
-            model_class = None
+            # Find all safetensors files
+            safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
 
-            arch = getattr(config, "architectures", [None])[0]
-            if arch is not None:
-                arch = arch.lower()
-                if "lmhead" in arch:
-                    model_class = AutoModelForCausalLM
-                elif "forseq2seqlm" in arch or "bart" in arch or "t5" in arch:
-                    model_class = AutoModelForSeq2SeqLM
-                elif "model" in arch:
-                    model_class = AutoModel
-            else:
-                # fallback by model_type
-                if getattr(config, "is_decoder", False):
-                    model_class = AutoModelForCausalLM
-                elif getattr(config, "encoder_decoder", False):
-                    model_class = AutoModelForSeq2SeqLM
-                else:
-                    model_class = AutoModel
+            if safetensor_files:
+                logging.info(f"Found {len(safetensor_files)} safetensors files")
 
-            # Load the model
-            if (
-                file_name is None
-                or os.stat(file_name).st_size == 0
-                or file_name == module_name
-            ):
-                if self.device.type == "cuda":
-                    module = model_class.from_pretrained(
-                        module_name,
-                        device_map="auto",
-                        torch_dtype=(torch.float16 if self.use_amp else torch.float32),
-                    )
-                else:
-                    module = model_class.from_pretrained(module_name)
-            else:
-                # Local file loading (same as before)
-                with open(file_name, "rb") as f:
-                    metadata_size = int.from_bytes(f.read(4), "big")
-                    f.read(metadata_size)  # skip metadata
-                    state_dict_bytes = f.read()
-                    state_dict_buffer = io.BytesIO(state_dict_bytes)
-                    map_location = self.device if self.device.type == "cuda" else "cpu"
-                    received_state_dict = torch.load(
-                        state_dict_buffer, map_location=map_location, weights_only=True
-                    )
+                # Load only specific layers
+                layer_path_to_idx = {path: idx for idx, path in enumerate(layer_paths)}
 
-                module = model_class.from_pretrained(
-                    module_name,
-                    device_map="auto" if self.device.type == "cuda" else None,
+                for shard_path in safetensor_files:
+                    logging.info(f"Reading weights from {os.path.basename(shard_path)}")
+
+                    with safe_open(shard_path, framework="pt", device="cpu") as f:
+                        keys_loaded = 0
+                        for key in f.keys():
+                            # Check if key starts with any of our layer paths
+                            for layer_path, layer_idx in layer_path_to_idx.items():
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    # Extract the part after the layer path
+                                    new_key = key[len(layer_prefix) :]
+                                    if single and '.' in new_key:
+                                        # For single modules, remove one more level
+                                        new_key = new_key.split('.', 1)[1]
+                                    else:
+                                        new_key = key.split('.', 1)[1]
+                                    state_dict[new_key] = f.get_tensor(key)
+                                    keys_loaded += 1
+                                    break
+
+                        if keys_loaded > 0:
+                            logging.info(
+                                f"  Loaded {keys_loaded} tensors from this shard"
+                            )
+
+                logging.info(
+                    f"Total: Loaded {len(state_dict)} weight tensors for {len(layer_paths)} layers"
                 )
-                model_state_dict = module.state_dict()
-                new_state_dict = {
-                    k: received_state_dict[v]
-                    for k, v in zip(model_state_dict.keys(), received_state_dict.keys())
-                }
-                module.load_state_dict(new_state_dict, strict=False)
 
-            return module
+            else:
+                # Fallback: use pytorch_model.bin files
+                logging.info("No safetensors found, trying pytorch_model.bin")
+                bin_files = glob.glob(os.path.join(model_path, "pytorch_model*.bin"))
+
+                if bin_files:
+                    for bin_path in bin_files:
+                        logging.info(f"Loading from {os.path.basename(bin_path)}")
+                        shard_dict = torch.load(bin_path, map_location="cpu")
+
+                        # Load only matching keys
+                        for key, value in shard_dict.items():
+                            for layer_path in layer_paths:
+                                layer_prefix = layer_path + '.'
+                                if key.startswith(layer_prefix):
+                                    new_key = key[len(layer_prefix) :]
+                                    if single and '.' in new_key:
+                                        new_key = new_key.split('.', 1)[1]
+                                    state_dict[new_key] = value
+                                    break
+
+                    logging.info(f"Loaded {len(state_dict)} tensors from .bin files")
+                else:
+                    raise ValueError(f"No weight files found in {model_path}")
 
         except Exception as e:
+            logging.error(f"Error loading weights: {e}")
+            raise ValueError(f"Failed to load layer weights: {str(e)}")
+
+        return state_dict
+
+    def _initialize_module_from_config(
+        self,
+        skeleton_module: torch.nn.Module,
+        model_name: str,
+        module_name: str,
+        module_info: Dict[str, Any],
+    ) -> torch.nn.Module:
+        """
+        Load model or specific layers from HuggingFace.
+        Handles both single modules and grouped layer ranges.
+        """
+        try:
+            # Determine if this is a grouped layer load
+            module_type = module_info.get('type', 'offloaded')
+            module_id = module_info.get("module_id")
+
+            if module_type == 'offloaded_group':
+                # Load grouped layers
+                return self._load_grouped_layers(
+                    model_name, skeleton_module, module_id, module_info
+                )
+            else:
+                # Load single module
+                return self._load_single_module(
+                    model_name, skeleton_module, module_info
+                )
+
+        except Exception as e:
+            # Make sure skeleton is cleaned up even on error
+            try:
+                del skeleton_module
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.empty_cache()
+            except:
+                pass
+
+            logging.error(f"Failed to load model from HuggingFace: {str(e)}")
             raise ValueError(f"Failed to load model from HuggingFace: {str(e)}")
-            # TODO route error to validator for reporting
+
+    def _load_grouped_layers(
+        self,
+        model_name: str,
+        base_model: torch.nn.Module,
+        module_id: str,
+        module_info: Dict[str, Any],
+    ) -> torch.nn.Module:
+        """
+        Load a group of layers as a single module. Uses empty weights initialization
+        and only loads required layer weights.
+        """
+        layer_paths = module_info.get('layer_paths', [])
+        layer_range = module_info.get('layer_range', [])
+        expected_inputs = module_info.get('expected_inputs', [])
+        expected_outputs = module_info.get('expected_outputs', [])
+        loop_body_source = module_info.get('loop_body_source')
+        loop_iterator_name = module_info.get('loop_iterator_name')
+
+        if not layer_paths:
+            raise ValueError("layer_paths must be provided for grouped layer loading")
+
+        logging.info(
+            f"Loading grouped layers {layer_range[0]}-{layer_range[1]} from {model_name}"
+        )
+
+        # Create the layer group wrapper with empty weights
+        grouped_module = _create_layer_group_wrapper(
+            base_model,
+            layer_paths,
+            expected_inputs,
+            expected_outputs,
+            loop_body_source,
+            loop_iterator_name,
+        )
+
+        # Get name of model for loading weights
+        base_model_prefix = getattr(base_model, "base_model_prefix", None)
+
+        # Delete skeleton model and force GC
+        del base_model
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        # Now load only the weights for the assigned layers
+        logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
+        state_dict = self._load_specific_layer_weights(
+            model_name, layer_paths, base_model_prefix=base_model_prefix
+        )
+
+        # Load the state dict into the grouped module
+        grouped_module = grouped_module.to_empty(device=self.device)
+        missing_keys, unexpected_keys = grouped_module.load_state_dict(
+            state_dict, strict=False
+        )
+
+        # Clean up base model to free memory
+        del state_dict
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logging.info(f"Successfully loaded {len(layer_paths)} layers with weights")
+
+        return grouped_module
+
+    def _load_single_module(
+        self, model_name: str, base_model: torch.nn.Module, module_info: Dict[str, Any]
+    ) -> torch.nn.Module:
+        """
+        Load a single module (e.g., just the RMSNorm layer).
+        Uses empty weights initialization and only loads required module weights.
+        """
+        parent_module_path = module_info.get('parent_module_path', '')
+        module_class_name = module_info.get('module', '')
+        module_id = module_info.get("module_id")
+
+        logging.info(f"Loading single module {module_class_name} from {model_name}")
+
+        if parent_module_path == "":
+            logging.info("Parent module is entire model — loading full model.")
+
+            # Ensure garbage from model info has been collected
+            if module_id in self.modules:
+                del self.modules[module_id]
+            del base_model
+            gc.collect()
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            final_model = self._load_full_model(model_name, module_info)
+
+            # Only move to device if not already there (from device_map)
+            if (
+                not next(final_model.parameters()).is_cuda
+                and self.device.type == "cuda"
+            ):
+                final_model = final_model.to(self.device)
+
+            return final_model
+
+        # Extract the specific module with empty weights
+        if parent_module_path and parent_module_path != "model":
+            # explicit path provided
+            target_module = get_nested_module(base_model, parent_module_path)
+            effective_layer_path = parent_module_path
+        else:
+            # parent_module_path is 'model' or empty -> try to find by class name
+            found_path = _find_module_path_by_class(base_model, module_class_name)
+            if found_path is None:
+                # if not found, as a safe fallback return the root module but warn the caller
+                target_module = base_model
+                effective_layer_path = parent_module_path or "model"
+            else:
+                effective_layer_path = f"model.{found_path}"
+                target_module = get_nested_module(base_model, effective_layer_path)
+
+        # Get name of model for loading weights
+        base_model_prefix = getattr(base_model, "base_model_prefix", None)
+
+        # Load only the weights for this specific module
+        logging.info(f"Loading weights for {parent_module_path}")
+
+        state_dict = self._load_specific_layer_weights(
+            model_name,
+            [effective_layer_path],
+            single=True,
+            base_model_prefix=base_model_prefix,
+        )
+
+        del base_model
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        target_module = target_module.to_empty(device=self.device)
+
+        # Load the state dict
+        missing_keys, unexpected_keys = target_module.load_state_dict(
+            state_dict, strict=False
+        )
+
+        # Move to device
+        target_module = target_module.to(self.device)
+
+        # Clean up
+        del base_model
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        logging.info(f"Successfully loaded single module {module_class_name}")
+
+        return target_module
+
+    def _load_full_model(self, model_name: str, module_info: dict) -> torch.nn.Module:
+        """
+        Load a complete model from HuggingFace with optimal memory usage.
+        Uses HF's native loading which is more memory-efficient than manual skeleton+weights.
+        """
+        model_type = module_info.get('model_type', 'chat')
+
+        # Common loading kwargs for memory optimization
+        load_kwargs = {
+            'low_cpu_mem_usage': True,  # Reduces CPU memory footprint
+            'torch_dtype': torch.float16 if self.use_amp else torch.float32,
+        }
+
+        # Only add device_map if CUDA is available
+        if self.device.type == "cuda":
+            load_kwargs['device_map'] = self.device
+
+        logging.info(f"Loading full model {model_name} with type {model_type}")
+
+        if model_type in ("causal", "chat"):
+            final_model = AutoModelForCausalLM.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "seq2seq":
+            final_model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "vision2text":
+            final_model = AutoModelForVision2Seq.from_pretrained(
+                model_name, **load_kwargs
+            )
+        elif model_type == "audio2text":
+            final_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_name, **load_kwargs
+            )
+        else:
+            # For generic models, we need to load config first, then use from_config
+            model_config = AutoConfig.from_pretrained(model_name)
+            final_model = AutoModel.from_pretrained(
+                model_name, config=model_config, **load_kwargs
+            )
+
+        logging.info(f"Successfully loaded full model {model_name}")
+        return final_model
 
     def process_state_update(self, module_id, state_update):
         """Process optimizer state updates"""
@@ -527,18 +834,8 @@ class DistributedWorker:
         args = self.send_request("check_module", None)
 
         # If we have received model info now load the model in this process
-        if isinstance(args, tuple):
-            (
-                file_name,
-                module_id,
-                node_id,
-                module_name,
-                optimizer_name,
-                training,
-            ) = args
-            self.load_module(
-                file_name, module_id, node_id, module_name, optimizer_name, training
-            )
+        if isinstance(args, dict):
+            self.load_module(args)
 
         # For workers that have received model info, now load the model in this process
         elif isinstance(args, str):
@@ -546,6 +843,12 @@ class DistributedWorker:
                 if self.modules[args].training:
                     del self.optimizers[args]
                 del self.modules[args]
+
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+
                 self.send_request("debug_print", (f"Module {args} removed.",))
 
         # Check for termination request
@@ -606,7 +909,7 @@ class DistributedWorker:
                 backward_task = self.send_request("check_backward", module_id)
                 if backward_task:
                     tag, loss_relay = backward_task
-                    self.handle_backward(module_id, tag, loss_relay)
+                    self._handle_backward(module_id, tag, loss_relay)
 
         # Small sleep to prevent CPU hogging
         time.sleep(0.001)

@@ -15,295 +15,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
 MODELS_CACHE_PATH = "logs/models.json"
 
 
-class MemoryType(Enum):
-    PARAMETERS = "parameters"
-    GRADIENTS = "gradients"
-    ACTIVATIONS = "activations"
-    OPTIMIZER = "optimizer"
-    TEMPORARY = "temporary"
-
-
-@dataclass
-class MemoryStats:
-    total_bytes: int
-    breakdown: Dict[MemoryType, int]
-    per_layer: Dict[str, Dict[MemoryType, int]]
-    peak_memory: int
-    activation_shapes: List[Tuple[str, List[int]]]
-
-
-class MemoryEstimator:
-    def __init__(self):
-        # Memory multipliers for different optimizer types
-        self.optimizer_memory_multipliers = {
-            "adam": 3,  # Adam keeps 2 momentum terms + parameters
-            "adamw": 3,
-            "sgd": 1,  # SGD with momentum keeps 1 momentum term
-            "rmsprop": 2,
-            "adagrad": 2,
-            "adadelta": 3,
-        }
-
-        # Activation memory factors for different layer types
-        self.activation_factors = {
-            nn.Conv2d: self._conv2d_activation_factor,
-            nn.Linear: self._linear_activation_factor,
-            nn.MultiheadAttention: self._attention_activation_factor,
-            nn.TransformerEncoderLayer: self._transformer_activation_factor,
-            nn.LSTM: self._lstm_activation_factor,
-            nn.GRU: self._gru_activation_factor,
-            nn.BatchNorm2d: 2.0,  # Running mean and variance
-            nn.LayerNorm: 2.0,
-            nn.Dropout: 1.0,  # Minimal overhead for mask
-            nn.ReLU: 1.0,
-            nn.MaxPool2d: 1.0,
-            nn.AdaptiveAvgPool2d: 1.0,
-        }
-
-    def _get_dtype_size(self, dtype: torch.dtype) -> int:
-        """Get size in bytes for different dtypes."""
-        if dtype == torch.float32:
-            return 4
-        elif dtype == torch.float16 or dtype == torch.bfloat16:
-            return 2
-        elif dtype == torch.float64:
-            return 8
-        elif dtype == torch.int8 or dtype == torch.uint8:
-            return 1
-        elif dtype == torch.int16:
-            return 2
-        elif dtype == torch.int32:
-            return 4
-        elif dtype == torch.int64:
-            return 8
-        else:
-            return 4  # Default to float32 size
-
-    def _conv2d_activation_factor(self, module: nn.Conv2d, input_shape: Tuple) -> float:
-        """Calculate activation factor for Conv2d layers considering intermediate feature maps."""
-        _, _, h, w = input_shape
-        out_channels = module.out_channels
-        kernel_size = module.kernel_size
-        padding = module.padding
-        stride = module.stride
-
-        # Calculate output dimensions
-        h_out = ((h + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
-        w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
-
-        # Consider im2col memory overhead
-        im2col_size = (
-            module.in_channels * kernel_size[0] * kernel_size[1] * h_out * w_out
-        )
-        output_size = out_channels * h_out * w_out
-
-        return (im2col_size + output_size) / (h * w * module.in_channels)
-
-    def _linear_activation_factor(self, module: nn.Linear, input_shape: Tuple) -> float:
-        """Calculate activation factor for Linear layers."""
-        return 2.0  # Input and output activations
-
-    def _attention_activation_factor(
-        self, module: nn.MultiheadAttention, input_shape: Tuple
-    ) -> float:
-        """Calculate activation factor for attention layers considering Q, K, V matrices."""
-        seq_length = input_shape[0]
-        return 4.0 + (
-            seq_length / 100
-        )  # Base factor + sequence length dependent factor
-
-    def _transformer_activation_factor(
-        self, module: nn.TransformerEncoderLayer, input_shape: Tuple
-    ) -> float:
-        """Calculate activation factor for transformer layers."""
-        return 6.0  # Multiple attention heads + FFN activations
-
-    def _lstm_activation_factor(self, module: nn.LSTM, input_shape: Tuple) -> float:
-        """Calculate activation factor for LSTM layers considering gates."""
-        return 4.0  # Input, forget, cell, output gates
-
-    def _gru_activation_factor(self, module: nn.GRU, input_shape: Tuple) -> float:
-        """Calculate activation factor for GRU layers."""
-        return 3.0  # Reset, update gates and new memory
-
-    def estimate_layer_memory(
-        self,
-        module: nn.Module,
-        input_shape: Tuple,
-        batch_size: int,
-        dtype: torch.dtype,
-        training: bool = True,
-    ) -> Dict[MemoryType, int]:
-        """Estimate memory usage for a single layer."""
-        memory_breakdown = {mem_type: 0 for mem_type in MemoryType}
-        dtype_size = self._get_dtype_size(dtype)
-
-        # Parameter memory
-        param_memory = sum(
-            p.numel() * self._get_dtype_size(p.dtype) for p in module.parameters()
-        )
-        memory_breakdown[MemoryType.PARAMETERS] = param_memory
-
-        # Gradient memory during training
-        if training:
-            memory_breakdown[MemoryType.GRADIENTS] = param_memory
-
-        # Activation memory
-        total_elements = np.prod(input_shape) * batch_size
-        base_activation_memory = total_elements * dtype_size
-
-        # Get activation factor based on layer type
-        activation_factor = 1.0
-        for layer_type, factor_func in self.activation_factors.items():
-            if isinstance(module, layer_type):
-                activation_factor = (
-                    factor_func(module, input_shape)
-                    if callable(factor_func)
-                    else factor_func
-                )
-                break
-
-        memory_breakdown[MemoryType.ACTIVATIONS] = int(
-            base_activation_memory * activation_factor
-        )
-
-        # Temporary memory buffers (for intermediate computations)
-        memory_breakdown[MemoryType.TEMPORARY] = int(
-            base_activation_memory * 0.5
-        )  # Conservative estimate
-
-        return memory_breakdown
-
-    def estimate_model_memory(
-        self,
-        model: nn.Module,
-        input_shape: Tuple,
-        batch_size: int = 32,
-        dtype: torch.dtype = torch.float32,
-        optimizer_type: str = "adam",
-        training: bool = True,
-    ) -> MemoryStats:
-        """
-        Estimate total memory usage for the entire model.
-
-        Args:
-            model: The PyTorch model
-            input_shape: Input tensor shape (excluding batch dimension)
-            batch_size: Training batch size
-            dtype: Model's data type
-            optimizer_type: Type of optimizer used
-            training: Whether the model is in training mode
-
-        Returns:
-            MemoryStats object containing detailed memory analysis
-        """
-        total_memory = 0
-        memory_breakdown = {mem_type: 0 for mem_type in MemoryType}
-        per_layer_memory = {}
-        activation_shapes = []
-
-        # Track cumulative activation memory for peak estimation
-        cumulative_activation = 0
-        peak_memory = 0
-
-        def _analyze_module(module: nn.Module, name: str, curr_input_shape: Tuple):
-            nonlocal total_memory, cumulative_activation, peak_memory
-
-            # Skip container modules
-            if len(list(module.children())) > 0:
-                return curr_input_shape
-
-            # Estimate memory for current layer
-            layer_memory = self.estimate_layer_memory(
-                module, curr_input_shape, batch_size, dtype, training
-            )
-
-            # Update statistics
-            per_layer_memory[name] = layer_memory
-            for mem_type, amount in layer_memory.items():
-                memory_breakdown[mem_type] += amount
-                total_memory += amount
-
-            # Track activation memory for peak estimation
-            if isinstance(module, (nn.Conv2d, nn.Linear, nn.MultiheadAttention)):
-                cumulative_activation += layer_memory[MemoryType.ACTIVATIONS]
-                peak_memory = max(peak_memory, cumulative_activation)
-
-            # Calculate output shape
-            output_shape = self._calculate_output_shape(module, curr_input_shape)
-            activation_shapes.append((name, list(output_shape)))
-
-            return output_shape
-
-        # Recursively analyze model
-        curr_shape = input_shape
-        for name, module in model.named_modules():
-            if len(list(module.children())) == 0:  # Leaf module
-                curr_shape = _analyze_module(module, name, curr_shape)
-
-        # Add optimizer memory if in training mode
-        if training and optimizer_type in self.optimizer_memory_multipliers:
-            optimizer_memory = (
-                memory_breakdown[MemoryType.PARAMETERS]
-                * self.optimizer_memory_multipliers[optimizer_type]
-            )
-            memory_breakdown[MemoryType.OPTIMIZER] = optimizer_memory
-            total_memory += optimizer_memory
-
-        return MemoryStats(
-            total_bytes=total_memory,
-            breakdown=memory_breakdown,
-            per_layer=per_layer_memory,
-            peak_memory=peak_memory,
-            activation_shapes=activation_shapes,
-        )
-
-    def _calculate_output_shape(self, module: nn.Module, input_shape: Tuple) -> Tuple:
-        """Calculate output shape for different layer types."""
-        if isinstance(module, nn.Conv2d):
-            _, c, h, w = input_shape
-            padding = (
-                module.padding
-                if isinstance(module.padding, tuple)
-                else (module.padding, module.padding)
-            )
-            stride = (
-                module.stride
-                if isinstance(module.stride, tuple)
-                else (module.stride, module.stride)
-            )
-            kernel_size = (
-                module.kernel_size
-                if isinstance(module.kernel_size, tuple)
-                else (module.kernel_size, module.kernel_size)
-            )
-
-            h_out = ((h + 2 * padding[0] - kernel_size[0]) // stride[0]) + 1
-            w_out = ((w + 2 * padding[1] - kernel_size[1]) // stride[1]) + 1
-            return (module.out_channels, h_out, w_out)
-
-        elif isinstance(module, nn.Linear):
-            return (module.out_features,)
-
-        elif isinstance(module, nn.MaxPool2d) or isinstance(module, nn.AvgPool2d):
-            _, c, h, w = input_shape
-            kernel_size = (
-                module.kernel_size
-                if isinstance(module.kernel_size, tuple)
-                else (module.kernel_size, module.kernel_size)
-            )
-            stride = (
-                module.stride
-                if isinstance(module.stride, tuple)
-                else (module.stride, module.stride)
-            )
-            h_out = ((h - kernel_size[0]) // stride[0]) + 1
-            w_out = ((w - kernel_size[1]) // stride[1]) + 1
-            return (c, h_out, w_out)
-
-        return input_shape
-
-
 def format_memory_size(number: int) -> str:
     """Format memory size in readable format."""
     for unit in ["B", "KB", "MB", "GB"]:
@@ -313,24 +24,128 @@ def format_memory_size(number: int) -> str:
     return f"{number:.2f} TB"
 
 
+def estimate_memory(
+    module: nn.Module,
+    training: bool = True,
+    batch_size: int = 256,
+    seq_length: int = 2048,
+    dtype: torch.dtype = torch.float16,
+    optimizer_type: str = "adam",
+    include_kv_cache: bool = True,
+    recursive: bool = True,
+) -> tuple[float, dict]:
+    """
+    Estimate total memory usage (in bytes) for a PyTorch nn.Module, including
+    parameters, gradients, activations, optimizer state, and KV cache if applicable.
+
+    Returns (total_bytes, breakdown_dict).
+    """
+    # --- Basic dtype sizing ---
+    dtype_size = torch.tensor([], dtype=dtype).element_size()
+
+    breakdown = {
+        "parameters": 0,
+        "gradients": 0,
+        "optimizer": 0,
+        "activations": 0,
+        "kv_cache": 0,
+    }
+
+    # --- Parameter + gradient size ---
+    # Count only direct parameters if not recursive
+    if recursive:
+        param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
+    else:
+        param_bytes = sum(
+            p.numel() * p.element_size() for p in module.parameters(recurse=False)
+        )
+        param_bytes += sum(
+            b.numel() * b.element_size() for b in module.buffers(recurse=False)
+        )
+
+    breakdown["parameters"] = param_bytes
+
+    if training:
+        breakdown["gradients"] = param_bytes
+
+        # Optimizer state sizes
+        if optimizer_type.lower() in {"adam", "adamw"}:
+            # Adam always stores fp32 moments even with fp16 model
+            opt_dtype_size = 4
+            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * opt_dtype_size
+        elif optimizer_type.lower() in {"sgd", "momentum"}:
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
+        else:
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size * 1.5
+
+        breakdown["optimizer"] = opt_bytes
+
+    # --- Activation estimate ---
+    # Try to infer hidden size / intermediate shape
+    hidden_size = None
+    num_layers = 0
+
+    # if transformer-like, pick up clues
+    for name, sub in module.named_modules():
+        if isinstance(sub, nn.MultiheadAttention):
+            hidden_size = sub.embed_dim
+            num_layers += 1
+
+        elif isinstance(sub, nn.TransformerEncoderLayer):
+            hidden_size = sub.linear1.in_features
+            num_layers += 1
+
+        elif hasattr(sub, "hidden_size"):
+            hidden_size = getattr(sub, "hidden_size")
+
+    # fallback heuristic
+    if hidden_size is None:
+        total_params = sum(p.numel() for p in module.parameters())
+        # transformer rule-of-thumb: params ≈ 12 * L * d^2
+        hidden_size = int((total_params / 12) ** 0.5)
+        hidden_size = max(128, min(hidden_size, 8192))
+
+    if num_layers == 0:
+        num_layers = 1
+
+    # Activation memory (forward + backward)
+    per_layer_act = batch_size * seq_length * hidden_size * dtype_size * 3
+    activation_bytes = per_layer_act * num_layers
+
+    if training:
+        # backward keeps a copy of activations
+        activation_bytes *= 2
+
+    breakdown["activations"] = activation_bytes
+
+    # --- KV cache (for transformers during inference) ---
+    if include_kv_cache and not training:
+        # assume typical num_heads
+        num_heads = max(1, hidden_size // 64)
+        head_dim = hidden_size // num_heads
+
+        # KV cache per layer: batch * seq * num_heads * head_dim * 2 (K+V) * dtype_size
+        kv_cache = (
+            batch_size * seq_length * num_heads * head_dim * 2 * num_layers * dtype_size
+        )
+        breakdown["kv_cache"] = kv_cache
+
+    total = sum(breakdown.values()) * 1.05  # Add 5% room for overhead
+
+    return total, breakdown
+
+
 def estimate_hf_model_memory(
     model_name: str,
-    batch_size: int = 1,  # Default to 1 for inference
-    seq_length: int = 2048,  # More realistic default
-    dtype: Union[torch.dtype, str] = torch.float16,  # More common for inference
+    batch_size: int = 1,
+    seq_length: int = 128,  # realistic default for inference
+    dtype: Union[torch.dtype, str] = torch.float16,
     optimizer_type: str = "adam",
-    training: bool = False,  # Default to inference
-    include_kv_cache: bool = True,  # Important for inference
-) -> Tuple[float, dict]:
-    """
-    Estimate memory requirements for a HuggingFace transformer model.
-
-    Returns:
-        Tuple[float, dict]: (total_memory_gb, breakdown_dict)
-    """
+    training: bool = False,
+    include_kv_cache: bool = True,
+):
 
     def get_dtype_size(dtype_input):
-        """Convert dtype to bytes per element"""
         if isinstance(dtype_input, str):
             dtype_map = {
                 "float32": 4,
@@ -343,120 +158,72 @@ def estimate_hf_model_memory(
                 "int8": 1,
                 "uint8": 1,
                 "int4": 0.5,
-                "uint4": 0.5,  # For quantized models
+                "uint4": 0.5,
             }
             return dtype_map.get(dtype_input.lower(), 4)
-        else:
-            if hasattr(dtype_input, 'element_size'):
-                return dtype_input.element_size()
-            elif hasattr(dtype_input, 'itemsize'):
-                return dtype_input.itemsize
-            else:
-                return 4
+        return getattr(dtype_input, "element_size", lambda: 4)()
 
     try:
-        # Get model config
         config_path = hf_hub_download(repo_id=model_name, filename="config.json")
         with open(config_path, "r") as f:
             config = json.load(f)
 
-        # Extract architecture parameters with better fallbacks
-        hidden_size = config.get("hidden_size", config.get("d_model", 4096))
-        num_layers = config.get("num_hidden_layers", config.get("num_layers", 32))
+        ATTN_SCALE = 0.5
+        FF_SCALE = 2 / 3
+
+        # Safe extraction with GPT/BERT naming variants
+        hidden_size = (
+            config.get("hidden_size")
+            or config.get("d_model")
+            or config.get("n_embd")
+            or 128
+        )
+        num_layers = (
+            config.get("num_hidden_layers")
+            or config.get("num_layers")
+            or config.get("n_layer")
+            or 4
+        )
         vocab_size = config.get("vocab_size", 32000)
         intermediate_size = config.get("intermediate_size", hidden_size * 4)
-        num_attention_heads = config.get("num_attention_heads", 32)
-        num_key_value_heads = config.get(
-            "num_key_value_heads", num_attention_heads
-        )  # For GQA/MQA
-
-        # Get dtype size in bytes
+        num_attention_heads = (
+            config.get("num_attention_heads") or config.get("n_head") or 4
+        )
+        num_key_value_heads = config.get("num_key_value_heads", num_attention_heads)
         dtype_size = get_dtype_size(dtype)
 
-        # More accurate parameter calculation
-        # Token embeddings
+        # Parameter count
         token_embeddings = vocab_size * hidden_size
-
-        # Per layer parameters
-        # Self-attention: Q, K, V projections + output projection
-        # Account for grouped query attention
         q_params = hidden_size * hidden_size
         kv_params = (
             2 * hidden_size * (hidden_size * num_key_value_heads // num_attention_heads)
         )
         attn_output_params = hidden_size * hidden_size
-        attention_params = q_params + kv_params + attn_output_params
-
-        # Feed-forward network (typically gate, up, down projections for modern models)
+        attention_params = (q_params + kv_params + attn_output_params) * ATTN_SCALE
         ff_params = (
             2 * hidden_size * intermediate_size + intermediate_size * hidden_size
-        )
-
-        # RMS norm parameters (more common than LayerNorm in modern models)
-        norm_params = hidden_size  # One norm per layer typically
-
+        ) * FF_SCALE
+        norm_params = hidden_size
         layer_params = attention_params + ff_params + norm_params
-        total_layer_params = num_layers * layer_params
+        total_params = token_embeddings + num_layers * layer_params + hidden_size
 
-        # Final norm and output projection (often tied to embeddings)
-        final_norm = hidden_size
-        # Many models tie output projection to input embeddings, so don't double count
-        output_projection = 0  # vocab_size * hidden_size if not tied
-
-        total_params = (
-            token_embeddings + total_layer_params + final_norm + output_projection
-        )
-
-        # Base parameter memory
-        param_memory_bytes = total_params * dtype_size
-
+        param_bytes = total_params * dtype_size
         breakdown = {
-            "parameters_gb": param_memory_bytes / (1024**3),
-            "activations_gb": 0,
-            "kv_cache_gb": 0,
-            "optimizer_gb": 0,
-            "gradients_gb": 0,
+            "parameters": param_bytes,
+            "activations": 0,
+            "kv_cache": 0,
+            "optimizer": 0,
+            "gradients": 0,
         }
 
-        # Activation memory (much smaller for inference, larger for training)
-        if training:
-            # Rough estimate: activations scale with batch_size * seq_length * hidden_size * num_layers
-            # Include attention matrices and intermediate activations
-            activation_memory = (
-                batch_size
-                * seq_length
-                * hidden_size
-                * num_layers
-                * dtype_size
-                * 4  # Rough multiplier
-            )
-            breakdown["activations_gb"] = activation_memory / (1024**3)
+        # Inference activations
+        activation_bytes = batch_size * seq_length * hidden_size * dtype_size * 2
+        breakdown["activations"] = activation_bytes
 
-            # Gradients memory (same size as parameters)
-            gradient_memory = param_memory_bytes
-            breakdown["gradients_gb"] = gradient_memory / (1024**3)
-
-            # Optimizer states
-            optimizer_multiplier = {
-                "adam": 2,
-                "adamw": 2,
-                "sgd": 1,
-                "adafactor": 1,
-            }.get(optimizer_type.lower(), 2)
-            optimizer_memory = param_memory_bytes * optimizer_multiplier
-            breakdown["optimizer_gb"] = optimizer_memory / (1024**3)
-
-        else:
-            # Inference activations are much smaller
-            # Mainly just the current layer's activations
-            activation_memory = batch_size * seq_length * hidden_size * dtype_size * 2
-            breakdown["activations_gb"] = activation_memory / (1024**3)
-
-        # KV cache for inference (can be significant for long sequences)
-        if include_kv_cache and not training:
-            # KV cache: 2 (K,V) * num_layers * num_kv_heads * head_dim * seq_length * batch_size
+        # KV cache (optional)
+        if include_kv_cache:
             head_dim = hidden_size // num_attention_heads
-            kv_cache_memory = (
+            kv_bytes = (
                 2
                 * num_layers
                 * num_key_value_heads
@@ -465,36 +232,14 @@ def estimate_hf_model_memory(
                 * batch_size
                 * dtype_size
             )
-            breakdown["kv_cache_gb"] = kv_cache_memory / (1024**3)
+            breakdown["kv_cache"] = kv_bytes
 
-        total_memory_bytes = sum(v * (1024**3) for v in breakdown.values())
-        total_memory_gb = total_memory_bytes / (1024**3)
-
-        return total_memory_gb, breakdown
+        total = sum(breakdown.values())
+        return total, breakdown
 
     except Exception as e:
         print(f"Error estimating memory for {model_name}: {e}")
         return 0.0, {}
-
-
-def get_hf_model(model_name: str, tokenizer: bool = False):
-    try:
-        # Get model information from Hugging Face api
-        model = AutoModelForCausalLM.from_pretrained(model_name)
-
-        if tokenizer:
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-        else:
-            tokenizer = None
-
-        return model, tokenizer
-
-    except Exception as e:
-        # TODO route error to validator for reporting
-        return
-
-
-distributed_module_ids = []
 
 
 def get_gpu_memory():
@@ -510,130 +255,9 @@ def get_gpu_memory():
             memory += free
 
     else:
-        # TODO CPU should be able to handle 2 GB? (temporary fix)
-        memory += 2e9
+        memory += 1e9
 
     return memory
-
-
-def estimate_memory(
-    module: nn.Module,
-    training: bool = True,
-    batch_size: int = 256,
-    max_input_size=(3, 224, 224),
-):
-    """
-    Estimate the memory usage of a module in bytes, considering parameters and approximations
-    for activations without performing a forward pass.
-
-    Args:
-        module (nn.Module): The PyTorch module.
-        training (bool): True if training is required during module usage.
-        batch_size (int): The batch size of input data.
-        max_input_size (tuple): The size of a single input (C, H, W).
-
-    Returns:
-        int: The estimated memory usage in bytes.
-    """
-    element_size = next(module.parameters()).element_size()
-    memory_usage = sum([p.numel() * p.element_size() for p in module.parameters()])
-
-    # Estimate memory for gradients (same size as parameters during training)
-    if training:
-        memory_usage *= 2  # Gradients
-        memory_usage *= 2  # Optimizer estimate
-
-    input_size = batch_size
-    for i in range(len(max_input_size)):
-        input_size *= max_input_size[i]
-
-    activation_state = input_size * element_size
-
-    memory_usage += input_size
-    memory_usage += activation_state
-
-    return int(memory_usage)
-
-
-def profile_model(model: nn.Module, input_size=(1, 3, 224, 224)):
-    """
-    Profile a PyTorch model to estimate overhead in terms of memory usage and FLOPs.
-    Args:
-        model (nn.Module): The model to be profiled.
-        input_size (tuple): The input size for the model.
-    Returns:
-        dict: A dictionary containing the analysis of each layer.
-    """
-    # Dictionary to hold the analysis of each layer
-    analysis = {}
-
-    # Initialize dummy input to calculate FLOPs
-    dummy_input = torch.zeros(*input_size)
-
-    # Total parameter count
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total Parameters: {total_params:,}")
-
-    # Recursively analyze each layer
-    def analyze_layer(module: nn.Module, input_shape):
-        layer_info = {
-            "parameters": sum(p.numel() for p in module.parameters()),
-            "flops": 0,
-            "memory": 0,
-        }
-
-        # Estimate memory for parameters
-        for param in module.parameters():
-            layer_info["memory"] += estimate_memory(param)
-
-        # Estimate FLOPs
-        if isinstance(module, nn.Linear):
-            layer_info["flops"] = 2 * module.in_features * module.out_features
-        elif isinstance(module, nn.Conv2d):
-            out_channels, in_channels, kh, kw = module.weight.shape
-            _, _, h, w = input_shape
-            flops_per_instance = 2 * in_channels * kh * kw * out_channels
-            layer_info["flops"] = flops_per_instance * h * w
-        elif isinstance(module, nn.MultiheadAttention):
-            embed_dim = module.embed_dim
-            num_heads = module.num_heads
-            seq_length = input_shape[0]  # assuming (seq_len, batch_size, embed_dim)
-            # Rough estimation for self-attention FLOPs
-            layer_info["flops"] = (
-                4 * seq_length * embed_dim * embed_dim
-                + seq_length * num_heads * embed_dim
-            )
-        elif isinstance(module, nn.Transformer):
-            # Estimating FLOPs for Transformer model
-            num_layers = module.encoder.num_layers
-            embed_dim = module.d_model
-            seq_length = input_shape[0]
-            # Each encoder layer typically involves two self-attention layers and one feed-forward layer
-            layer_info["flops"] = (
-                4 * seq_length * embed_dim * embed_dim + seq_length * embed_dim
-            ) * num_layers
-
-        # Add the layer analysis to the global analysis dictionary
-        analysis[module] = layer_info
-
-        return layer_info
-
-    # Traverse the model and analyze each layer
-    for name, module in model.named_modules():
-        if len(list(module.children())) == 0:  # Leaf module
-            layer_input_shape = dummy_input.shape
-            layer_info = analyze_layer(module, layer_input_shape)
-            print(f"{name}: {layer_info}")
-
-    return analysis
-
-
-def get_first_layer(model: nn.Module):
-    if len(list(model.children())) > 0:
-        submodule = next(model.children())
-        return get_first_layer(submodule)
-    else:
-        return model
 
 
 def find_module(module: nn.Module, target_name: str, ids: list = []):
@@ -675,41 +299,53 @@ def access_module(module: nn.Module, indices: list):
     return current_module, module_name
 
 
-def detach_tensor(tensor):
-    if isinstance(tensor, torch.Tensor):
-        detached_tensor = tensor.detach().cpu()
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_tensor
-    elif isinstance(tensor, ModelOutput):
-        for key, value in tensor.items():
-            if isinstance(value, torch.Tensor):
-                tensor[key] = value.detach().cpu()
-                del value
-                torch.cuda.empty_cache()
-        return tensor
-    elif isinstance(tensor, (list, tuple)):
-        detached_list = type(tensor)(
-            detach_tensor(t) if isinstance(t, (ModelOutput, torch.Tensor)) else t
-            for t in tensor
-        )
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_list
-    elif isinstance(tensor, dict):
-        detached_dict = {
-            key: (
-                detach_tensor(value)
-                if isinstance(value, (ModelOutput, torch.Tensor))
-                else value
+def detach_tensor(obj, clone: bool = False):
+    """
+    Recursively detach tensors (and optionally clone them) from GPU to CPU.
+    Supports Tensor, ModelOutput, list, tuple, and dict.
+    """
+    # Case 1: torch.Tensor
+    if isinstance(obj, torch.Tensor):
+        t = obj.detach().cpu()
+        if clone:
+            t = t.clone()
+        return t
+
+    # Case 2: ModelOutput (transformers container)
+    elif isinstance(obj, ModelOutput):
+        new_out = obj.__class__()  # create same output class
+        for key, value in obj.items():
+            if isinstance(value, (torch.Tensor, ModelOutput, list, tuple, dict)):
+                new_out[key] = detach_tensor(value, clone=clone)
+            else:
+                new_out[key] = value
+        return new_out
+
+    # Case 3: list or tuple
+    elif isinstance(obj, (list, tuple)):
+        new_seq = [
+            (
+                detach_tensor(v, clone=clone)
+                if isinstance(v, (torch.Tensor, ModelOutput, list, tuple, dict))
+                else v
             )
-            for key, value in tensor.items()
+            for v in obj
+        ]
+        return type(obj)(new_seq)
+
+    # Case 4: dictionary
+    elif isinstance(obj, dict):
+        return {
+            k: (
+                detach_tensor(v, clone=clone)
+                if isinstance(v, (torch.Tensor, ModelOutput, list, tuple, dict))
+                else v
+            )
+            for k, v in obj.items()
         }
-        del tensor
-        torch.cuda.empty_cache()
-        return detached_dict
+
     else:
-        raise TypeError("Unsupported input type")
+        raise TypeError(f"Unsupported input type: {type(obj)}")
 
 
 def attach_tensor(tensor, device):
@@ -771,12 +407,7 @@ def enable_grad(tensor):
         return {key: enable_grad(value) for key, value in tensor.items()}
 
     else:
-        raise TypeError(f"Unsupported input type: {type(tensor)}")
-
-
-# Example usage:
-# Assuming `model_output` is a ModelOutput instance with various nested structures
-# enabled_output = enable_grad(model_output)
+        return tensor
 
 
 def handle_output(tensor):
@@ -791,9 +422,11 @@ def handle_output(tensor):
         return tensor.logits
     elif hasattr(tensor, "last_hidden_state"):
         return tensor.last_hidden_state
-    elif isinstance(tensor, tuple):
-        if len(tensor) > 0:
+    elif isinstance(tensor, (tuple, list)):
+        if len(tensor) == 1:
             return tensor[0] if isinstance(tensor[0], torch.Tensor) else tensor
+        elif len(tensor) > 1:
+            return type(tensor)(t for t in tensor if isinstance(t, torch.Tensor))
         return tensor
     elif isinstance(tensor, dict):
         # Look for common keys like 'logits' or 'last_hidden_state'
@@ -1496,3 +1129,41 @@ def get_model_detailed_stats(model_name: str) -> Dict:
             "generated_at": current_time,
         },
     }
+
+
+def get_nested_module(
+    model: torch.nn.Module, path: str, target_class_name: str = None
+) -> torch.nn.Module:
+    """
+    Navigate to a nested module using dot notation path.
+    Example: 'model.layers.0' -> returns model.layers[0]
+    """
+    parts = path.split('.')
+    current = model
+
+    if parts[0] == "model":
+        parts = parts[1:]
+
+    # Skip 'model' prefix if present (first attribute is always the model itself)
+    for part in parts:
+        if part.isdigit():
+            # Handle list/ModuleList indexing
+            current = current[int(part)]
+        else:
+            # Handle attribute access
+            current = getattr(current, part)
+
+    return current
+
+
+def resolve_module_from_path(model: nn.Module, path: str):
+    """Return (parent_module, child_module, child_name)."""
+    parts = path.split(".")
+    parent = model
+    for p in parts[:-1]:
+        if p == "model":
+            continue
+        parent = getattr(parent, p)
+    child_name = parts[-1]
+    child = getattr(parent, child_name)
+    return parent, child, child_name

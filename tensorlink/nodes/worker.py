@@ -31,11 +31,12 @@ class Worker(Torchnode):
         local_test=False,
         mining_active=None,
         reserved_memory=None,
+        duplicate="",
     ):
         super(Worker, self).__init__(
             request_queue,
             response_queue,
-            "W",
+            "W" + duplicate,
             max_connections=max_connections,
             upnp=upnp,
             off_chain_test=off_chain_test,
@@ -43,7 +44,7 @@ class Worker(Torchnode):
         )
 
         self.training = False
-        self.role = "W"
+        self.role = "W" + duplicate
         self.print_level = print_level
         self.loss = None
         self.dht.store(hashlib.sha256(b"ADDRESS").hexdigest(), self.public_key)
@@ -161,24 +162,25 @@ class Worker(Torchnode):
                     user_id,
                     job_id,
                     module_id,
-                    module_size,
-                    module_name,
-                    optimizer_name,
-                    training,
+                    module_info,
                 ) = json.loads(data[7:])
 
-                if self.available_gpu_memory >= module_size:  # TODO Ensure were active?
-                    # Respond to validator that we can accept the job
-                    if module_name is None:
-                        module_name = ""
+                module_size = module_info["memory"]
+                model_name = module_info["name"]
+                training = module_info["training"]
+                optimizer_name = module_info["optimizer_type"]
+                module_info["status"] = "loading"
 
+                if self.available_gpu_memory >= module_size:
                     # Store a request to wait for the user connection
-                    self._store_request(user_id, module_id + module_name)
+                    self._store_request(user_id, module_id + model_name)
 
                     if training:
                         self._store_request(user_id, "OPTIMIZER" + optimizer_name)
 
                     data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+
+                    self.modules[module_id] = module_info
 
                     # Update available memory
                     self.available_gpu_memory -= module_size
@@ -189,6 +191,7 @@ class Worker(Torchnode):
             else:
                 node.stop()
 
+            # Respond to validator that we can accept/decline the job
             self.send_to_node(node, data)
 
         except Exception as e:
@@ -225,9 +228,22 @@ class Worker(Torchnode):
     #     if self.training:
     #         proof["output"] = handle_output(self.model(dummy_input)).sum()
 
+    def get_available_gpu_memory(self):
+        available_gpu_memory = get_gpu_memory()
+
+        for module_id, module_info in self.modules.items():
+            # Account for modules that are not in CUDA and are still initializing
+            if module_info.get("status", "loading") == "loading":
+                module_size = module_info["memory"]
+                available_gpu_memory -= module_size
+
+        return available_gpu_memory
+
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
-        self.available_gpu_memory = get_gpu_memory()
+        self.available_gpu_memory = self.get_available_gpu_memory()
+
+        print(f"Available memory: {round(self.available_gpu_memory/1e9, 5)}GB")
 
         # If mining is active, report total GPU memory since we'll stop mining on job acceptance
         if self.mining_active is not None and self.mining_active.value:

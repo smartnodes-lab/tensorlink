@@ -377,7 +377,7 @@ class JobMonitor:
             if module_info["type"] != "offloaded":
                 continue
 
-            for worker_id in module_info["workers"]:
+            for worker_id in module_info["assigned_workers"]:
                 worker_healthy = self._check_single_worker(worker_id, module_id)
                 all_workers_healthy = all_workers_healthy and worker_healthy
 
@@ -433,7 +433,7 @@ class JobMonitor:
         """Clean up worker resources and send shutdown signals."""
         for module_id, module_info in job_data["distribution"].items():
             if module_info["type"] == "offloaded":
-                for worker_id in module_info["workers"]:
+                for worker_id in module_info["assigned_workers"]:
                     try:
                         node = self.node.nodes[worker_id]
                         self.node.send_to_node(

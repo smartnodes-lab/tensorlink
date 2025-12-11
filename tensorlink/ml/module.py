@@ -1,26 +1,39 @@
-import logging
-from typing import Generator, OrderedDict, Optional, Type, Dict, Any, Union
-from collections import defaultdict
-from transformers import PreTrainedModel
-from transformers.utils import ModelOutput
+from accelerate import init_empty_weights
+from transformers import (
+    PreTrainedModel,
+    AutoConfig,
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForSeq2SeqLM,
+    AutoModelForVision2Seq,
+    AutoModelForSpeechSeq2Seq,
+)
+from typing import Generator, List, Optional, Type, Dict, Any, Union
+from contextlib import contextmanager
 import torch.optim as optim
 import torch.nn as nn
 import torch
 import threading
-import hashlib
+import logging
 import pickle
+import types
 import queue
-import random
 import time
-import base64
 import json
 import gc
 import io
 import os
 
+from tensorlink.ml.injector import generate_new_forward_method, get_loop_io_signature
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
-from tensorlink.ml.graphing import ModelParser
+from tensorlink.ml.graphing import (
+    ModelParser,
+    analyze_forward_loop,
+    extract_loop_components,
+    is_layer_loop,
+)
 from tensorlink.ml.utils import (
+    resolve_module_from_path,
     get_gpu_memory,
     get_batch_size,
     chunk,
@@ -33,6 +46,7 @@ from tensorlink.ml.utils import (
     bytes_to_tensor,
     tensor_to_bytes,
     enable_grad,
+    get_nested_module,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -75,6 +89,20 @@ def _confirm_action():
             exit(1)
         else:
             print("Invalid input. Please type 'yes'/'y' or 'no'/'n'.")
+
+
+@contextmanager
+def _set_micro(local: threading.local, micro: int):
+    """Context manager to set thread-local micro id and remove it on exit."""
+    setattr(local, "micro", micro)
+    try:
+        yield
+    finally:
+        # remove attribute so thread reuse won't leak it
+        try:
+            delattr(local, "micro")
+        except AttributeError:
+            pass
 
 
 class CustomAutogradRouter(torch.autograd.Function):
@@ -141,10 +169,10 @@ class DistributedModel(nn.Module):
 
         if isinstance(model, nn.Module):
             self.name = str(model).split("(")[0]
-            self.model = model.to(dtype=dtype)
+            self.model: nn.Module = model.to(dtype=dtype)
         else:
-            self.name = model
-            self.model = model
+            self.model_name = model
+            self.model = None
 
         # Store model and training resources
         self.user_memory = get_gpu_memory()
@@ -159,6 +187,7 @@ class DistributedModel(nn.Module):
         # Distributed graph and parameters
         self.distributed_graph: Dict[str, Any] = {}
         self.parameters_storage: Dict[str, torch.Tensor] = {}
+        self.my_modules = set()
 
         # Set device
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -180,6 +209,9 @@ class DistributedModel(nn.Module):
         self.node_requests = self.node.node_requests
         self.node_responses = self.node.node_responses
         self.mpc_lock = self.node.mpc_lock
+        self._thread_local = threading.local()
+
+        self.job_id = None
 
         if verbose:
             print(f"DistributedModel '{self.name}' initialized on {self.device}")
@@ -243,9 +275,9 @@ class DistributedModel(nn.Module):
         return replace_output_with_custom_grad(combined_output, custom_grad_output)
 
     def _perform_micro_forward(self, micro, *args, **kwargs):
-        kwargs["micro"] = micro
-        x = self.model(*args, **kwargs)
-        self.model.outputs[micro] = x
+        with _set_micro(self._thread_local, micro):
+            x = self.model(*args, **kwargs)
+            self.model.outputs[micro] = x
 
     def backward(self, loss):
         """
@@ -274,92 +306,96 @@ class DistributedModel(nn.Module):
 
     def _perform_micro_backward(self, micro, loss):
         """
-        Process each backwards stream
+        Process each backward stream
         """
+        with _set_micro(self._thread_local, micro):
+            # Get the oldest epoch intermediates from storage via dict key lookup (todo)
+            while len(self.model.intermediates[micro]) > 0:
+                vals = self.model.intermediates[micro].pop(-1)
 
-        # Get the oldest epoch intermediates from storage via dict key lookup (todo)
-        while len(self.model.intermediates[micro]) > 0:
-            vals = self.model.intermediates[micro].pop(-1)
+                # Len vals 2 means backwards pass of first & last submodule
+                if len(vals) == 2:
+                    val1, val2 = vals
 
-            # Len vals 2 means backwards pass of first & last submodule
-            if len(vals) == 2:
-                val1, val2 = vals
+                    # Pass of the first submodule / section contains tensor in the first position
+                    if isinstance(val1, torch.Tensor):
+                        assoc_output, _ = vals
+                        loss = assoc_output.backward(loss, retain_graph=True)
 
-                # Pass of the first submodule / section contains tensor in the first position
-                if isinstance(val1, torch.Tensor):
-                    assoc_output, _ = vals
-                    loss = assoc_output.backward(loss, retain_graph=True)
+                        if loss is None:
+                            # If loss is None, use the associated output for backward pass
+                            loss = assoc_output
 
-                    if loss is None:
-                        # If loss is None, use the associated output for backward pass
-                        loss = assoc_output
-
-                # Pass of the last section
-                else:
-                    module_id_bytes, assoc_input = vals
-                    tag = [self.model.n_batch, micro, module_id_bytes]
-
-                    # If there are remaining computations between output and last submodule
-                    if loss.grad_fn is not None:
-                        loss.backward()
-                        loss = assoc_input.grad
-
-                    start_time = time.time()
-                    worker_id = self.distributed_graph[module_id_bytes]["workers"][-1]
-                    key = tag[:2] + [module_id_bytes, module_id_bytes]
-
-                    if self.trusted:
-                        size, shm_name = store_in_shared_memory(
-                            (detach_tensor(loss), None)
-                        )
+                    # Pass of the last section
                     else:
-                        loss_bytes = tensor_to_bytes(loss)
-                        size, shm_name = store_in_shared_memory(
-                            loss_bytes, encoded=True
+                        module_id_bytes, assoc_input = vals
+                        tag = [self.model.n_batch, micro, module_id_bytes]
+
+                        # If there are remaining computations between output and last submodule
+                        if loss.grad_fn is not None:
+                            loss.backward()
+                            loss = assoc_input.grad
+
+                        start_time = time.time()
+                        worker_id = self.distributed_graph[module_id_bytes][
+                            "assigned_workers"
+                        ][-1]
+                        key = tag[:2] + [module_id_bytes, module_id_bytes]
+
+                        if self.trusted:
+                            size, shm_name = store_in_shared_memory(
+                                (detach_tensor(loss), None)
+                            )
+                        else:
+                            loss_bytes = tensor_to_bytes(loss)
+                            size, shm_name = store_in_shared_memory(
+                                loss_bytes, encoded=True
+                            )
+
+                        self.send_request(
+                            "send_backward", (worker_id, size, shm_name, tag)
                         )
 
-                    self.send_request("send_backward", (worker_id, size, shm_name, tag))
+                        # Wait for response, change to appending waiting thread to list in master
+                        waiting = True
+                        while waiting:
+                            time.sleep(0.1)
+                            args = self.send_request("check_backward", key)
 
-                    # Wait for response, change to appending waiting thread to list in master
-                    waiting = True
-                    while waiting:
-                        time.sleep(0.1)
-                        args = self.send_request("check_backward", key)
+                            if args is not None:
+                                waiting = False
+                                size, name = args
 
-                        if args is not None:
-                            waiting = False
-                            size, name = args
+                                if self.trusted:
+                                    loss = get_from_shared_memory(size, name)
 
-                            if self.trusted:
-                                loss = get_from_shared_memory(size, name)
+                                else:
+                                    loss_bytes = get_from_shared_memory(
+                                        size, name, encoded=True
+                                    )
+                                    loss = bytes_to_tensor(loss_bytes)
 
-                            else:
-                                loss_bytes = get_from_shared_memory(
-                                    size, name, encoded=True
-                                )
-                                loss = bytes_to_tensor(loss_bytes)
+                            if time.time() - start_time >= MAX_WAIT_TIME:
+                                # Logic here to request another worker take his place
+                                waiting = False
 
-                        if time.time() - start_time >= MAX_WAIT_TIME:
-                            # Logic here to request another worker take his place
-                            waiting = False
+                        self.send_request(
+                            "release_memory",
+                            ("backward_queue", module_id_bytes, tuple(tag)),
+                        )
 
-                    self.send_request(
-                        "release_memory",
-                        ("backward_queue", module_id_bytes, tuple(tag)),
-                    )
-
-            elif len(vals) == 1:
-                assoc_input = vals[0]
-                if isinstance(assoc_input, torch.Tensor):
-                    assoc_input.backward(loss)
-            else:
-                raise "Expect vals to be of length 1 or 2."
+                elif len(vals) == 1:
+                    assoc_input = vals[0]
+                    if isinstance(assoc_input, torch.Tensor):
+                        assoc_input.backward(loss)
+                else:
+                    raise "Expect vals to be of length 1 or 2."
 
     def get_info_from_module_id(self, mod_id: list, micro: int = None):
         for info in self.distributed_graph.values():
             if mod_id == info["mod_id"]:
                 if micro:
-                    return info["id_hash"], info["workers"][micro]
+                    return info["id_hash"], info["assigned_workers"][micro]
                 else:
                     return info["id_hash"]
 
@@ -528,25 +564,35 @@ class DistributedModel(nn.Module):
         )
         return key, self.master_node.nodes[key]["mpc"]
 
-    def distribute_model(self, config=None):
+    def distribute_model(self, config=None, model_type: str = "chat"):
         # Retrieve model names and assign workers to offload. Contact candidate workers
         # and ensure they are ready to receive the model / train
         if config is None:
             config = self.parse_model(self.model, self.max_module_size)
 
         self.distributed_graph = config
-        for mod_info in config.values():
-            mod_id = mod_info["mod_id"]
-            module_hash = mod_info["id_hash"]
-            worker_id = mod_info["workers"][0]
-            if isinstance(self.model, str):
-                self.wrap_hf_model(module_hash, worker_id)
-            else:
-                self.wrap_module(mod_id, worker_id)
 
-        if len(config) == 1:
-            module, module_name = access_module(self.model, [-1])
-            setattr(module, "entire_model", True)
+        if self.model_name:
+            self._load_model_skeleton(model_type)
+
+        grouped_layers = {}
+
+        for module_id, module_info in config.items():
+            if self.model_name:
+                module_type = module_info.get('type', 'offloaded')
+
+                if module_type == 'offloaded_group':
+                    grouped_layers[module_id] = module_info
+                else:
+                    self._wrap_hf_module(module_id, module_info)
+            else:
+                # self.wrap_module(config)
+                raise "Custom models are currently not supported."
+
+        if grouped_layers:
+            self._wrap_grouped_layers(grouped_layers)
+
+        assert isinstance(self.model, nn.Module), "Model Distribution Failed!"
 
         self.model.n_batch = 0
         self.model.forward_queues = {}
@@ -559,8 +605,7 @@ class DistributedModel(nn.Module):
         return 0, 0
 
     def generate(self, *args, **kwargs):
-        if isinstance(self.model, OffloadedModule):
-            return self.model.generate(*args, **kwargs)
+        return self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -669,16 +714,89 @@ class DistributedModel(nn.Module):
         else:
             setattr(self, "model", offloaded_module)
 
-    def wrap_hf_model(self, module_hash, worker_id):
-        file_name = f"{module_hash}_{worker_id}.pt"
-        module_info = str(PreTrainedModel)
-        offloaded_module = OffloadedModule(self, module_info, worker_id, module_hash)
+    def _wrap_hf_module(self, module_id: str, module_info: dict):
+        """Handle single module offloading"""
+        # Get worker and their assigned modules
+        worker_id = module_info["assigned_workers"][0]
+        file_name = f"{module_id}_{worker_id}.pt"
+        module_path = module_info.get("module_path")
+        module_class = module_info.get("module")
+
+        offloaded_module = OffloadedModule(self, module_class, worker_id, module_id)
+
         with open(file_name, "wb") as f:
             f.close()
 
         # Spawn a worker thread for the offloaded module
-        offloaded_module.spawn_worker(file_name)
-        setattr(self, "model", offloaded_module)
+        offloaded_module.spawn_worker(file_name, module_info)
+
+        if module_path == "model":
+            setattr(self, module_path, offloaded_module)
+        else:
+            target_module = module_path.split(".")[
+                -1
+            ]  # Handles cases where path = model.module or model_name.module
+            setattr(self.model, target_module, offloaded_module)
+
+    def _wrap_grouped_layers(self, grouped_layers: dict):
+        """
+        Replace a ModuleList loop with direct calls to offloaded worker(s).
+        This handles the case where layers 0-11 might be on one worker,
+        and we need to replace the parent's loop with a single call.
+        """
+        # Gather ordered calls to OffloadedModules to replace the existing loop in the forward pass
+        offloaded_modules = []
+
+        for module_id, module_info in sorted(
+            grouped_layers.items(), key=lambda x: x[1]["layer_range"][0]
+        ):
+            worker_id = module_info["assigned_workers"][0]
+            layer_range = module_info.get("layer_range", [])
+
+            # Create offloaded module wrapper
+            module_name = module_info["module"]
+            offloaded_module = OffloadedModule(self, module_name, worker_id, module_id)
+            offloaded_module.layer_range = layer_range
+            offloaded_module.is_layer_group = True
+
+            # Get expected input and output args and add to module_info
+            io_signature = get_loop_io_signature(self.model)
+            module_info["expected_inputs"] = list(io_signature["all_inputs"])
+            module_info["expected_outputs"] = list(io_signature["all_outputs"])
+            module_info["loop_body_source"] = io_signature["loop_body_source"]
+            module_info["loop_iterator_name"] = io_signature["loop_iterator_name"]
+
+            file_name = f"{module_id}_{worker_id}.pt"
+            with open(file_name, "wb") as f:
+                f.close()
+
+            offloaded_module.spawn_worker(file_name, module_info)
+            offloaded_modules.append(offloaded_module)
+
+        self._inject_grouped_layer_forward(grouped_layers, offloaded_modules)
+
+    def _inject_grouped_layer_forward(
+        self,
+        grouped_layers: Dict,
+        offloaded_modules: List["OffloadedModule"],
+    ):
+        """
+        Modify the parent module's forward method to call the offloaded
+        layer group instead of looping through individual layers.
+        """
+        parent_path = list(grouped_layers.values())[0].get("parent_module_path", "")
+
+        if parent_path and parent_path != "model":
+            assert isinstance(self.model, nn.Module), "Invalid model type"
+            parent_module = get_nested_module(self.model, parent_path)
+        else:
+            parent_module = self.model
+
+        parent_module.offloaded_modules = offloaded_modules
+
+        new_forward = generate_new_forward_method(parent_module, offloaded_modules)
+
+        parent_module.forward = types.MethodType(new_forward, parent_module)
 
     def send_request(self, request_type, args):
         """
@@ -718,27 +836,11 @@ class DistributedModel(nn.Module):
             optimizer_type = self.optimizer
 
         # Create the distribution on our end if we have the model loaded
-        if isinstance(self.model, nn.Module):
-            distribution = self.model_parser.create_distributed_config(
-                self.model, training=self.training, trusted=False, handle_layers=False
-            )
-
-            # Configure modules for distribution
-            for module_id, module in distribution.items():
-                if module["type"] == "offloaded":
-                    if optimizer_type is None:
-                        optimizer_type = torch.optim.Adam
-                    module["optimizer"] = (
-                        f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                    )
-                    module["training"] = self.training
-
-        else:
-            distribution = {
-                "model_name": self.model,
-                "training": self.training,
-                "optimizer": optimizer_type,
-            }
+        distribution = {
+            "model_name": self.model_name,
+            "training": self.training,
+            "optimizer": optimizer_type,
+        }
 
         # Request job from network
         distributed_config = self.node.send_request(
@@ -757,6 +859,21 @@ class DistributedModel(nn.Module):
         self.create_optimizer = lambda **kwargs: create_distributed_optimizer(
             self, optimizer_type, **kwargs
         )
+
+    def _load_model_skeleton(self, model_type: str = "chat"):
+        """Load the HF model structure with empty weights"""
+        with init_empty_weights():
+            if model_type in ("causal", "chat"):
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_name)
+            elif model_type == "seq2seq":
+                self.model = AutoModelForSeq2SeqLM.from_pretrained(self.model_name)
+            elif model_type == "vision2text":
+                self.model = AutoModelForVision2Seq.from_pretrained(self.model_name)
+            elif model_type == "audio2text":
+                self.model = AutoModelForSpeechSeq2Seq.from_pretrained(self.model_name)
+            else:
+                model_config = AutoConfig.from_pretrained(self.model_name)
+                self.model = AutoModel.from_config(model_config)
 
 
 class OffloadedModule(nn.Module):
@@ -777,15 +894,14 @@ class OffloadedModule(nn.Module):
 
         self.entire_model = False
         self.module_name = module_name.split("(")[0]
-        try:
-            self.module_info = module_name.split("(")[1][:-1]
-        except:
-            self.module_info = self.module_name
 
         self.parent_model = parent_model
         self.worker_id = worker_id
         self.module_id = module_id
         self.n_batch = 0
+
+        self.is_layer_group = False
+        self.layer_range = None
 
     def children(self):
         # Print the offloaded module and the original model name
@@ -793,7 +909,7 @@ class OffloadedModule(nn.Module):
         # Return an empty iterator to hide deeper children
         return iter([])
 
-    def spawn_worker(self, name):
+    def spawn_worker(self, name: str, module_info: dict):
         # # Initialize a threading Timer to monitor the loading process
         # timer = threading.Tier(MAX_WAIT_TIME, self.handle_timeout)
         # timer.start()
@@ -802,7 +918,7 @@ class OffloadedModule(nn.Module):
         # Send the module to the worker roles
 
         self.parent_model.send_request(
-            "send_model", (name, self.worker_id, self.module_id)
+            "send_model", (name, self.worker_id, self.module_id, module_info)
         )
 
         # Wait for the module to be loaded on worker
@@ -857,9 +973,11 @@ class OffloadedModule(nn.Module):
         return output
 
     def forward(self, *args, **kwargs):
+        from tensorlink.ml.utils import handle_output
+
         start_time = time.time()
         n_batch = self.parent_model.model.n_batch
-        n_micro = kwargs.pop("micro")
+        n_micro = getattr(self.parent_model._thread_local, "micro", None)
         n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
         tag = [n_batch, n_micro, self.module_id]
@@ -870,7 +988,8 @@ class OffloadedModule(nn.Module):
                 [handle_output(args), self.module_id]
             )
 
-        detached_args = handle_output(args).clone().detach()
+        args = handle_output(args)
+        detached_args = detach_tensor(args, clone=True)
         args_bytes = tensor_to_bytes(detached_args)
         kwargs_bytes = tensor_to_bytes(kwargs)
         forward_bytes = args_bytes + b"|" + kwargs_bytes

@@ -112,7 +112,7 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             # Initialize optimizer on offloaded devices
             for module_id, module_info in self.modules.items():
                 if module_info["type"] == "offloaded":
-                    for worker_id in module_info["workers"]:
+                    for worker_id in module_info["assigned_workers"]:
                         self.model.send_request(
                             "send_optimizer_request",
                             (worker_id, module_id, "init", _optimizer_kwargs),
@@ -142,7 +142,7 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             threads = []
             for module_id, module_info in self.modules.items():
                 if module_info["type"] == "offloaded":
-                    for worker_id in module_info["workers"]:
+                    for worker_id in module_info["assigned_workers"]:
                         self.model.send_request(
                             "send_optimizer_request",
                             (worker_id, module_id, "step", closure),
@@ -170,7 +170,7 @@ def create_distributed_optimizer(model, base_optimizer_class, **optimizer_kwargs
             threads = []
             for module_id, module_info in self.modules.items():
                 if module_info["type"] == "offloaded":
-                    for worker_id in module_info["workers"]:
+                    for worker_id in module_info["assigned_workers"]:
                         self.model.send_request(
                             "send_optimizer_request",
                             (worker_id, module_id, "zero_grad", None),
