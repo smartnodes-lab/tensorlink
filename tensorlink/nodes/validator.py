@@ -17,7 +17,7 @@ import time
 import os
 
 
-FREE_JOB_MAX_TIME = 1 * 60  # 60 minutes in seconds for a free job
+FREE_JOB_MAX_TIME = 1 * 20  # 60 minutes in seconds for a free job
 
 
 class Validator(Torchnode):
@@ -303,13 +303,10 @@ class Validator(Torchnode):
 
     def _handle_check_job(self, request):
         # Check if a job is still active
-        model_name = request[0]
-        return_val = False
+        model_name, job_id = request
 
-        for job_id in self.jobs:
-            job_data = self.dht.query(job_id)
-            if job_data.get("model_name", "") == model_name:
-                return_val = job_data.get("active", False)
+        job_data = self.dht.query(job_id)
+        return_val = job_data.get("active", False)
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -388,6 +385,7 @@ class Validator(Torchnode):
                 if not api_request.processing and api_request.hf_name == model_name:
                     api_request.processing = True
                     return_val = api_request
+
         elif len(request) == 1:
             # Responding to request after ml-processing
             response = request[0]
@@ -518,8 +516,10 @@ class Validator(Torchnode):
         else:
             _time = job_data.get("time")
             public = False
+
         job_data["time"] = _time
         job_data["public"] = public
+        job_data["timestamp"] = time.time()
 
         if modules.get("success"):
             modules = modules.get("config")

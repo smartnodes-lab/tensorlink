@@ -334,6 +334,7 @@ class User(Torchnode):
                 "capacity": 0,
                 "n_pipelines": 1,
                 "dp_factor": 1,
+                "timestamp": time.time(),
                 "distribution": {},
                 "n_workers": 0,
                 "model_name": distribution.get("model_name"),

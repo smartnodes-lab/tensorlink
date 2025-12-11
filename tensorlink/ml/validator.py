@@ -137,7 +137,7 @@ class DistributedValidator(DistributedWorker):
         self.models = {}  # job_id -> model instance
         self.model_state = (
             {}
-        )  # "initializing" | "distributing" | "ready", key is job_id or model name (public jobs)
+        )  # job_id -> state ("initializing" | "distributing" | "ready")
         self.public_models = defaultdict(list)  # Model name -> list(job_id)
 
         self.tokenizers = {}
@@ -425,8 +425,11 @@ class DistributedValidator(DistributedWorker):
 
                     # Check if jobs are still active
                     for job_id, model in self.models.items():
+                        model_name = model.model_name
                         if self._is_model_ready(job_id):
-                            is_active = self.send_request("check_job", (model_name,))
+                            is_active = self.send_request(
+                                "check_job", (model_name, job_id)
+                            )
                             if not is_active:
                                 self._remove_hosted_job(job_id)
 
@@ -619,14 +622,9 @@ class DistributedValidator(DistributedWorker):
 
             if job_data.get("public"):
                 self.public_models[model_name].append(job_id)
-                self.model_state[model_name] = (
-                    "initializing"  # TODO set to initializing only if model doesnt already exist
-                )
-            else:
-                self.model_state[job_id] = "initializing"
 
+            self.model_state[job_id] = "initializing"
             self.models_initializing.add(job_id)
-
             self.send_request(
                 "debug_print",
                 (f"Initialized hosted job for {model_name}", "green", logging.INFO),
@@ -639,11 +637,9 @@ class DistributedValidator(DistributedWorker):
             job_id = job_data.get("id")
             self.models_initializing.discard(job_id)
             del self.models[job_id]
-            if model_name in self.model_state and job_data.get("public"):
-                if len(self.public_models[model_name]) == 1:
-                    del self.model_state[model_name]
-            else:
+            if job_id in self.model_state:
                 del self.model_state[job_id]
+
             return False
 
     def _finalize_hosted_job(self, job_id: str):
@@ -669,13 +665,11 @@ class DistributedValidator(DistributedWorker):
             distributed_model = self.models[job_id]
 
             # Update state
-            if job_id in self.public_models[model_name]:
-                self.model_state[model_name] = "distributing"
-            else:
-                self.model_state[job_id] = "distributing"
+            self.model_state[job_id] = "distributing"
 
             # Register the distributed model's modules
             for module_id, module_info in distribution.items():
+                module_info["job_id"] = job_id
                 self.modules[module_id] = module_info
 
             # Distribute the model across workers
@@ -687,11 +681,7 @@ class DistributedValidator(DistributedWorker):
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
 
             # Mark as ready
-            if job_id in self.public_models[model_name]:
-                self.model_state[model_name] = "ready"
-            else:
-                self.model_state[job_id] = "ready"
-
+            self.model_state[job_id] = "ready"
             self.models_initializing.discard(job_id)
 
             self.send_request(
@@ -735,8 +725,6 @@ class DistributedValidator(DistributedWorker):
             # Clean up state tracking
             if job_id in self.model_state:
                 del self.model_state[job_id]
-            elif model_name in self.model_state:
-                del self.model_state[model_name]
 
             # Clean up model reference
             del self.models[job_id]
@@ -746,7 +734,7 @@ class DistributedValidator(DistributedWorker):
             for module_id, module_data in self.modules.items():
                 # Check if this module belongs to the model we're removing
                 if module_data.get("name") == model_name:
-                    if module_data.model_name == model_name:
+                    if module_data.get("job_id") == job_id:
                         modules_to_remove.append(module_id)
 
             for module_id in modules_to_remove:
@@ -760,7 +748,7 @@ class DistributedValidator(DistributedWorker):
                     ),
                 )
 
-            # Only remove if it has no distribution data and no recent requests
+            # Only remove model cache if it has no distribution data and no recent requests
             if (
                 model_name in self.model_cache
                 and self.model_cache[model_name].get("distribution") is not None
