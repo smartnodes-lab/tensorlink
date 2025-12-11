@@ -467,7 +467,7 @@ class DistributedValidator(DistributedWorker):
             for job_id, distributed_model in self.models.items():
                 if self._is_model_ready(job_id):
                     model_name = distributed_model.model_name
-
+                    # TODO Distinguish private generate requests from public ones so we dont use the same model?
                     generate_request = self.send_request(
                         "update_api_request", (model_name, job_id)
                     )
@@ -515,10 +515,7 @@ class DistributedValidator(DistributedWorker):
                 "Model is currently not available through the Tensorlink API."
             )
         else:
-            distributed_models = self.models[job_id]
-
-            # TODO Get models that arent currently processing instead of just first
-            distributed_model = distributed_models[0]
+            distributed_model = self.models[job_id]
 
             tokenizer = self.tokenizers[request.hf_name]
 
