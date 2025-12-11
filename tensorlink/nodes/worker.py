@@ -169,6 +169,7 @@ class Worker(Torchnode):
                 model_name = module_info["name"]
                 training = module_info["training"]
                 optimizer_name = module_info["optimizer_type"]
+                module_info["status"] = "loading"
 
                 if self.available_gpu_memory >= module_size:
                     # Store a request to wait for the user connection
@@ -178,6 +179,8 @@ class Worker(Torchnode):
                         self._store_request(user_id, "OPTIMIZER" + optimizer_name)
 
                     data = b"ACCEPT-JOB" + job_id.encode() + module_id.encode()
+
+                    self.modules[module_id] = module_info
 
                     # Update available memory
                     self.available_gpu_memory -= module_size
