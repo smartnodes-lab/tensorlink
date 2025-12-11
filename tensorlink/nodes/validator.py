@@ -17,7 +17,7 @@ import time
 import os
 
 
-FREE_JOB_MAX_TIME = 60 * 60  # 60 minutes in seconds for a free job
+FREE_JOB_MAX_TIME = 1 * 60  # 60 minutes in seconds for a free job
 
 
 class Validator(Torchnode):
@@ -514,9 +514,12 @@ class Validator(Torchnode):
         # If a user has not paid for the job, allocate the default time
         if job_data.get("payment", 0) == 0:
             _time = FREE_JOB_MAX_TIME
+            public = True
         else:
             _time = job_data.get("time")
+            public = False
         job_data["time"] = _time
+        job_data["public"] = public
 
         if modules.get("success"):
             modules = modules.get("config")
@@ -592,7 +595,7 @@ class Validator(Torchnode):
                 "training": False,
                 "assigned_workers": [worker_id],
                 "distribution": module_info,
-                "public": True,
+                "public": job_data.get("public", True),
             }
             self.state_updates[module_id] = []
 

@@ -843,6 +843,12 @@ class DistributedWorker:
                 if self.modules[args].training:
                     del self.optimizers[args]
                 del self.modules[args]
+
+                gc.collect()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+
                 self.send_request("debug_print", (f"Module {args} removed.",))
 
         # Check for termination request
