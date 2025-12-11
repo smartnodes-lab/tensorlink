@@ -719,6 +719,10 @@ class DistributedValidator(DistributedWorker):
                     (f"Removed tokenizer for {model_name}", "yellow", logging.INFO),
                 )
 
+            if model_name in self.public_models:
+                if job_id in self.public_models[model_name]:
+                    self.public_models[model_name].remove(job_id)
+
             # Clean up state tracking
             if job_id in self.model_state:
                 del self.model_state[job_id]
