@@ -143,7 +143,7 @@ class DistributedWorker:
             # Set memory allocation strategy
             torch.cuda.empty_cache()
             total_memory = torch.cuda.get_device_properties(0).total_memory
-            torch.cuda.set_per_process_memory_fraction(0.85)
+            torch.cuda.set_per_process_memory_fraction(0.95)
 
             # Log CUDA configuration
             logging.info(f"CUDA device: {torch.cuda.get_device_name(0)}")

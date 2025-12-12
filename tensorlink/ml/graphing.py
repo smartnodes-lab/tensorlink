@@ -158,7 +158,6 @@ class ModelParser:
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
         """
-
         if isinstance(model, str):
             self.model_name = model
             model_config = AutoConfig.from_pretrained(model)
@@ -172,21 +171,29 @@ class ModelParser:
 
         config = {}
         success = True
+        model_memory, breakdown = estimate_memory(
+            model,
+            training=training,
+            seq_length=max_seq_len,
+            optimizer_type=optimizer_type,
+            batch_size=batch_size,
+            recursive=True,
+        )
 
-        # Log the model structure first
-        if self.verbose:
-            print("\n" + "=" * 80)
-            print("MODEL STRUCTURE:")
-            print("=" * 80)
-            self._log_model_structure(
-                model,
-                prefix="model",
-                training=training,
-                optimizer_type=optimizer_type,
-                max_seq_len=max_seq_len,
-                batch_size=batch_size,
-            )
-            print("=" * 80 + "\n")
+        # # Log the model structure first
+        # if self.verbose:
+        #     print("\n" + "=" * 80)
+        #     print("MODEL STRUCTURE:")
+        #     print("=" * 80)
+        #     self._log_model_structure(
+        #         model,
+        #         prefix="model",
+        #         training=training,
+        #         optimizer_type=optimizer_type,
+        #         max_seq_len=max_seq_len,
+        #         batch_size=batch_size,
+        #     )
+        #     print("=" * 80 + "\n")
 
         try:
             config, _ = self._recurse_module(
@@ -218,7 +225,7 @@ class ModelParser:
         except AssignmentError:
             success = False
 
-        return {"success": success, "config": config}
+        return {"success": success, "config": config, "model_memory": model_memory}
 
     def _log_model_structure(
         self,
@@ -243,10 +250,11 @@ class ModelParser:
 
         memory, breakdown = estimate_memory(
             module,
-            training,
-            batch_size=batch_size,
+            training=training,
             seq_length=max_seq_len,
             optimizer_type=optimizer_type,
+            batch_size=batch_size,
+            recursive=True,
         )
 
         print(f"{indent}{prefix} [{module_type}] (~{memory/1e6:.1f}MB)")
@@ -286,6 +294,7 @@ class ModelParser:
         max_seq_len: int = 2048,
         batch_size: int = 1,
         model_type: str = "chat",
+        count_activations: bool = True,
     ):
         config = {}
         if ids is None:
@@ -297,13 +306,18 @@ class ModelParser:
         if self.verbose:
             print(f"{indent}Processing: {module_path}")
 
+        # sum children memory
         memory, breakdown = estimate_memory(
             module,
-            training,
+            training=training,
             seq_length=max_seq_len,
             optimizer_type=optimizer_type,
             batch_size=batch_size,
+            recursive=True,
         )
+
+        if not count_activations:
+            memory -= breakdown.get("activations", 0)
 
         if self.verbose:
             print(f"{indent}   Memory required: {memory / 1e6:.2f}MB")
@@ -434,6 +448,7 @@ class ModelParser:
                     max_offload_depth=max_offload_depth,
                     max_seq_len=max_seq_len,
                     batch_size=batch_size,
+                    count_activations=False,
                 )
 
                 config.update(child_config)

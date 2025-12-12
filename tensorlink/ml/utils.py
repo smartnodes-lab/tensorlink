@@ -83,55 +83,42 @@ def estimate_memory(
     # --- Activation estimate ---
     # Try to infer hidden size / intermediate shape
     hidden_size = None
-    num_layers = 0
-
     # if transformer-like, pick up clues
     for name, sub in module.named_modules():
         if isinstance(sub, nn.MultiheadAttention):
             hidden_size = sub.embed_dim
-            num_layers += 1
-
+            break
         elif isinstance(sub, nn.TransformerEncoderLayer):
             hidden_size = sub.linear1.in_features
-            num_layers += 1
-
+            break
         elif hasattr(sub, "hidden_size"):
             hidden_size = getattr(sub, "hidden_size")
+            break
 
-    # fallback heuristic
     if hidden_size is None:
-        total_params = sum(p.numel() for p in module.parameters())
-        # transformer rule-of-thumb: params ≈ 12 * L * d^2
-        hidden_size = int((total_params / 12) ** 0.5)
-        hidden_size = max(128, min(hidden_size, 8192))
+        # Use parameters at THIS level to estimate hidden size
+        if recursive:
+            total_params = sum(p.numel() for p in module.parameters())
+        else:
+            total_params = sum(p.numel() for p in module.parameters(recurse=False))
+        hidden_size = max(128, min(int((total_params / 12) ** 0.5), 8192))
 
-    if num_layers == 0:
-        num_layers = 1
-
-    # Activation memory (forward + backward)
-    per_layer_act = batch_size * seq_length * hidden_size * dtype_size * 3
-    activation_bytes = per_layer_act * num_layers
-
+    # Only per-layer activations, don't multiply by num_layers
+    per_layer_act = batch_size * seq_length * hidden_size * dtype_size
     if training:
-        # backward keeps a copy of activations
-        activation_bytes *= 2
+        per_layer_act *= 4
 
-    breakdown["activations"] = activation_bytes
+    breakdown["activations"] = per_layer_act
 
-    # --- KV cache (for transformers during inference) ---
+    # KV cache (inference only)
     if include_kv_cache and not training:
-        # assume typical num_heads
         num_heads = max(1, hidden_size // 64)
         head_dim = hidden_size // num_heads
-
-        # KV cache per layer: batch * seq * num_heads * head_dim * 2 (K+V) * dtype_size
-        kv_cache = (
-            batch_size * seq_length * num_heads * head_dim * 2 * num_layers * dtype_size
+        breakdown["kv_cache"] = (
+            batch_size * seq_length * num_heads * head_dim * 2 * dtype_size
         )
-        breakdown["kv_cache"] = kv_cache
 
-    total = sum(breakdown.values()) * 1.15  # Add 15% room for overhead
-
+    total = sum(breakdown.values()) * 1.15  # 15% overhead
     return total, breakdown
 
 
