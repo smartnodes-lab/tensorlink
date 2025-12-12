@@ -383,15 +383,14 @@ class ModelParser:
                 "reason": f"Exceeded max recursion depth ({max_offload_depth})",
             }
             if self.verbose:
-                print(f"{indent}   Max recursion depth reached - FAILED")
+                raise AssignmentError(
+                    f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
+                )
 
         # too large, recurse into children
         if self.verbose:
             print(
                 f"{indent}   Module {module_path} ({memory / 1e6:.2f}MB) too large, recursing into children..."
-            )
-            raise AssignmentError(
-                f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
             )
 
         children = list(module.named_children())
@@ -403,7 +402,10 @@ class ModelParser:
             }
             if self.verbose:
                 print(f"{indent}   No children to recurse into - FAILED")
-            raise AssignmentError(f"Unable to assign {module_path}")
+
+            raise AssignmentError(
+                f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
+            )
 
         parent_forward_code = self._extract_forward_code(module)
         child_workers = set()

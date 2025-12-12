@@ -303,7 +303,8 @@ class User(Torchnode):
 
             # Update required network capacity TODO must account for batch size
             capacity = (
-                sum(distribution[k]["size"] for k in distribution.keys()) * n_pipelines
+                sum(distribution[k]["memory"] for k in distribution.keys())
+                * n_pipelines
             )
 
             for mod_id, mod_info in distribution.items():

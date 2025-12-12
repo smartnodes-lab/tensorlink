@@ -1,8 +1,8 @@
 {
     "api": {
-        "core": "0x36e13F23F90E226074A66324209A23F754a86c0B",
-        "multi-sig": "0xcB9b80dF839c9850970832Da4bcD3faE895D3Ff4",
-        "token": "0x9b38874d53c99861CbB87B25c54C1Fc2e5827fED",
+        "core": "0xa75445942d5EB9BA073afF2694e2CA41bFB1297C",
+        "multi-sig": "0xe7FE9E44165dE24D5acFd78ff06A81512494000a",
+        "token": "0x292b81C6e88f7718920a291fB1D458D2Fcca43B9",
         "donate": "0x560fd8449eBAdAfE8168a560F656148F655459Ca",
         "chain-url": "https://sepolia.base.org",
         "chain-url-local": "http://127.0.0.1:8545",
