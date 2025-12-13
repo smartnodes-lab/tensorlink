@@ -358,7 +358,7 @@ class DistributedValidator(DistributedWorker):
             if job_data.get("training", False):
                 batch_size = 256
             else:
-                batch_size = 4
+                batch_size = 1
 
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
@@ -374,7 +374,7 @@ class DistributedValidator(DistributedWorker):
             host_threshold_mb=20,
             max_offload_depth=3,
             batch_size=batch_size,
-            max_seq_len=job_data.get("max_seq_len", 2048),
+            max_seq_len=job_data.get("max_seq_len", 4096),
             model_type=job_data.get("model_type", "chat"),
         )
         job_data["distribution"] = distribution
@@ -622,11 +622,6 @@ class DistributedValidator(DistributedWorker):
 
             self.model_state[job_id] = "initializing"
             self.models_initializing.add(job_id)
-            self.send_request(
-                "debug_print",
-                (f"Initialized hosted job for {model_name}", "green", logging.INFO),
-            )
-
             return True
 
         except Exception as e:

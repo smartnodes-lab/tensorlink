@@ -151,7 +151,7 @@ class ModelParser:
         host_threshold_mb: int = 50,
         host_max_depth: int = 2,
         max_offload_depth: int = 3,
-        max_seq_len: int = 2048,
+        max_seq_len: int = 4096,
         batch_size: int = 1,
         model_type: str = "chat",
     ):

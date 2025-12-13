@@ -118,7 +118,7 @@ def estimate_memory(
             batch_size * seq_length * num_heads * head_dim * 2 * dtype_size
         )
 
-    total = sum(breakdown.values()) * 1.15  # 15% overhead
+    total = sum(breakdown.values()) * 1.20  # 20% overhead
     return total, breakdown
 
 
