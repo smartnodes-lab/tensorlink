@@ -178,6 +178,8 @@ class ModelParser:
             optimizer_type=optimizer_type,
             batch_size=batch_size,
             recursive=True,
+            count_activations=True,
+            include_kv_cache=True,
         )
 
         # # Log the model structure first
@@ -222,7 +224,7 @@ class ModelParser:
             if self.verbose:
                 self._log_assignment_summary(config, workers_state)
 
-        except AssignmentError:
+        except AssignmentError as e:
             success = False
 
         return {"success": success, "config": config, "model_memory": model_memory}
@@ -255,6 +257,8 @@ class ModelParser:
             optimizer_type=optimizer_type,
             batch_size=batch_size,
             recursive=True,
+            count_activations=True,
+            include_kv_cache=(depth == 0),
         )
 
         print(f"{indent}{prefix} [{module_type}] (~{memory/1e6:.1f}MB)")
@@ -314,6 +318,8 @@ class ModelParser:
             optimizer_type=optimizer_type,
             batch_size=batch_size,
             recursive=True,
+            count_activations=True,
+            include_kv_cache=(depth == 0),
         )
 
         if not count_activations:

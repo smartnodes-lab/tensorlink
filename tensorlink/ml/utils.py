@@ -33,14 +33,10 @@ def estimate_memory(
     optimizer_type: str = "adam",
     include_kv_cache: bool = True,
     recursive: bool = True,
+    count_activations: bool = True,
 ) -> tuple[float, dict]:
-    """
-    Estimate total memory usage (in bytes) for a PyTorch nn.Module, including
-    parameters, gradients, activations, optimizer state, and KV cache if applicable.
+    """Estimate memory with better control over what's counted."""
 
-    Returns (total_bytes, breakdown_dict).
-    """
-    # --- Basic dtype sizing ---
     dtype_size = torch.tensor([], dtype=dtype).element_size()
 
     breakdown = {
@@ -51,8 +47,7 @@ def estimate_memory(
         "kv_cache": 0,
     }
 
-    # --- Parameter + gradient size ---
-    # Count only direct parameters if not recursive
+    # Parameters, only count at this level if not recursive
     if recursive:
         param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
     else:
@@ -68,57 +63,64 @@ def estimate_memory(
     if training:
         breakdown["gradients"] = param_bytes
 
-        # Optimizer state sizes
         if optimizer_type.lower() in {"adam", "adamw"}:
-            # Adam always stores fp32 moments even with fp16 model
-            opt_dtype_size = 4
-            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * opt_dtype_size
-        elif optimizer_type.lower() in {"sgd", "momentum"}:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
+            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * 4
         else:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size * 1.5
-
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
         breakdown["optimizer"] = opt_bytes
 
-    # --- Activation estimate ---
-    # Try to infer hidden size / intermediate shape
-    hidden_size = None
-    # if transformer-like, pick up clues
-    for name, sub in module.named_modules():
-        if isinstance(sub, nn.MultiheadAttention):
-            hidden_size = sub.embed_dim
-            break
-        elif isinstance(sub, nn.TransformerEncoderLayer):
-            hidden_size = sub.linear1.in_features
-            break
-        elif hasattr(sub, "hidden_size"):
-            hidden_size = getattr(sub, "hidden_size")
-            break
-
-    if hidden_size is None:
-        # Use parameters at THIS level to estimate hidden size
-        if recursive:
-            total_params = sum(p.numel() for p in module.parameters())
+    # Only count activations if requested
+    if count_activations:
+        # Try to infer hidden size from the module
+        if hasattr(module, "config"):
+            hidden_size = module.config.hidden_size
+        elif hasattr(module, "hidden_size"):
+            hidden_size = module.hidden_size
+        elif hasattr(module, "embed_dim"):
+            hidden_size = module.embed_dim
+        elif hasattr(module, "d_model"):
+            hidden_size = module.d_model
         else:
-            total_params = sum(p.numel() for p in module.parameters(recurse=False))
-        hidden_size = max(128, min(int((total_params / 12) ** 0.5), 8192))
+            # Estimate from parameter count
+            if recursive:
+                total_params = sum(p.numel() for p in module.parameters())
+            else:
+                total_params = sum(p.numel() for p in module.parameters(recurse=False))
 
-    # Only per-layer activations, don't multiply by num_layers
-    per_layer_act = batch_size * seq_length * hidden_size * dtype_size
-    if training:
-        per_layer_act *= 4
+            if total_params > 0:
+                # Rough heuristic: for transformer layers, params ≈ 12 * hidden_size^2
+                hidden_size = max(128, min(int((total_params / 12) ** 0.5), 8192))
+            else:
+                # Absolute last resort for modules with no parameters
+                hidden_size = 512
 
-    breakdown["activations"] = per_layer_act
+        # More conservative activation multiplier
+        activation_multiplier = 5 if not training else 12
 
-    # KV cache (inference only)
-    if include_kv_cache and not training:
-        num_heads = max(1, hidden_size // 64)
-        head_dim = hidden_size // num_heads
-        breakdown["kv_cache"] = (
-            batch_size * seq_length * num_heads * head_dim * 2 * dtype_size
+        breakdown["activations"] = (
+            batch_size * seq_length * hidden_size * dtype_size * activation_multiplier
         )
 
-    total = sum(breakdown.values()) * 1.20  # 20% overhead
+        if include_kv_cache and hasattr(module, 'config') and not training:
+            num_layers = module.config.num_hidden_layers
+            num_heads = getattr(
+                module.config,
+                "num_key_value_heads",
+                module.config.num_attention_heads,
+            )
+            head_dim = hidden_size // module.config.num_attention_heads
+
+            breakdown["kv_cache"] = (
+                batch_size
+                * seq_length
+                * num_layers
+                * num_heads
+                * head_dim
+                * 2
+                * dtype_size
+            )
+
+    total = sum(breakdown.values()) * 1.30  # add 30% overhead
     return total, breakdown
 
 
@@ -135,7 +137,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 1e9
+        memory += 3e8
 
     return memory
 
