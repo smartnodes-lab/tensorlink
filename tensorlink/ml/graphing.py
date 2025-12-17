@@ -544,7 +544,7 @@ class ModelParser:
         # Group by worker
         worker_assignments = defaultdict(list)
         for module_path, module_config in config.items():
-            if module_config.get("type") == "offloaded":
+            if "offloaded" in module_config.get("type", ""):
                 worker_id = module_config["assigned_workers"][0]
                 worker_assignments[worker_id].append(
                     {

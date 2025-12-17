@@ -835,6 +835,60 @@ def bytes_to_tensor(tensor_data):
                         # Fall back to a dictionary if reconstruction fails
                         return {k: _deserialize(v) for k, v in data.items()}
 
+                elif obj.get("is_object"):
+                    try:
+                        import importlib
+
+                        # Dynamically import the module and get the class
+                        module = importlib.import_module(module_name)
+                        cls = getattr(module, cls_name)
+
+                        # Try to create an instance
+                        try:
+                            # First try with no arguments
+                            instance = cls()
+                        except TypeError:
+                            # If that fails, try with deserialized data as kwargs
+                            try:
+                                import inspect
+
+                                sig = inspect.signature(cls.__init__)
+                                param_names = list(sig.parameters.keys())[
+                                    1:
+                                ]  # Skip 'self'
+
+                                # Prepare constructor arguments from data
+                                deserialized_data = _deserialize(data)
+                                kwargs = {}
+                                for param in param_names:
+                                    if param in deserialized_data:
+                                        kwargs[param] = deserialized_data[param]
+
+                                instance = cls(**kwargs)
+
+                            except Exception:
+                                # Last resort: return deserialized data as dict
+                                return _deserialize(data)
+
+                        # Set all attributes from the data
+                        deserialized_data = _deserialize(data)
+                        if isinstance(deserialized_data, dict):
+                            for attr_name, attr_value in deserialized_data.items():
+                                try:
+                                    setattr(instance, attr_name, attr_value)
+                                except (AttributeError, TypeError):
+                                    # Skip attributes that can't be set
+                                    pass
+
+                        return instance
+
+                    except (ImportError, AttributeError) as e:
+                        # If we can't import the class, return deserialized data as dict
+                        return _deserialize(data)
+                    except Exception as e:
+                        # For any other error, return deserialized data
+                        return _deserialize(data)
+
                 # For other serialized objects, return dictionary representation
                 return {
                     k: _deserialize(v) for k, v in data.items() if k != "__serialized__"
@@ -1024,7 +1078,8 @@ def get_nested_module(
     current = model
 
     if parts[0] == "model":
-        parts = parts[1:]
+        if not hasattr(model, "model"):
+            parts = parts[1:]
 
     # Skip 'model' prefix if present (first attribute is always the model itself)
     for part in parts:

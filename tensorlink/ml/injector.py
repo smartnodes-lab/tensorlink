@@ -164,6 +164,7 @@ class LayerGroupModule(torch.nn.Module):
         output_vars: List[str],
         loop_body_source: str,
         loop_iterator_name: str,
+        debug: bool = True,
     ):
         super().__init__()
         self.layers = torch.nn.ModuleList(layers)
@@ -171,20 +172,35 @@ class LayerGroupModule(torch.nn.Module):
         self.output_vars = output_vars
         self.loop_iterator_name = loop_iterator_name
         self.num_layers = len(layers)
+        self.debug = debug
 
         # Generate the forward function from the loop body
         self.forward_func = self._generate_forward_from_loop(loop_body_source)
 
-    def _generate_forward_from_loop(self, loop_body_source: str) -> types.FunctionType:
+    def _generate_forward_from_loop(
+        self, loop_body_source: str, debug: bool = False
+    ) -> types.FunctionType:
         """
         Generate a forward function that executes the original loop body
         for each layer in self.layers.
+
+        Args:
+            loop_body_source: The source code of the original loop body
+            debug: If True, add print statements for debugging
         """
         # Build function signature
         func_lines = [
             "def forward(self, **kwargs):",
             "    # Extract input variables",
         ]
+
+        if debug:
+            func_lines.append(
+                "    print(f'[LayerGroupModule] Forward called with {len(kwargs)} kwargs')"
+            )
+            func_lines.append(
+                "    print(f'[LayerGroupModule] Input kwargs keys: {list(kwargs.keys())}')"
+            )
 
         # Extract each input variable from kwargs
         for var in self.input_vars:
@@ -193,26 +209,75 @@ class LayerGroupModule(torch.nn.Module):
             else:
                 func_lines.append(f"    {var} = kwargs.get('{var}')")
 
+            if debug:
+                func_lines.append(
+                    f"    print(f'[LayerGroupModule] Extracted {var}: {{type({var})}}{{f\" shape={{list({var}.shape)}}\" if hasattr({var}, \"shape\") else \"\"}}')"
+                )
+
         func_lines.append("")
         func_lines.append("    # Process through layers")
-        func_lines.append(f"    for {self.loop_iterator_name} in self.layers:")
+        if debug:
+            func_lines.append(
+                f"    print(f'[LayerGroupModule] Processing {{len(self.layers)}} layers')"
+            )
+
+        func_lines.append(
+            f"    for layer_idx, {self.loop_iterator_name} in enumerate(self.layers):"
+        )
+
+        if debug:
+            func_lines.append(
+                f"        print(f'[LayerGroupModule] Layer {{layer_idx}}/{{len(self.layers)}}')"
+            )
+            func_lines.append(
+                f"        print(f'[LayerGroupModule]   hidden_states before: {{hidden_states.shape if hasattr(hidden_states, \"shape\") else type(hidden_states)}} min={{hidden_states.min().item() if hasattr(hidden_states, \"min\") else \"N/A\"}} max={{hidden_states.max().item() if hasattr(hidden_states, \"max\") else \"N/A\"}} mean={{hidden_states.mean().item() if hasattr(hidden_states, \"mean\") else \"N/A\"}}')"
+            )
 
         # Add the original loop body (indented appropriately)
         loop_lines = loop_body_source.strip().split('\n')
         for line in loop_lines:
             func_lines.append(f"        {line}")
 
+        if debug:
+            func_lines.append(
+                f"        print(f'[LayerGroupModule]   hidden_states after: {{hidden_states.shape if hasattr(hidden_states, \"shape\") else type(hidden_states)}} min={{hidden_states.min().item() if hasattr(hidden_states, \"min\") else \"N/A\"}} max={{hidden_states.max().item() if hasattr(hidden_states, \"max\") else \"N/A\"}} mean={{hidden_states.mean().item() if hasattr(hidden_states, \"mean\") else \"N/A\"}}')"
+            )
+            func_lines.append(
+                f"        if hasattr(hidden_states, 'isnan') and hidden_states.isnan().any():"
+            )
+            func_lines.append(
+                f"            print(f'[LayerGroupModule]   WARNING: NaN detected in hidden_states after layer {{layer_idx}}')"
+            )
+
         func_lines.append("")
         func_lines.append("    # Return outputs as a dictionary")
-
         if len(self.output_vars) == 0:
+            if debug:
+                func_lines.append(
+                    "    print('[LayerGroupModule] Returning empty dict')"
+                )
             func_lines.append(f"    return {{}}")
         else:
             # Build a dictionary with all output variables
             output_items = [f"'{var}': {var}" for var in sorted(self.output_vars)]
+            if debug:
+                func_lines.append(
+                    f"    print(f'[LayerGroupModule] Returning {len(self.output_vars)} outputs')"
+                )
+                for var in sorted(self.output_vars):
+                    func_lines.append(
+                        f"    print(f'[LayerGroupModule] Output {var}: {{type({var})}}{{f\" shape={{list({var}.shape)}}\" if hasattr({var}, \"shape\") else \"\"}}')"
+                    )
             func_lines.append(f"    return {{{', '.join(output_items)}}}")
 
         forward_source = '\n'.join(func_lines)
+
+        if debug:
+            print("=" * 80)
+            print("GENERATED FORWARD SOURCE (LayerGroupModule)")
+            print("=" * 80)
+            print(forward_source)
+            print("=" * 80)
 
         # Compile and return
         namespace = {'self': self, 'torch': torch}
@@ -596,8 +661,13 @@ def get_loop_io_signature(parent_module) -> Dict:
     - 'loop_body_source': The exact source code of the loop body
     - 'loop_iterator_name': Name of the loop iterator variable
     """
+    # Find the module that contains the loop
+    module_with_loop, loop_node, module_path = find_loop_in_module_hierarchy(
+        parent_module
+    )
+
     # Get original forward source
-    original_forward = parent_module.forward
+    original_forward = module_with_loop.forward
     source = inspect.getsource(original_forward)
     source = textwrap.dedent(source)
 
@@ -660,6 +730,8 @@ def get_loop_io_signature(parent_module) -> Dict:
         'layer_call_info': layer_call_info,
         'loop_body_source': loop_body_source,
         'loop_iterator_name': loop_iterator_name,
+        'module_with_loop': module_with_loop,
+        'module_path': module_path,
     }
 
     return result
@@ -747,3 +819,100 @@ def _extract_loop_iterator_name(loop_node: ast.For) -> str:
         return loop_node.target.id
     else:
         return ast.unparse(loop_node.target)
+
+
+def find_loop_in_module_hierarchy(parent_module, max_depth=2):
+    """
+    Find the layer loop, checking submodules if necessary.
+
+    Args:
+        parent_module: The top-level module to start from
+        max_depth: Maximum depth to search in module hierarchy
+
+    Returns:
+        tuple: (module_with_loop, loop_node, module_path)
+            - module_with_loop: The module containing the loop
+            - loop_node: The AST node of the loop
+            - module_path: List of attribute names to reach the module (e.g., ['model'])
+    """
+
+    def try_find_loop(module, path=[]):
+        """Recursively try to find the loop in module or its submodules"""
+        # Get the forward method source
+        try:
+            forward_method = module.forward
+            source = inspect.getsource(forward_method)
+            source = textwrap.dedent(source)
+        except (TypeError, OSError):
+            return None
+
+        # Parse and look for loop
+        tree = ast.parse(source)
+        loop_finder = LoopFinder()
+        loop_finder.visit(tree)
+
+        if loop_finder.loop_node:
+            return (module, loop_finder.loop_node, path)
+
+        # If no loop found and we haven't reached max depth, check for delegation
+        if len(path) < max_depth:
+            delegated_attr = find_delegated_module_call(tree)
+            if delegated_attr and hasattr(module, delegated_attr):
+                submodule = getattr(module, delegated_attr)
+                if hasattr(submodule, 'forward'):
+                    return try_find_loop(submodule, path + [delegated_attr])
+
+        return None
+
+    result = try_find_loop(parent_module)
+    if result is None:
+        raise ValueError("No suitable loop found in forward pass or submodules")
+
+    return result
+
+
+def find_delegated_module_call(tree):
+    """
+    Find if the forward method delegates to a submodule.
+
+    Looks for patterns like:
+        outputs = self.model(...)
+        return self.encoder(...)
+
+    Returns:
+        str: The attribute name of the delegated module (e.g., 'model', 'encoder')
+             or None if no delegation found
+    """
+
+    class DelegationFinder(ast.NodeVisitor):
+        def __init__(self):
+            self.delegated_attrs = []
+
+        def visit_Call(self, node):
+            # Look for calls like: self.module(...)
+            if isinstance(node.func, ast.Attribute):
+                if isinstance(node.func.value, ast.Name):
+                    if node.func.value.id == 'self':
+                        # This is a call to self.something(...)
+                        # Check if it looks like a module call (not a method)
+                        # Common module attributes: model, encoder, decoder, transformer
+                        attr = node.func.attr
+                        if attr in [
+                            'model',
+                            'encoder',
+                            'decoder',
+                            'transformer',
+                            'bert',
+                            'gpt',
+                            'llama',
+                            'mistral',
+                        ]:
+                            self.delegated_attrs.append(attr)
+
+            self.generic_visit(node)
+
+    finder = DelegationFinder()
+    finder.visit(tree)
+
+    # Return the first delegation found (usually there's only one main one)
+    return finder.delegated_attrs[0] if finder.delegated_attrs else None

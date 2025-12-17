@@ -346,7 +346,7 @@ class DistributedValidator(DistributedWorker):
 
     def inspect_model(self, model_name: str, job_data: dict, hosted=False) -> dict:
         """Inspect a model to determine network requirements and store distribution in JSON cache"""
-        parser = ModelParser()
+        parser = ModelParser(verbose=True)
         model_name: str = job_data.get("model_name", model_name)
 
         # Get network worker information to assign modules
@@ -377,11 +377,13 @@ class DistributedValidator(DistributedWorker):
             max_seq_len=job_data.get("max_seq_len", 4096),
             model_type=job_data.get("model_type", "chat"),
         )
+
         job_data["distribution"] = distribution
 
         if (
             len(distribution["config"]) == 0
-            or len(distribution["config"]) > 4
+            or len(distribution["config"])
+            > 5  # TODO This limit on number of distributions is not ideal
             or not distribution["success"]
         ):
             return {}
@@ -452,7 +454,10 @@ class DistributedValidator(DistributedWorker):
 
                     # Check if this is a public job and there are already models of this type
                     self._initialize_hosted_job(
-                        model_name, payment=payment, time_limit=time_limit
+                        model_name,
+                        job_data=job_data,
+                        payment=payment,
+                        time_limit=time_limit,
                     )
 
                     # Try to finalize if already initializing
@@ -576,14 +581,19 @@ class DistributedValidator(DistributedWorker):
                 )
 
     def _initialize_hosted_job(
-        self, model_name: str, payment: int = 0, time_limit: int = None
+        self,
+        model_name: str,
+        payment: int = 0,
+        time_limit: int = None,
+        job_data: dict = None,
     ):
-        job_data = {}
-
         """Initialize a hosted job by creating the distributed model and submitting inspection request."""
+        if not job_data:
+            job_data = {}
+
         try:
             # Prepare job data for inspection
-            job_data = {
+            defaults = {
                 "author": None,
                 "active": True,
                 "hosted": True,
@@ -599,6 +609,9 @@ class DistributedValidator(DistributedWorker):
                 "model_name": model_name,
                 "seed_validators": [],
             }
+
+            for k, v in defaults.items():
+                job_data.setdefault(k, v)
 
             # Inspect model to determine network requirements
             job_data = self.inspect_model(model_name, job_data, hosted=True)

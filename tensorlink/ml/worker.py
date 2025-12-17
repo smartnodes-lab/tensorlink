@@ -55,6 +55,12 @@ def _find_module_path_by_class(
                 return name
             continue
 
+        if name == "model":
+            if hasattr(model, "model"):
+                return "model." + _find_module_path_by_class(model.model, class_name)
+            else:
+                return _find_module_path_by_class(model.model, class_name)
+
         if mod.__class__.__name__ == class_name:
             return name
 
@@ -126,7 +132,7 @@ class DistributedWorker:
         self.scaler = None
         self.use_amp = False
 
-        # Initialize CUDA streams for overlapping operations - key performance feature
+        # Initialize CUDA streams for overlapping operations
         if self.device.type == "cuda":
             self.default_stream = torch.cuda.Stream()
             self.compute_stream = torch.cuda.Stream()
@@ -484,8 +490,9 @@ class DistributedWorker:
                                     if single and '.' in new_key:
                                         # For single modules, remove one more level
                                         new_key = new_key.split('.', 1)[1]
-                                    else:
+                                    elif len(new_key.split(".")) > 1:
                                         new_key = key.split('.', 1)[1]
+
                                     state_dict[new_key] = f.get_tensor(key)
                                     keys_loaded += 1
                                     break
@@ -559,6 +566,9 @@ class DistributedWorker:
 
         except Exception as e:
             # Make sure skeleton is cleaned up even on error
+            if "CUDA out of memory." in e:
+                raise e
+
             try:
                 del skeleton_module
                 gc.collect()
@@ -595,6 +605,18 @@ class DistributedWorker:
             f"Loading grouped layers {layer_range[0]}-{layer_range[1]} from {model_name}"
         )
 
+        # Adjust layer paths if they include module_path prefix
+        adjusted_layer_paths = []
+        for layer_path in layer_paths:
+            # If base_model is the submodule, layer paths should be relative to it
+            # eg 'model.layers.0' -> 'layers.0'
+
+            # Check if layer_path starts with 'model.'
+            if layer_path.startswith('model.'):
+                adjusted_layer_paths.append(layer_path[6:])
+            else:
+                adjusted_layer_paths.append(layer_path)
+
         # Create the layer group wrapper with empty weights
         grouped_module = _create_layer_group_wrapper(
             base_model,
@@ -619,7 +641,7 @@ class DistributedWorker:
         )
 
         # Load the state dict into the grouped module
-        grouped_module = grouped_module.to_empty(device=self.device)
+        grouped_module = grouped_module.to_empty(device="cpu")
         missing_keys, unexpected_keys = grouped_module.load_state_dict(
             state_dict, strict=False
         )
@@ -668,13 +690,14 @@ class DistributedWorker:
             effective_layer_path = parent_module_path
         else:
             # parent_module_path is 'model' or empty -> try to find by class name
-            found_path = _find_module_path_by_class(base_model, module_class_name)
-            if found_path is None:
+            effective_layer_path = _find_module_path_by_class(
+                base_model, module_class_name
+            )
+            if effective_layer_path is None:
                 # if not found, as a safe fallback return the root module but warn the caller
                 target_module = base_model
                 effective_layer_path = parent_module_path or "model"
             else:
-                effective_layer_path = f"model.{found_path}"
                 target_module = get_nested_module(base_model, effective_layer_path)
 
         # Get name of model for loading weights
@@ -693,15 +716,12 @@ class DistributedWorker:
         with self.memory_efficient_context():
             del base_model
 
-        target_module = target_module.to_empty(device=self.device)
+        target_module = target_module.to_empty(device="cpu")
 
         # Load the state dict
         missing_keys, unexpected_keys = target_module.load_state_dict(
             state_dict, strict=False
         )
-
-        with self.memory_efficient_context():
-            del base_model
 
         # Move to device
         target_module = target_module.to(self.device)

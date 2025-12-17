@@ -51,7 +51,7 @@ from tensorlink.ml.utils import (
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
 
-MAX_WAIT_TIME = 300
+MAX_WAIT_TIME = 150
 
 
 def contains_offloaded(module: nn.Module):
@@ -729,14 +729,16 @@ class DistributedModel(nn.Module):
 
         # Spawn a worker thread for the offloaded module
         offloaded_module.spawn_worker(file_name, module_info)
+        module_path_list = module_path.split(".")
+        target = self.model
 
-        if module_path == "model":
-            setattr(self, module_path, offloaded_module)
-        else:
-            target_module = module_path.split(".")[
-                -1
-            ]  # Handles cases where path = model.module or model_name.module
-            setattr(self.model, target_module, offloaded_module)
+        if module_path_list[0] == "model" and not hasattr(self.model, "model"):
+            module_path_list.pop(0)
+
+        for attr in module_path_list[:-1]:
+            target = getattr(target, attr)
+
+        setattr(target, module_path_list[-1], offloaded_module)
 
     def _wrap_grouped_layers(self, grouped_layers: dict):
         """
@@ -765,6 +767,7 @@ class DistributedModel(nn.Module):
             module_info["expected_outputs"] = list(io_signature["all_outputs"])
             module_info["loop_body_source"] = io_signature["loop_body_source"]
             module_info["loop_iterator_name"] = io_signature["loop_iterator_name"]
+            module_info["module_path"] = io_signature["module_path"]
 
             file_name = f"{module_id}_{worker_id}.pt"
             with open(file_name, "wb") as f:
@@ -786,11 +789,8 @@ class DistributedModel(nn.Module):
         """
         parent_path = list(grouped_layers.values())[0].get("parent_module_path", "")
 
-        if parent_path and parent_path != "model":
-            assert isinstance(self.model, nn.Module), "Invalid model type"
-            parent_module = get_nested_module(self.model, parent_path)
-        else:
-            parent_module = self.model
+        assert isinstance(self.model, nn.Module), "Invalid model type"
+        parent_module = get_nested_module(self.model, parent_path)
 
         parent_module.offloaded_modules = offloaded_modules
 
