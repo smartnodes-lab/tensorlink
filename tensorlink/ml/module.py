@@ -605,7 +605,8 @@ class DistributedModel(nn.Module):
         return 0, 0
 
     def generate(self, *args, **kwargs):
-        return self.model.generate(*args, **kwargs)
+        with _set_micro(self._thread_local, 0):
+            return self.model.generate(*args, **kwargs)
 
     def wrap_module(self, module_id: list, worker_id):
         # Access the module and parent
@@ -978,7 +979,6 @@ class OffloadedModule(nn.Module):
         start_time = time.time()
         n_batch = self.parent_model.model.n_batch
         n_micro = getattr(self.parent_model._thread_local, "micro", None)
-        n_queued = self.parent_model.model.forward_queues[n_micro].qsize()
 
         tag = [n_batch, n_micro, self.module_id]
 

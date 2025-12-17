@@ -346,7 +346,7 @@ class DistributedValidator(DistributedWorker):
 
     def inspect_model(self, model_name: str, job_data: dict, hosted=False) -> dict:
         """Inspect a model to determine network requirements and store distribution in JSON cache"""
-        parser = ModelParser(verbose=True)
+        parser = ModelParser()
         model_name: str = job_data.get("model_name", model_name)
 
         # Get network worker information to assign modules
