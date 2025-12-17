@@ -270,9 +270,14 @@ class Torchnode(Smartnode):
         module_id = data[6:70].decode()
         file_name = module_id + self.rsa_key_hash
         if os.path.exists(file_name):
-            with open(file_name, "rb") as f:
-                module_info = json.load(f)
+            try:
+                with open(file_name, "rb") as f:
+                    module_info = json.load(f)
+            except json.JSONDecodeError:
+                module_info = json.loads(data[70:])
+
             os.remove(file_name)
+
         else:
             module_info = json.loads(data[70:])
 

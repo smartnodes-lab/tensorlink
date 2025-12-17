@@ -6,6 +6,8 @@ import pickle
 import io
 import time
 import glob
+from contextlib import contextmanager
+
 import torch
 import torch.amp as amp
 from accelerate import init_empty_weights
@@ -52,6 +54,12 @@ def _find_module_path_by_class(
             if mod.__class__.__name__ == class_name:
                 return name
             continue
+
+        if name == "model":
+            if hasattr(model, "model"):
+                return "model." + _find_module_path_by_class(model.model, class_name)
+            else:
+                return _find_module_path_by_class(model.model, class_name)
 
         if mod.__class__.__name__ == class_name:
             return name
@@ -120,11 +128,11 @@ class DistributedWorker:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.setup_cuda_environment()
 
-        # Mixed precision setup
-        self.scaler = amp.GradScaler()
-        self.use_amp = self.device.type == "cuda"  # Only use AMP with CUDA
+        # Mixed precision setup vars (set on model load)
+        self.scaler = None
+        self.use_amp = False
 
-        # Initialize CUDA streams for overlapping operations - key performance feature
+        # Initialize CUDA streams for overlapping operations
         if self.device.type == "cuda":
             self.default_stream = torch.cuda.Stream()
             self.compute_stream = torch.cuda.Stream()
@@ -133,6 +141,21 @@ class DistributedWorker:
         self.hf_cache_dir = os.environ.get(
             'HF_HOME', os.path.join(os.path.expanduser('~'), '.cache', 'huggingface')
         )
+
+    @contextmanager
+    def memory_efficient_context(self):
+        """Context manager for memory-efficient operations"""
+        try:
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            gc.collect()
+            yield
+        finally:
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            gc.collect()
 
     def setup_cuda_environment(self):
         """Configure optimal CUDA settings for ML workloads"""
@@ -143,7 +166,6 @@ class DistributedWorker:
             # Set memory allocation strategy
             torch.cuda.empty_cache()
             total_memory = torch.cuda.get_device_properties(0).total_memory
-            torch.cuda.set_per_process_memory_fraction(0.85)
 
             # Log CUDA configuration
             logging.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
@@ -360,6 +382,10 @@ class DistributedWorker:
         if module_id is None:
             raise ValueError("For standard loading, module_id must be provided")
 
+        # Clear memory before loading
+        with self.memory_efficient_context():
+            pass
+
         # Try to load the module based on trusted status
         if self.trusted:
             with open(file_name, "rb") as f:
@@ -373,12 +399,12 @@ class DistributedWorker:
                 skeleton_module, model_name, module_name, module_info
             )
 
-            # skeleton_module should be deleted inside _initialize_module_from_config
-            # but make sure with explicit cleanup
-            try:
-                del skeleton_module
-            except:
-                pass
+            # Ensure skeleton cleanup
+            with self.memory_efficient_context():
+                try:
+                    del skeleton_module
+                except:
+                    pass
 
         # Cleanup file
         try:
@@ -386,14 +412,14 @@ class DistributedWorker:
         except:
             pass
 
-        # Apply model optimizations
-        if self.device.type == "cuda":
-            # Try converting to faster kernel implementations when possible
-            if hasattr(module, 'to_bettertransformer'):
-                try:
-                    module = module.to_bettertransformer()
-                except:
-                    pass
+        # # Apply model optimizations
+        # if self.device.type == "cuda":
+        #     # Try converting to faster kernel implementations when possible
+        #     if hasattr(module, 'to_bettertransformer'):
+        #         try:
+        #             module = module.to_bettertransformer()
+        #         except:
+        #             pass
 
         # Initialize storage structures
         module.intermediates = {}
@@ -464,8 +490,9 @@ class DistributedWorker:
                                     if single and '.' in new_key:
                                         # For single modules, remove one more level
                                         new_key = new_key.split('.', 1)[1]
-                                    else:
+                                    elif len(new_key.split(".")) > 1:
                                         new_key = key.split('.', 1)[1]
+
                                     state_dict[new_key] = f.get_tensor(key)
                                     keys_loaded += 1
                                     break
@@ -539,6 +566,9 @@ class DistributedWorker:
 
         except Exception as e:
             # Make sure skeleton is cleaned up even on error
+            if "CUDA out of memory." in e:
+                raise e
+
             try:
                 del skeleton_module
                 gc.collect()
@@ -575,6 +605,18 @@ class DistributedWorker:
             f"Loading grouped layers {layer_range[0]}-{layer_range[1]} from {model_name}"
         )
 
+        # Adjust layer paths if they include module_path prefix
+        adjusted_layer_paths = []
+        for layer_path in layer_paths:
+            # If base_model is the submodule, layer paths should be relative to it
+            # eg 'model.layers.0' -> 'layers.0'
+
+            # Check if layer_path starts with 'model.'
+            if layer_path.startswith('model.'):
+                adjusted_layer_paths.append(layer_path[6:])
+            else:
+                adjusted_layer_paths.append(layer_path)
+
         # Create the layer group wrapper with empty weights
         grouped_module = _create_layer_group_wrapper(
             base_model,
@@ -588,11 +630,9 @@ class DistributedWorker:
         # Get name of model for loading weights
         base_model_prefix = getattr(base_model, "base_model_prefix", None)
 
-        # Delete skeleton model and force GC
-        del base_model
-        gc.collect()
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        # Aggressive cleanup before loading weights
+        with self.memory_efficient_context():
+            del base_model
 
         # Now load only the weights for the assigned layers
         logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
@@ -601,15 +641,17 @@ class DistributedWorker:
         )
 
         # Load the state dict into the grouped module
-        grouped_module = grouped_module.to_empty(device=self.device)
+        grouped_module = grouped_module.to_empty(device="cpu")
         missing_keys, unexpected_keys = grouped_module.load_state_dict(
             state_dict, strict=False
         )
 
-        # Clean up base model to free memory
-        del state_dict
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        # Clean up state dict before GPU transfer
+        with self.memory_efficient_context():
+            del state_dict
+
+        # Move to device
+        grouped_module = grouped_module.to(self.device)
 
         logging.info(f"Successfully loaded {len(layer_paths)} layers with weights")
 
@@ -631,23 +673,14 @@ class DistributedWorker:
         if parent_module_path == "":
             logging.info("Parent module is entire model — loading full model.")
 
-            # Ensure garbage from model info has been collected
+            # aggressive cleanup before full model load
             if module_id in self.modules:
                 del self.modules[module_id]
-            del base_model
-            gc.collect()
-            if self.device.type == "cuda":
-                torch.cuda.empty_cache()
+
+            with self.memory_efficient_context():
+                del base_model
 
             final_model = self._load_full_model(model_name, module_info)
-
-            # Only move to device if not already there (from device_map)
-            if (
-                not next(final_model.parameters()).is_cuda
-                and self.device.type == "cuda"
-            ):
-                final_model = final_model.to(self.device)
-
             return final_model
 
         # Extract the specific module with empty weights
@@ -657,13 +690,14 @@ class DistributedWorker:
             effective_layer_path = parent_module_path
         else:
             # parent_module_path is 'model' or empty -> try to find by class name
-            found_path = _find_module_path_by_class(base_model, module_class_name)
-            if found_path is None:
+            effective_layer_path = _find_module_path_by_class(
+                base_model, module_class_name
+            )
+            if effective_layer_path is None:
                 # if not found, as a safe fallback return the root module but warn the caller
                 target_module = base_model
                 effective_layer_path = parent_module_path or "model"
             else:
-                effective_layer_path = f"model.{found_path}"
                 target_module = get_nested_module(base_model, effective_layer_path)
 
         # Get name of model for loading weights
@@ -679,12 +713,10 @@ class DistributedWorker:
             base_model_prefix=base_model_prefix,
         )
 
-        del base_model
-        gc.collect()
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        with self.memory_efficient_context():
+            del base_model
 
-        target_module = target_module.to_empty(device=self.device)
+        target_module = target_module.to_empty(device="cpu")
 
         # Load the state dict
         missing_keys, unexpected_keys = target_module.load_state_dict(
@@ -694,13 +726,7 @@ class DistributedWorker:
         # Move to device
         target_module = target_module.to(self.device)
 
-        # Clean up
-        del base_model
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-
         logging.info(f"Successfully loaded single module {module_class_name}")
-
         return target_module
 
     def _load_full_model(self, model_name: str, module_info: dict) -> torch.nn.Module:
@@ -709,41 +735,51 @@ class DistributedWorker:
         Uses HF's native loading which is more memory-efficient than manual skeleton+weights.
         """
         model_type = module_info.get('model_type', 'chat')
+        num_gpus = torch.cuda.device_count()
 
-        # Common loading kwargs for memory optimization
-        load_kwargs = {
-            'low_cpu_mem_usage': True,  # Reduces CPU memory footprint
-            'torch_dtype': torch.float16 if self.use_amp else torch.float32,
-        }
+        # Force garbage collection before loading
+        with self.memory_efficient_context():
+            load_kwargs = {
+                "low_cpu_mem_usage": True,
+                "torch_dtype": torch.float16,  # TODO route quantization params through job requests, should also be done for module loading
+            }
 
-        # Only add device_map if CUDA is available
-        if self.device.type == "cuda":
-            load_kwargs['device_map'] = self.device
+            # Only use device_map for multi-GPU
+            if num_gpus > 1:
+                load_kwargs["device_map"] = "auto"
+            else:
+                # For single GPU, load to CPU first then move
+                load_kwargs["device_map"] = "cpu"
 
-        logging.info(f"Loading full model {model_name} with type {model_type}")
+            logging.info(f"Loading full model {model_name} with type {model_type}")
 
-        if model_type in ("causal", "chat"):
-            final_model = AutoModelForCausalLM.from_pretrained(
-                model_name, **load_kwargs
-            )
-        elif model_type == "seq2seq":
-            final_model = AutoModelForSeq2SeqLM.from_pretrained(
-                model_name, **load_kwargs
-            )
-        elif model_type == "vision2text":
-            final_model = AutoModelForVision2Seq.from_pretrained(
-                model_name, **load_kwargs
-            )
-        elif model_type == "audio2text":
-            final_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                model_name, **load_kwargs
-            )
-        else:
-            # For generic models, we need to load config first, then use from_config
-            model_config = AutoConfig.from_pretrained(model_name)
-            final_model = AutoModel.from_pretrained(
-                model_name, config=model_config, **load_kwargs
-            )
+            # Load model based on type (FIXED: removed duplicate loading)
+            if model_type in ("causal", "chat"):
+                final_model = AutoModelForCausalLM.from_pretrained(
+                    model_name, **load_kwargs
+                )
+            elif model_type == "seq2seq":
+                final_model = AutoModelForSeq2SeqLM.from_pretrained(
+                    model_name, **load_kwargs
+                )
+            elif model_type == "vision2text":
+                final_model = AutoModelForVision2Seq.from_pretrained(
+                    model_name, **load_kwargs
+                )
+            elif model_type == "audio2text":
+                final_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    model_name, **load_kwargs
+                )
+            else:
+                model_config = AutoConfig.from_pretrained(model_name)
+                final_model = AutoModel.from_pretrained(
+                    model_name, config=model_config, **load_kwargs
+                )
+
+        # Move to GPU only after fully loaded (for single GPU)
+        if num_gpus == 1 and self.device.type == "cuda":
+            with self.memory_efficient_context():
+                final_model = final_model.to(self.device)
 
         logging.info(f"Successfully loaded full model {model_name}")
         return final_model

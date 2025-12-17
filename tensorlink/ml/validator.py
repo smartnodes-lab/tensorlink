@@ -358,7 +358,7 @@ class DistributedValidator(DistributedWorker):
             if job_data.get("training", False):
                 batch_size = 256
             else:
-                batch_size = 4
+                batch_size = 1
 
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
@@ -374,14 +374,16 @@ class DistributedValidator(DistributedWorker):
             host_threshold_mb=20,
             max_offload_depth=3,
             batch_size=batch_size,
-            max_seq_len=job_data.get("max_seq_len", 2048),
+            max_seq_len=job_data.get("max_seq_len", 4096),
             model_type=job_data.get("model_type", "chat"),
         )
+
         job_data["distribution"] = distribution
 
         if (
             len(distribution["config"]) == 0
-            or len(distribution["config"]) > 4
+            or len(distribution["config"])
+            > 5  # TODO This limit on number of distributions is not ideal
             or not distribution["success"]
         ):
             return {}
@@ -452,7 +454,10 @@ class DistributedValidator(DistributedWorker):
 
                     # Check if this is a public job and there are already models of this type
                     self._initialize_hosted_job(
-                        model_name, payment=payment, time_limit=time_limit
+                        model_name,
+                        job_data=job_data,
+                        payment=payment,
+                        time_limit=time_limit,
                     )
 
                     # Try to finalize if already initializing
@@ -576,14 +581,19 @@ class DistributedValidator(DistributedWorker):
                 )
 
     def _initialize_hosted_job(
-        self, model_name: str, payment: int = 0, time_limit: int = None
+        self,
+        model_name: str,
+        payment: int = 0,
+        time_limit: int = None,
+        job_data: dict = None,
     ):
-        job_data = {}
-
         """Initialize a hosted job by creating the distributed model and submitting inspection request."""
+        if not job_data:
+            job_data = {}
+
         try:
             # Prepare job data for inspection
-            job_data = {
+            defaults = {
                 "author": None,
                 "active": True,
                 "hosted": True,
@@ -599,6 +609,9 @@ class DistributedValidator(DistributedWorker):
                 "model_name": model_name,
                 "seed_validators": [],
             }
+
+            for k, v in defaults.items():
+                job_data.setdefault(k, v)
 
             # Inspect model to determine network requirements
             job_data = self.inspect_model(model_name, job_data, hosted=True)
@@ -622,11 +635,6 @@ class DistributedValidator(DistributedWorker):
 
             self.model_state[job_id] = "initializing"
             self.models_initializing.add(job_id)
-            self.send_request(
-                "debug_print",
-                (f"Initialized hosted job for {model_name}", "green", logging.INFO),
-            )
-
             return True
 
         except Exception as e:
@@ -718,6 +726,10 @@ class DistributedValidator(DistributedWorker):
                     "debug_print",
                     (f"Removed tokenizer for {model_name}", "yellow", logging.INFO),
                 )
+
+            if model_name in self.public_models:
+                if job_id in self.public_models[model_name]:
+                    self.public_models[model_name].remove(job_id)
 
             # Clean up state tracking
             if job_id in self.model_state:

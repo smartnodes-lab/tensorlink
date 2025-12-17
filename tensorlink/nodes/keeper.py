@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import time
 import json
@@ -116,6 +116,50 @@ def _filter_old_entities(
             filtered[entity_id] = entity_data
 
     return filtered
+
+
+def _fill_missing_daily_days(daily_stats: List[Dict]) -> List[Dict]:
+    """Ensure daily stats have no missing days by filling gaps with zeros."""
+    if not daily_stats:
+        return []
+
+    # Convert to date objects
+    parsed = {datetime.fromtimestamp(s["timestamp"]).date(): s for s in daily_stats}
+
+    min_day = min(parsed.keys())
+    max_day = max(parsed.keys())
+
+    filled = []
+    current = min_day
+
+    while current <= max_day:
+        if current in parsed:
+            filled.append(parsed[current])
+        else:
+            # Insert zero-filled entry
+            filled.append(
+                {
+                    "date": current.strftime("%Y-%m-%d"),
+                    "timestamp": datetime(
+                        current.year, current.month, current.day
+                    ).timestamp(),
+                    "last_updated": 0,
+                    "workers": 0,
+                    "validators": 0,
+                    "users": 0,
+                    "jobs": 0,
+                    "proposals": 0,
+                    "available_capacity": 0,
+                    "used_capacity": 0,
+                    "total_capacity": 0,
+                }
+            )
+        current = current + timedelta(days=1)
+
+    # Always sorted
+    filled.sort(key=lambda x: x["timestamp"])
+
+    return filled
 
 
 class Keeper:
@@ -473,7 +517,10 @@ class Keeper:
             return self._status_cache
 
         try:
-            daily_stats = self.get_daily_statistics(days)
+            raw_daily = self.get_daily_statistics(days)
+
+            # Fill missing days between min and max date
+            daily_stats = _fill_missing_daily_days(raw_daily)
 
             result = {
                 "daily": {

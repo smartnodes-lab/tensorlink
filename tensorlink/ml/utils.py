@@ -33,14 +33,10 @@ def estimate_memory(
     optimizer_type: str = "adam",
     include_kv_cache: bool = True,
     recursive: bool = True,
+    count_activations: bool = True,
 ) -> tuple[float, dict]:
-    """
-    Estimate total memory usage (in bytes) for a PyTorch nn.Module, including
-    parameters, gradients, activations, optimizer state, and KV cache if applicable.
+    """Estimate memory with better control over what's counted."""
 
-    Returns (total_bytes, breakdown_dict).
-    """
-    # --- Basic dtype sizing ---
     dtype_size = torch.tensor([], dtype=dtype).element_size()
 
     breakdown = {
@@ -51,8 +47,7 @@ def estimate_memory(
         "kv_cache": 0,
     }
 
-    # --- Parameter + gradient size ---
-    # Count only direct parameters if not recursive
+    # Parameters, only count at this level if not recursive
     if recursive:
         param_bytes = sum(p.numel() * p.element_size() for p in module.parameters())
     else:
@@ -68,178 +63,65 @@ def estimate_memory(
     if training:
         breakdown["gradients"] = param_bytes
 
-        # Optimizer state sizes
         if optimizer_type.lower() in {"adam", "adamw"}:
-            # Adam always stores fp32 moments even with fp16 model
-            opt_dtype_size = 4
-            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * opt_dtype_size
-        elif optimizer_type.lower() in {"sgd", "momentum"}:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
+            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * 4
         else:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size * 1.5
-
+            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
         breakdown["optimizer"] = opt_bytes
 
-    # --- Activation estimate ---
-    # Try to infer hidden size / intermediate shape
-    hidden_size = None
-    num_layers = 0
+    # Only count activations if requested
+    if count_activations:
+        # Try to infer hidden size from the module
+        if hasattr(module, "config"):
+            hidden_size = module.config.hidden_size
+        elif hasattr(module, "hidden_size"):
+            hidden_size = module.hidden_size
+        elif hasattr(module, "embed_dim"):
+            hidden_size = module.embed_dim
+        elif hasattr(module, "d_model"):
+            hidden_size = module.d_model
+        else:
+            # Estimate from parameter count
+            if recursive:
+                total_params = sum(p.numel() for p in module.parameters())
+            else:
+                total_params = sum(p.numel() for p in module.parameters(recurse=False))
 
-    # if transformer-like, pick up clues
-    for name, sub in module.named_modules():
-        if isinstance(sub, nn.MultiheadAttention):
-            hidden_size = sub.embed_dim
-            num_layers += 1
+            if total_params > 0:
+                # Rough heuristic: for transformer layers, params ≈ 12 * hidden_size^2
+                hidden_size = max(128, min(int((total_params / 12) ** 0.5), 8192))
+            else:
+                # Absolute last resort for modules with no parameters
+                hidden_size = 512
 
-        elif isinstance(sub, nn.TransformerEncoderLayer):
-            hidden_size = sub.linear1.in_features
-            num_layers += 1
+        # More conservative activation multiplier
+        activation_multiplier = 5 if not training else 12
 
-        elif hasattr(sub, "hidden_size"):
-            hidden_size = getattr(sub, "hidden_size")
-
-    # fallback heuristic
-    if hidden_size is None:
-        total_params = sum(p.numel() for p in module.parameters())
-        # transformer rule-of-thumb: params ≈ 12 * L * d^2
-        hidden_size = int((total_params / 12) ** 0.5)
-        hidden_size = max(128, min(hidden_size, 8192))
-
-    if num_layers == 0:
-        num_layers = 1
-
-    # Activation memory (forward + backward)
-    per_layer_act = batch_size * seq_length * hidden_size * dtype_size * 3
-    activation_bytes = per_layer_act * num_layers
-
-    if training:
-        # backward keeps a copy of activations
-        activation_bytes *= 2
-
-    breakdown["activations"] = activation_bytes
-
-    # --- KV cache (for transformers during inference) ---
-    if include_kv_cache and not training:
-        # assume typical num_heads
-        num_heads = max(1, hidden_size // 64)
-        head_dim = hidden_size // num_heads
-
-        # KV cache per layer: batch * seq * num_heads * head_dim * 2 (K+V) * dtype_size
-        kv_cache = (
-            batch_size * seq_length * num_heads * head_dim * 2 * num_layers * dtype_size
+        breakdown["activations"] = (
+            batch_size * seq_length * hidden_size * dtype_size * activation_multiplier
         )
-        breakdown["kv_cache"] = kv_cache
 
-    total = sum(breakdown.values()) * 1.05  # Add 5% room for overhead
+        if include_kv_cache and hasattr(module, 'config') and not training:
+            num_layers = module.config.num_hidden_layers
+            num_heads = getattr(
+                module.config,
+                "num_key_value_heads",
+                module.config.num_attention_heads,
+            )
+            head_dim = hidden_size // module.config.num_attention_heads
 
-    return total, breakdown
-
-
-def estimate_hf_model_memory(
-    model_name: str,
-    batch_size: int = 1,
-    seq_length: int = 128,  # realistic default for inference
-    dtype: Union[torch.dtype, str] = torch.float16,
-    optimizer_type: str = "adam",
-    training: bool = False,
-    include_kv_cache: bool = True,
-):
-
-    def get_dtype_size(dtype_input):
-        if isinstance(dtype_input, str):
-            dtype_map = {
-                "float32": 4,
-                "fp32": 4,
-                "float16": 2,
-                "fp16": 2,
-                "half": 2,
-                "bfloat16": 2,
-                "bf16": 2,
-                "int8": 1,
-                "uint8": 1,
-                "int4": 0.5,
-                "uint4": 0.5,
-            }
-            return dtype_map.get(dtype_input.lower(), 4)
-        return getattr(dtype_input, "element_size", lambda: 4)()
-
-    try:
-        config_path = hf_hub_download(repo_id=model_name, filename="config.json")
-        with open(config_path, "r") as f:
-            config = json.load(f)
-
-        ATTN_SCALE = 0.5
-        FF_SCALE = 2 / 3
-
-        # Safe extraction with GPT/BERT naming variants
-        hidden_size = (
-            config.get("hidden_size")
-            or config.get("d_model")
-            or config.get("n_embd")
-            or 128
-        )
-        num_layers = (
-            config.get("num_hidden_layers")
-            or config.get("num_layers")
-            or config.get("n_layer")
-            or 4
-        )
-        vocab_size = config.get("vocab_size", 32000)
-        intermediate_size = config.get("intermediate_size", hidden_size * 4)
-        num_attention_heads = (
-            config.get("num_attention_heads") or config.get("n_head") or 4
-        )
-        num_key_value_heads = config.get("num_key_value_heads", num_attention_heads)
-        dtype_size = get_dtype_size(dtype)
-
-        # Parameter count
-        token_embeddings = vocab_size * hidden_size
-        q_params = hidden_size * hidden_size
-        kv_params = (
-            2 * hidden_size * (hidden_size * num_key_value_heads // num_attention_heads)
-        )
-        attn_output_params = hidden_size * hidden_size
-        attention_params = (q_params + kv_params + attn_output_params) * ATTN_SCALE
-        ff_params = (
-            2 * hidden_size * intermediate_size + intermediate_size * hidden_size
-        ) * FF_SCALE
-        norm_params = hidden_size
-        layer_params = attention_params + ff_params + norm_params
-        total_params = token_embeddings + num_layers * layer_params + hidden_size
-
-        param_bytes = total_params * dtype_size
-        breakdown = {
-            "parameters": param_bytes,
-            "activations": 0,
-            "kv_cache": 0,
-            "optimizer": 0,
-            "gradients": 0,
-        }
-
-        # Inference activations
-        activation_bytes = batch_size * seq_length * hidden_size * dtype_size * 2
-        breakdown["activations"] = activation_bytes
-
-        # KV cache (optional)
-        if include_kv_cache:
-            head_dim = hidden_size // num_attention_heads
-            kv_bytes = (
-                2
-                * num_layers
-                * num_key_value_heads
-                * head_dim
+            breakdown["kv_cache"] = (
+                batch_size
                 * seq_length
-                * batch_size
+                * num_layers
+                * num_heads
+                * head_dim
+                * 2
                 * dtype_size
             )
-            breakdown["kv_cache"] = kv_bytes
 
-        total = sum(breakdown.values())
-        return total, breakdown
-
-    except Exception as e:
-        print(f"Error estimating memory for {model_name}: {e}")
-        return 0.0, {}
+    total = sum(breakdown.values()) * 1.30  # add 30% overhead
+    return total, breakdown
 
 
 def get_gpu_memory():
@@ -255,7 +137,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 1e9
+        memory += 3e8
 
     return memory
 
@@ -953,6 +835,60 @@ def bytes_to_tensor(tensor_data):
                         # Fall back to a dictionary if reconstruction fails
                         return {k: _deserialize(v) for k, v in data.items()}
 
+                elif obj.get("is_object"):
+                    try:
+                        import importlib
+
+                        # Dynamically import the module and get the class
+                        module = importlib.import_module(module_name)
+                        cls = getattr(module, cls_name)
+
+                        # Try to create an instance
+                        try:
+                            # First try with no arguments
+                            instance = cls()
+                        except TypeError:
+                            # If that fails, try with deserialized data as kwargs
+                            try:
+                                import inspect
+
+                                sig = inspect.signature(cls.__init__)
+                                param_names = list(sig.parameters.keys())[
+                                    1:
+                                ]  # Skip 'self'
+
+                                # Prepare constructor arguments from data
+                                deserialized_data = _deserialize(data)
+                                kwargs = {}
+                                for param in param_names:
+                                    if param in deserialized_data:
+                                        kwargs[param] = deserialized_data[param]
+
+                                instance = cls(**kwargs)
+
+                            except Exception:
+                                # Last resort: return deserialized data as dict
+                                return _deserialize(data)
+
+                        # Set all attributes from the data
+                        deserialized_data = _deserialize(data)
+                        if isinstance(deserialized_data, dict):
+                            for attr_name, attr_value in deserialized_data.items():
+                                try:
+                                    setattr(instance, attr_name, attr_value)
+                                except (AttributeError, TypeError):
+                                    # Skip attributes that can't be set
+                                    pass
+
+                        return instance
+
+                    except (ImportError, AttributeError) as e:
+                        # If we can't import the class, return deserialized data as dict
+                        return _deserialize(data)
+                    except Exception as e:
+                        # For any other error, return deserialized data
+                        return _deserialize(data)
+
                 # For other serialized objects, return dictionary representation
                 return {
                     k: _deserialize(v) for k, v in data.items() if k != "__serialized__"
@@ -1142,7 +1078,8 @@ def get_nested_module(
     current = model
 
     if parts[0] == "model":
-        parts = parts[1:]
+        if not hasattr(model, "model"):
+            parts = parts[1:]
 
     # Skip 'model' prefix if present (first attribute is always the model itself)
     for part in parts:

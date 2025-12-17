@@ -233,9 +233,9 @@ class Worker(Torchnode):
 
         for module_id, module_info in self.modules.items():
             # Account for modules that are not in CUDA and are still initializing
-            if module_info.get("status", "loading") == "loading":
-                module_size = module_info["memory"]
-                available_gpu_memory -= module_size
+            # if module_info.get("status", "loading") == "loading":
+            module_size = module_info["memory"]
+            available_gpu_memory -= module_size
 
         return available_gpu_memory
 

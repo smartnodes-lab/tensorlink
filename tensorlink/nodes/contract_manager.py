@@ -485,7 +485,7 @@ class ContractManager:
                 worker_info = self.node.dht.query(worker_id)
                 worker_address = self.chain.to_checksum_address(worker_info["address"])
                 capacity = round(
-                    module_info["size"] * (job["end_time"] - job["timestamp"]) / 3600
+                    module_info["memory"] * (job["end_time"] - job["timestamp"]) / 3600
                 )  # Capacity measured in byte hours
                 workers.append(worker_address)
                 capacities.append(capacity)
@@ -1030,7 +1030,7 @@ class ContractManager:
     def _is_in_current_round_validators(self) -> bool:
         """Check if this node is in the current round of validators."""
         current_validators = self._get_current_round_validators()
-        return self.public_key in current_validators
+        return self.public_key in current_validators or not current_validators
 
     def _get_expected_proposal_count(self) -> int:
         """Get the expected number of proposals for this round."""

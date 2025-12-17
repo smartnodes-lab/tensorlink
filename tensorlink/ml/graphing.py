@@ -151,14 +151,13 @@ class ModelParser:
         host_threshold_mb: int = 50,
         host_max_depth: int = 2,
         max_offload_depth: int = 3,
-        max_seq_len: int = 2048,
+        max_seq_len: int = 4096,
         batch_size: int = 1,
         model_type: str = "chat",
     ):
         """
         Creates a distributed configuration for a model, determining how it should be allocated across nodes.
         """
-
         if isinstance(model, str):
             self.model_name = model
             model_config = AutoConfig.from_pretrained(model)
@@ -172,21 +171,31 @@ class ModelParser:
 
         config = {}
         success = True
+        model_memory, breakdown = estimate_memory(
+            model,
+            training=training,
+            seq_length=max_seq_len,
+            optimizer_type=optimizer_type,
+            batch_size=batch_size,
+            recursive=True,
+            count_activations=True,
+            include_kv_cache=True,
+        )
 
-        # Log the model structure first
-        if self.verbose:
-            print("\n" + "=" * 80)
-            print("MODEL STRUCTURE:")
-            print("=" * 80)
-            self._log_model_structure(
-                model,
-                prefix="model",
-                training=training,
-                optimizer_type=optimizer_type,
-                max_seq_len=max_seq_len,
-                batch_size=batch_size,
-            )
-            print("=" * 80 + "\n")
+        # # Log the model structure first
+        # if self.verbose:
+        #     print("\n" + "=" * 80)
+        #     print("MODEL STRUCTURE:")
+        #     print("=" * 80)
+        #     self._log_model_structure(
+        #         model,
+        #         prefix="model",
+        #         training=training,
+        #         optimizer_type=optimizer_type,
+        #         max_seq_len=max_seq_len,
+        #         batch_size=batch_size,
+        #     )
+        #     print("=" * 80 + "\n")
 
         try:
             config, _ = self._recurse_module(
@@ -215,10 +224,10 @@ class ModelParser:
             if self.verbose:
                 self._log_assignment_summary(config, workers_state)
 
-        except AssignmentError:
+        except AssignmentError as e:
             success = False
 
-        return {"success": success, "config": config}
+        return {"success": success, "config": config, "model_memory": model_memory}
 
     def _log_model_structure(
         self,
@@ -243,10 +252,13 @@ class ModelParser:
 
         memory, breakdown = estimate_memory(
             module,
-            training,
-            batch_size=batch_size,
+            training=training,
             seq_length=max_seq_len,
             optimizer_type=optimizer_type,
+            batch_size=batch_size,
+            recursive=True,
+            count_activations=True,
+            include_kv_cache=(depth == 0),
         )
 
         print(f"{indent}{prefix} [{module_type}] (~{memory/1e6:.1f}MB)")
@@ -286,6 +298,7 @@ class ModelParser:
         max_seq_len: int = 2048,
         batch_size: int = 1,
         model_type: str = "chat",
+        count_activations: bool = True,
     ):
         config = {}
         if ids is None:
@@ -297,13 +310,20 @@ class ModelParser:
         if self.verbose:
             print(f"{indent}Processing: {module_path}")
 
+        # sum children memory
         memory, breakdown = estimate_memory(
             module,
-            training,
+            training=training,
             seq_length=max_seq_len,
             optimizer_type=optimizer_type,
             batch_size=batch_size,
+            recursive=True,
+            count_activations=True,
+            include_kv_cache=(depth == 0),
         )
+
+        if not count_activations:
+            memory -= breakdown.get("activations", 0)
 
         if self.verbose:
             print(f"{indent}   Memory required: {memory / 1e6:.2f}MB")
@@ -383,15 +403,14 @@ class ModelParser:
                 "reason": f"Exceeded max recursion depth ({max_offload_depth})",
             }
             if self.verbose:
-                print(f"{indent}   Max recursion depth reached - FAILED")
+                raise AssignmentError(
+                    f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
+                )
 
         # too large, recurse into children
         if self.verbose:
             print(
                 f"{indent}   Module {module_path} ({memory / 1e6:.2f}MB) too large, recursing into children..."
-            )
-            raise AssignmentError(
-                f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
             )
 
         children = list(module.named_children())
@@ -403,7 +422,10 @@ class ModelParser:
             }
             if self.verbose:
                 print(f"{indent}   No children to recurse into - FAILED")
-            raise AssignmentError(f"Unable to assign {module_path}")
+
+            raise AssignmentError(
+                f"Unable to assign {module_path}: exceeded max depth {max_offload_depth}"
+            )
 
         parent_forward_code = self._extract_forward_code(module)
         child_workers = set()
@@ -432,6 +454,7 @@ class ModelParser:
                     max_offload_depth=max_offload_depth,
                     max_seq_len=max_seq_len,
                     batch_size=batch_size,
+                    count_activations=False,
                 )
 
                 config.update(child_config)
@@ -521,7 +544,7 @@ class ModelParser:
         # Group by worker
         worker_assignments = defaultdict(list)
         for module_path, module_config in config.items():
-            if module_config.get("type") == "offloaded":
+            if "offloaded" in module_config.get("type", ""):
                 worker_id = module_config["assigned_workers"][0]
                 worker_assignments[worker_id].append(
                     {
