@@ -151,6 +151,7 @@ class DistributedModel(nn.Module):
         node: Optional[Any] = None,
         training: bool = True,
         verbose: bool = False,
+        tokenizer=None,
     ):
         """
         Args:
@@ -164,6 +165,7 @@ class DistributedModel(nn.Module):
             trusted (bool): If True, requires user confirmation before execution.
             node (Optional[Any]): Pre-existing node instance for networking.
             verbose (bool): Enables debug messages if True.
+            tokenizer: can be specified for inference
         """
         super().__init__()
 
@@ -173,6 +175,8 @@ class DistributedModel(nn.Module):
         else:
             self.model_name = model
             self.model = None
+
+        self.tokenizer = tokenizer
 
         # Store model and training resources
         self.user_memory = get_gpu_memory()
@@ -605,6 +609,13 @@ class DistributedModel(nn.Module):
         return 0, 0
 
     def generate(self, *args, **kwargs):
+        """
+        Generate method.
+
+        Args:
+            *args: Input tensors
+            **kwargs: Additional generation parameters
+        """
         with _set_micro(self._thread_local, 0):
             return self.model.generate(*args, **kwargs)
 

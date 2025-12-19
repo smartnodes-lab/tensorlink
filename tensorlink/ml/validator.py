@@ -4,8 +4,9 @@ from tensorlink.ml.module import DistributedModel
 from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.models import GenerationRequest
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TextIteratorStreamer
 from collections import defaultdict
+from threading import Thread
 import torch
 import logging
 import json
@@ -519,6 +520,8 @@ class DistributedValidator(DistributedWorker):
             request.output = (
                 "Model is currently not available through the Tensorlink API."
             )
+        elif hasattr(request, "stream") and request.stream:
+            self._generate_streaming(request, job_id)
         else:
             distributed_model = self.models[job_id]
 
@@ -566,6 +569,125 @@ class DistributedValidator(DistributedWorker):
 
         # Return the clean response
         self.send_request("update_api_request", (request,))
+
+    def _generate_streaming(self, request: GenerationRequest, job_id: str):
+        """
+        Handle streaming generation requests using TextIteratorStreamer.
+        Sends tokens to the API as they're generated.
+        """
+        try:
+            # Prepare input
+            distributed_model = self.models[job_id]
+            tokenizer = self.tokenizers[request.hf_name]
+
+            # Format chat history into a standardized prompt
+            formatted_prompt = format_chat_prompt(
+                request.hf_name, request.message, request.history
+            )
+
+            # Tokenize formatted prompt
+            inputs = tokenizer(
+                formatted_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=request.max_length if request.max_length else 512,
+            )
+            input_ids = inputs.input_ids.to(self.device)
+
+            # Calculate prompt tokens for usage stats
+            prompt_tokens = input_ids.shape[1]
+
+            # Create text generation streamer
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+
+            generation_kwargs = dict(
+                input_ids=input_ids,
+                streamer=streamer,
+                max_new_tokens=(
+                    request.max_new_tokens
+                    if hasattr(request, 'max_new_tokens')
+                    else 2048
+                ),
+                temperature=request.temperature if request.temperature else 0.6,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                do_sample=(
+                    request.do_sample if hasattr(request, 'do_sample') else True
+                ),
+                num_beams=request.num_beams if request.num_beams else 1,
+            )
+
+            # Start generation in a separate thread
+            generation_thread = Thread(
+                target=distributed_model.generate, kwargs=generation_kwargs
+            )
+            generation_thread.start()
+
+            # Stream tokens as they're generated
+            full_text = ""
+            token_count = 0
+
+            for token_text in streamer:
+                full_text += token_text
+                token_count += 1
+
+                # Send token update to API
+                self.send_request(
+                    "update_stream",
+                    (
+                        request.id,
+                        {
+                            "token": token_text,
+                            "done": False,
+                            "token_id": token_count,
+                            "timestamp": time.time(),
+                        },
+                    ),
+                )
+
+            # Wait for generation thread to complete
+            generation_thread.join()
+
+            # Clean up the response
+            cleaned_text = extract_assistant_response(full_text, request.hf_name)
+
+            # Send final completion message
+            self.send_request(
+                "update_stream",
+                (
+                    request.id,
+                    {
+                        "token": "",
+                        "done": True,
+                        "full_text": cleaned_text,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": token_count,
+                        "total_tokens": token_count,
+                        "timestamp": time.time(),
+                    },
+                ),
+            )
+
+            # Also set the final output on the request object
+            request.output = cleaned_text
+
+        except Exception as e:
+            # Send error to API
+            self.send_request(
+                "update_stream",
+                (
+                    request.id,
+                    {
+                        "token": "",
+                        "done": True,
+                        "error": str(e),
+                        "timestamp": time.time(),
+                    },
+                ),
+            )
+            request.output = f"Error during generation: {str(e)}"
 
     def _try_finalize_initializing_models(self):
         """Attempt to finalize all models that are currently initializing."""
@@ -684,6 +806,7 @@ class DistributedValidator(DistributedWorker):
             # Load tokenizer
             if model_name not in self.tokenizers:
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
+            setattr(distributed_model, 'tokenizer', self.tokenizers[model_name])
 
             # Mark as ready
             self.model_state[job_id] = "ready"
@@ -692,7 +815,7 @@ class DistributedValidator(DistributedWorker):
             self.send_request(
                 "debug_print",
                 (
-                    f"Finalized hosted job for {model_name} with module_id {module_id}",
+                    f"DistributedValidator -> Finalized hosted job for {model_name} with module_id {module_id}",
                     "green",
                     logging.INFO,
                 ),

@@ -435,6 +435,57 @@ class DistributedWorker:
 
         self.send_request("module_loaded", module_id)
 
+    def _load_grouped_layer_weights(
+        self,
+        model_name: str,
+        layer_paths: list[str],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Load weights for a grouped LayerGroupModule and REMAP global layer indices
+        to local ModuleList indices (0..N-1).
+        """
+
+        state_dict: dict[str, torch.Tensor] = {}
+
+        model_path = snapshot_download(
+            repo_id=model_name,
+            cache_dir=self.hf_cache_dir,
+            allow_patterns=["*.safetensors", "*.bin"],
+            local_files_only=False,
+        )
+
+        # Map full HF layer prefix → local index
+        # "model.layers.12" -> 0
+        layer_prefix_to_local_idx = {
+            layer_path: i for i, layer_path in enumerate(layer_paths)
+        }
+
+        safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
+
+        if not safetensor_files:
+            raise RuntimeError(
+                "No safetensors found; .bin fallback not implemented here"
+            )
+
+        for shard_path in safetensor_files:
+            with safe_open(shard_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    for layer_prefix, local_idx in layer_prefix_to_local_idx.items():
+                        full_prefix = layer_prefix + "."
+                        if not key.startswith(full_prefix):
+                            continue
+
+                        # Strip "model.layers.XX."
+                        subkey = key[len(full_prefix) :]
+
+                        # Remap to local ModuleList index
+                        new_key = f"layers.{local_idx}.{subkey}"
+
+                        state_dict[new_key] = f.get_tensor(key)
+                        break
+
+        return state_dict
+
     def _load_specific_layer_weights(
         self,
         model_name: str,
@@ -487,6 +538,7 @@ class DistributedWorker:
                                 if key.startswith(layer_prefix):
                                     # Extract the part after the layer path
                                     new_key = key[len(layer_prefix) :]
+
                                     if single and '.' in new_key:
                                         # For single modules, remove one more level
                                         new_key = new_key.split('.', 1)[1]
@@ -636,8 +688,9 @@ class DistributedWorker:
 
         # Now load only the weights for the assigned layers
         logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
-        state_dict = self._load_specific_layer_weights(
-            model_name, layer_paths, base_model_prefix=base_model_prefix
+        state_dict = self._load_grouped_layer_weights(
+            model_name,
+            layer_paths,
         )
 
         # Load the state dict into the grouped module
@@ -645,6 +698,17 @@ class DistributedWorker:
         missing_keys, unexpected_keys = grouped_module.load_state_dict(
             state_dict, strict=False
         )
+
+        if missing_keys:
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Error loading grouped module weights on model: {model_name}"
+                    f"\n Module: {layer_paths}\n Missing keys: {missing_keys}\n Unexpected keys: {unexpected_keys}",
+                    "bright_red",
+                    logging.CRITICAL,
+                ),
+            )
 
         # Clean up state dict before GPU transfer
         with self.memory_efficient_context():
@@ -723,6 +787,17 @@ class DistributedWorker:
             state_dict, strict=False
         )
 
+        if missing_keys:
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Error loading single module weights on model: {model_name}"
+                    f"\n Module: {effective_layer_path}\n Missing keys: {missing_keys}\n Unexpected keys: {unexpected_keys}",
+                    "bright_red",
+                    logging.CRITICAL,
+                ),
+            )
+
         # Move to device
         target_module = target_module.to(self.device)
 
@@ -753,7 +828,7 @@ class DistributedWorker:
 
             logging.info(f"Loading full model {model_name} with type {model_type}")
 
-            # Load model based on type (FIXED: removed duplicate loading)
+            # Load model based on type
             if model_type in ("causal", "chat"):
                 final_model = AutoModelForCausalLM.from_pretrained(
                     model_name, **load_kwargs

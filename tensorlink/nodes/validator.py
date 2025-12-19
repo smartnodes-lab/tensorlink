@@ -4,7 +4,7 @@ from tensorlink.nodes.contract_manager import ContractManager
 from tensorlink.nodes.job_monitor import JobMonitor
 from tensorlink.nodes.keeper import Keeper
 from tensorlink.ml.utils import estimate_memory
-from tensorlink.api.node import TensorlinkAPI, GenerationRequest
+from tensorlink.api.node import TensorlinkAPI
 
 from dotenv import get_key
 from typing import Dict
@@ -17,7 +17,7 @@ import time
 import os
 
 
-FREE_JOB_MAX_TIME = 1 * 20  # 60 minutes in seconds for a free job
+FREE_JOB_MAX_TIME = 60 * 30  # 30 minutes in seconds for a free job
 
 
 class Validator(Torchnode):
@@ -247,6 +247,7 @@ class Validator(Torchnode):
                 "check_job": self._handle_check_job,
                 "send_job_request": self.create_base_job,
                 "update_api_request": self._handle_update_api,
+                "update_stream": self._handle_update_stream,
                 "get_model_demand_stats": self._get_api_demand,
                 "get_workers": self._get_workers,
             }
@@ -374,25 +375,72 @@ class Validator(Torchnode):
 
     def _handle_update_api(self, request: tuple):
         """Checks for and handles any API requests received"""
-        return_val = None
-        if self.endpoint_requests["incoming"]:
-            # Incoming request triggers ml-process
-            if len(request) == 2:
-                model_name, model_id = request
-                api_request: GenerationRequest = self.endpoint_requests["incoming"].pop(
-                    0
-                )
-                if not api_request.processing and api_request.hf_name == model_name:
-                    api_request.processing = True
-                    return_val = api_request
+        # Case 1: ML process is checking for incoming requests
+        if len(request) == 2:
+            model_name, model_id = request
 
+            if self.endpoint_requests["incoming"]:
+                for i, api_request in enumerate(self.endpoint_requests["incoming"]):
+                    if not api_request.processing and api_request.hf_name == model_name:
+                        api_request.processing = True
+                        api_request = self.endpoint_requests["incoming"].pop(i)
+                        self.response_queue.put(
+                            {"status": "SUCCESS", "return": api_request}
+                        )
+                        return
+
+            # No matching request found
+            self.response_queue.put({"status": "SUCCESS", "return": None})
+            return
+
+        # Case 2: ML process is returning completed result
         elif len(request) == 1:
-            # Responding to request after ml-processing
             response = request[0]
             if response.processing:
                 self.endpoint_requests["outgoing"].append(response)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+            return
 
-        self.response_queue.put({"STATUS": "SUCCESS", "return": return_val})
+        # Invalid request format
+        self.response_queue.put(
+            {"status": "FAILURE", "error": "Invalid request format"}
+        )
+
+    def _handle_update_stream(self, request: tuple):
+        """
+        Forward streaming tokens from ML process to API endpoint.
+
+        Args:
+            request: Tuple of (request_id, token_data)
+                token_data = {
+                    "token": str,
+                    "done": bool,
+                    "full_text": str (optional, only when done),
+                    "total_tokens": int (optional),
+                    "error": str (optional),
+                    "timestamp": float
+                }
+        """
+        try:
+            if len(request) != 2:
+                self.response_queue.put(
+                    {"status": "FAILURE", "error": "Invalid stream update format"}
+                )
+                return
+
+            request_id, token_data = request
+
+            # Forward to API endpoint if it exists
+            if self.endpoint and hasattr(self.endpoint, 'send_token_to_stream'):
+                self.endpoint.send_token_to_stream(request_id, **token_data)
+                self.response_queue.put({"status": "SUCCESS", "return": None})
+            else:
+                self.response_queue.put(
+                    {"status": "FAILURE", "error": "API endpoint not available"}
+                )
+
+        except Exception as e:
+            self.response_queue.put({"status": "FAILURE", "error": str(e)})
 
     def _handle_job_req(self, data: bytes, node: Connection):
         job_req = json.loads(data[7:])

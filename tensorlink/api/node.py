@@ -5,7 +5,7 @@ from tensorlink.api.models import (
     GenerationRequest,
     ModelStatusResponse,
 )
-
+from fastapi.responses import StreamingResponse
 from fastapi import FastAPI, HTTPException, APIRouter, Request, Query
 from collections import defaultdict
 from threading import Thread
@@ -15,6 +15,7 @@ import asyncio
 import random
 import queue
 import time
+import json
 
 
 def _format_response(
@@ -99,6 +100,7 @@ class TensorlinkAPI:
 
         # Track models requested via API for prioritization
         self.api_requested_models = set()
+        self.streaming_responses = {}
 
         self._define_routes()
         self._start_server()
@@ -144,20 +146,24 @@ class TensorlinkAPI:
                         detail=f"Model {request.hf_name} is still loading. Please try again in a few moments.",
                     )
 
-                # Append model request to the queue
-                self.smart_node.endpoint_requests["incoming"].append(request)
+                # Check if streaming is requested
+                stream = getattr(request, 'stream', False)
 
-                # Wait for the result
-                request = await self._wait_for_result(request)
-
-                processing_time = time.time() - start_time
-
-                # Format response based on requested format
-                formatted_response = _format_response(
-                    request, processing_time, request_id
-                )
-
-                return formatted_response
+                if stream:
+                    # Return streaming response
+                    return StreamingResponse(
+                        self._generate_stream(request, request_id, start_time),
+                        media_type="text/event-stream",
+                    )
+                else:
+                    # Original non-streaming logic
+                    self.smart_node.endpoint_requests["incoming"].append(request)
+                    request = await self._wait_for_result(request)
+                    processing_time = time.time() - start_time
+                    formatted_response = _format_response(
+                        request, processing_time, request_id
+                    )
+                    return formatted_response
 
             except HTTPException:
                 raise
@@ -393,6 +399,117 @@ class TensorlinkAPI:
             return self.smart_node.contract_manager.get_worker_claim_data(node_address)
 
         self.app.include_router(self.router)
+
+    async def _generate_stream(self, request, request_id, start_time):
+        """Generator function for streaming tokens"""
+        try:
+            # Create queue for this request to receive tokens
+            token_queue = asyncio.Queue()
+            self.streaming_responses[request.id] = token_queue
+
+            # Mark request as streaming
+            request.stream = True
+
+            # Add to processing queue
+            self.smart_node.endpoint_requests["incoming"].append(request)
+
+            # Stream tokens as they arrive
+            tokens_generated = 0
+            full_text = ""
+
+            while True:
+                try:
+                    # Wait for next token with timeout
+                    token_data = await asyncio.wait_for(token_queue.get(), timeout=30.0)
+
+                    if token_data.get("done"):
+                        # Generation complete
+                        processing_time = time.time() - start_time
+
+                        # Send final message
+                        final_data = {
+                            "id": request_id,
+                            "object": "chat.completion.chunk",
+                            "created": int(start_time),
+                            "model": request.hf_name,
+                            "choices": [
+                                {"index": 0, "delta": {}, "finish_reason": "stop"}
+                            ],
+                            "usage": {
+                                "prompt_tokens": token_data.get("prompt_tokens", 0),
+                                "completion_tokens": tokens_generated,
+                                "total_tokens": token_data.get("prompt_tokens", 0)
+                                + tokens_generated,
+                            },
+                        }
+                        yield f"data: {json.dumps(final_data)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        break
+
+                    # Stream the token
+                    token = token_data.get("token", "")
+                    full_text += token
+                    tokens_generated += 1
+
+                    # Format as SSE (Server-Sent Events)
+                    chunk = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(start_time),
+                        "model": request.hf_name,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": token},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+
+                except asyncio.TimeoutError:
+                    # Generation timed out
+                    error_chunk = {
+                        "error": {
+                            "message": "Generation timed out",
+                            "type": "timeout_error",
+                        }
+                    }
+                    yield f"data: {json.dumps(error_chunk)}\n\n"
+                    break
+
+        except Exception as e:
+            error_chunk = {"error": {"message": str(e), "type": "internal_error"}}
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+        finally:
+            # Clean up
+            if request.id in self.streaming_responses:
+                del self.streaming_responses[request.id]
+
+    def send_token_to_stream(self, request_id, token=None, done=False, **kwargs):
+        """
+        Called by the node to send tokens to the streaming response.
+
+        Args:
+            request_id: The request ID
+            token: The generated token (if not done)
+            done: Whether generation is complete
+            **kwargs: Additional data (e.g., prompt_tokens, error, full_text)
+        """
+        if request_id in self.streaming_responses:
+            response_queue = self.streaming_responses[request_id]
+            data = {"token": token, "done": done, **kwargs}
+
+            # Get or create event loop for async queue
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                # If no event loop exists in this thread, get the main one
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            # Safely add to queue from potentially different thread
+            asyncio.run_coroutine_threadsafe(response_queue.put(data), loop)
 
     def _check_model_status(self, model_name: str) -> dict:
         """Check if a model is loaded, loading, or not loaded"""
