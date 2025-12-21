@@ -102,6 +102,8 @@ class TensorlinkAPI:
         self.api_requested_models = set()
         self.streaming_responses = {}
 
+        self.server_loop = None
+
         self._define_routes()
         self._start_server()
 
@@ -496,20 +498,17 @@ class TensorlinkAPI:
             done: Whether generation is complete
             **kwargs: Additional data (e.g., prompt_tokens, error, full_text)
         """
-        if request_id in self.streaming_responses:
-            response_queue = self.streaming_responses[request_id]
-            data = {"token": token, "done": done, **kwargs}
+        if request_id not in self.streaming_responses:
+            return
 
-            # Get or create event loop for async queue
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                # If no event loop exists in this thread, get the main one
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        if not self.server_loop:
+            return
 
-            # Safely add to queue from potentially different thread
-            asyncio.run_coroutine_threadsafe(response_queue.put(data), loop)
+        response_queue = self.streaming_responses[request_id]
+        data = {"token": token, "done": done, **kwargs}
+
+        # Safely add to queue from potentially different thread
+        asyncio.run_coroutine_threadsafe(response_queue.put(data), self.server_loop)
 
     def _check_model_status(self, model_name: str) -> dict:
         """Check if a model is loaded, loading, or not loaded"""
@@ -560,6 +559,11 @@ class TensorlinkAPI:
         """Start the FastAPI server in a separate thread"""
 
         def run_server():
+            async def app_startup():
+                self.server_loop = asyncio.get_running_loop()
+
+            self.app.add_event_handler("startup", app_startup)
+
             uvicorn.run(
                 self.app,
                 host=self.host,
@@ -569,5 +573,4 @@ class TensorlinkAPI:
                 lifespan="on",
             )
 
-        server_thread = Thread(target=run_server, daemon=True)
-        server_thread.start()
+        Thread(target=run_server, daemon=True).start()
