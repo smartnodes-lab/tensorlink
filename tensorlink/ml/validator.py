@@ -370,21 +370,27 @@ class DistributedValidator(DistributedWorker):
             handle_layers=False,
             input_obfuscation=False,
             optimizer_type=job_data.get("optimizer_type"),
-            host_load_small=True if hosted else False,
+            host_load_small=hosted,
             host_max_depth=1,
-            host_threshold_mb=20,
+            host_threshold_mb=75,
             max_offload_depth=3,
-            batch_size=batch_size,
+            batch_size=job_data.get("batch_size", batch_size),
             max_seq_len=job_data.get("max_seq_len", 4096),
             model_type=job_data.get("model_type", "chat"),
         )
 
         job_data["distribution"] = distribution
 
+        offloaded_count = sum(
+            1
+            for v in distribution["config"].values()
+            if "offloaded" in v.get("type", "")
+        )
+
         if (
             len(distribution["config"]) == 0
-            or len(distribution["config"])
-            > 5  # TODO This limit on number of distributions is not ideal
+            or offloaded_count
+            > 3  # TODO This limit on number of distributions is not ideal
             or not distribution["success"]
         ):
             return {}
@@ -749,6 +755,7 @@ class DistributedValidator(DistributedWorker):
                 node=self.node,
                 training=False,
             )
+            distributed_model.config = job_data.get("distribution")
 
             self.models[job_id] = distributed_model
 
@@ -796,8 +803,9 @@ class DistributedValidator(DistributedWorker):
 
             # Register the distributed model's modules
             for module_id, module_info in distribution.items():
-                module_info["job_id"] = job_id
-                self.modules[module_id] = module_info
+                if "offloaded" in module_info.get("type", ""):
+                    module_info["job_id"] = job_id
+                    self.modules[module_id] = module_info
 
             # Distribute the model across workers
             distributed_model.distribute_model(distribution)

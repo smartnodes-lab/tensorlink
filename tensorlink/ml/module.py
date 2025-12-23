@@ -9,15 +9,18 @@ from transformers import (
     AutoModelForSpeechSeq2Seq,
 )
 from typing import Generator, List, Optional, Type, Dict, Any, Union
+from huggingface_hub import snapshot_download
 from contextlib import contextmanager
+from safetensors import safe_open
 import torch.optim as optim
 import torch.nn as nn
-import torch
 import threading
 import logging
 import pickle
+import torch
 import types
 import queue
+import glob
 import time
 import json
 import gc
@@ -189,6 +192,7 @@ class DistributedModel(nn.Module):
         self.n_datalines = 1  # Default data pipeline setting
 
         # Distributed graph and parameters
+        self.config = {}
         self.distributed_graph: Dict[str, Any] = {}
         self.parameters_storage: Dict[str, torch.Tensor] = {}
         self.my_modules = set()
@@ -214,6 +218,10 @@ class DistributedModel(nn.Module):
         self.node_responses = self.node.node_responses
         self.mpc_lock = self.node.mpc_lock
         self._thread_local = threading.local()
+
+        self.hf_cache_dir = os.environ.get(
+            'HF_HOME', os.path.join(os.path.expanduser('~'), '.cache', 'huggingface')
+        )
 
         self.job_id = None
 
@@ -484,7 +492,7 @@ class DistributedModel(nn.Module):
 
             # Handle each module's parameters, loading only if `load` is True
             for module_id, module_info in self.distributed_graph.items():
-                if module_info["type"] == "offloaded":
+                if "offloaded" in module_info["type"]:
                     file_name = self.parameters_storage[module_id]
                     if load:
                         # Load parameters from file
@@ -574,12 +582,17 @@ class DistributedModel(nn.Module):
         if config is None:
             config = self.parse_model(self.model, self.max_module_size)
 
+        config = (
+            config | self.config
+        )  # Update config with any modules we host on our this device
+
         self.distributed_graph = config
 
         if self.model_name:
             self._load_model_skeleton(model_type)
 
         grouped_layers = {}
+        host_modules = {}
 
         for module_id, module_info in config.items():
             if self.model_name:
@@ -587,11 +600,16 @@ class DistributedModel(nn.Module):
 
                 if module_type == 'offloaded_group':
                     grouped_layers[module_id] = module_info
+                elif module_type == 'loaded':
+                    host_modules[module_id] = module_info
                 else:
                     self._wrap_hf_module(module_id, module_info)
             else:
                 # self.wrap_module(config)
                 raise "Custom models are currently not supported."
+
+        if host_modules:
+            self._load_host_modules(host_modules)
 
         if grouped_layers:
             self._wrap_grouped_layers(grouped_layers)
@@ -886,6 +904,146 @@ class DistributedModel(nn.Module):
             else:
                 model_config = AutoConfig.from_pretrained(self.model_name)
                 self.model = AutoModel.from_config(model_config)
+
+    def _load_host_modules(self, host_modules: Dict[str, Dict[str, Any]]):
+        """
+        Load weights for modules that will be hosted locally
+        """
+        logging.info(f"Loading {len(host_modules)} host modules")
+
+        for module_id, module_info in host_modules.items():
+            try:
+                self._load_single_host_module(module_id, module_info)
+            except Exception as e:
+                logging.error(f"Failed to load host module {module_id}: {e}")
+                raise
+
+    def _load_single_host_module(self, module_id: str, module_info: Dict[str, Any]):
+        """
+        Load weights for a single host module
+        """
+        module_path = module_info.get("module_path")
+        module_class = module_info.get("module")
+
+        if not module_path:
+            logging.warning(f"No module_path for host module {module_id}, skipping")
+            return
+
+        logging.info(f"Loading host module: {module_class} at {module_path}")
+
+        # Navigate to the target module in the skeleton
+        module_path_list = module_path.split(".")
+        target = self.model
+
+        # Handle 'model' prefix
+        if module_path_list[0] == "model" and not hasattr(self.model, "model"):
+            module_path_list.pop(0)
+
+        # Navigate to parent
+        for attr in module_path_list[:-1]:
+            target = getattr(target, attr)
+
+        # Get the actual module
+        module_name = module_path_list[-1]
+        host_module = getattr(target, module_name)
+
+        # Load weights for this module
+        logging.info(f"Loading weights for {module_path}")
+        state_dict = self._load_module_weights(self.model_name, [module_path])
+
+        # Convert module to empty weights on CPU first
+        host_module = host_module.to_empty(device="cpu")
+
+        # Load the state dict
+        missing_keys, unexpected_keys = host_module.load_state_dict(
+            state_dict, strict=False
+        )
+
+        if missing_keys:
+            logging.warning(f"Host module {module_path} - Missing keys: {missing_keys}")
+        if unexpected_keys:
+            logging.warning(
+                f"Host module {module_path} - Unexpected keys: {unexpected_keys}"
+            )
+
+        # Move to device
+        host_module = host_module.to(self.device)
+
+        # Update the module in place
+        setattr(target, module_name, host_module)
+
+        logging.info(f"Successfully loaded host module {module_class}")
+
+    def _load_module_weights(
+        self, model_name: str, module_paths: List[str]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Load weights for specific modules from HuggingFace.
+        Similar to worker's _load_specific_layer_weights but adapted for user side.
+        """
+        state_dict = {}
+
+        try:
+            # Download model files
+            logging.info(f"Downloading weights for {model_name}")
+            model_path = snapshot_download(
+                repo_id=model_name,
+                cache_dir=self.hf_cache_dir,
+                allow_patterns=["*.safetensors", "*.bin"],
+                local_files_only=False,
+            )
+
+            # Find safetensors files
+            safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
+
+            if safetensor_files:
+                logging.info(f"Found {len(safetensor_files)} safetensors files")
+
+                for shard_path in safetensor_files:
+                    with safe_open(shard_path, framework="pt", device="cpu") as f:
+                        keys_loaded = 0
+                        for key in f.keys():
+                            # Check if key matches any module path
+                            for module_path in module_paths:
+                                prefix = module_path + "."
+                                if key.startswith(prefix):
+                                    # Remove the module path prefix
+                                    new_key = key[len(prefix) :]
+                                    state_dict[new_key] = f.get_tensor(key)
+                                    keys_loaded += 1
+                                    break
+
+                        if keys_loaded > 0:
+                            logging.info(
+                                f"Loaded {keys_loaded} tensors from "
+                                f"{os.path.basename(shard_path)}"
+                            )
+            else:
+                # Fallback to .bin files
+                logging.info("No safetensors found, trying .bin files")
+                bin_files = glob.glob(os.path.join(model_path, "pytorch_model*.bin"))
+
+                if bin_files:
+                    for bin_path in bin_files:
+                        shard_dict = torch.load(bin_path, map_location="cpu")
+
+                        for key, value in shard_dict.items():
+                            for module_path in module_paths:
+                                prefix = module_path + "."
+                                if key.startswith(prefix):
+                                    new_key = key[len(prefix) :]
+                                    state_dict[new_key] = value
+                                    break
+                else:
+                    raise ValueError(f"No weight files found in {model_path}")
+
+            logging.info(f"Loaded {len(state_dict)} weight tensors for host modules")
+
+        except Exception as e:
+            logging.error(f"Error loading module weights: {e}")
+            raise
+
+        return state_dict
 
 
 class OffloadedModule(nn.Module):

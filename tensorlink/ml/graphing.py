@@ -200,7 +200,6 @@ class ModelParser:
         try:
             config, _ = self._recurse_module(
                 module=model,
-                parent_module=None,
                 module_path="model",
                 workers_state=workers_state,
                 training=training,
@@ -280,7 +279,6 @@ class ModelParser:
     def _recurse_module(
         self,
         module: nn.Module,
-        parent_module: Optional[nn.Module],
         module_path: str,
         workers_state: dict,
         training: bool,
@@ -332,7 +330,7 @@ class ModelParser:
         if (
             host_load_small
             and (memory / 1e6) <= host_threshold_mb
-            and depth < host_max_depth
+            and depth <= host_max_depth
         ):
             config[module_path] = {
                 "type": "loaded",
@@ -438,7 +436,6 @@ class ModelParser:
             try:
                 child_config, child_last_worker = self._recurse_module(
                     module=child_module,
-                    parent_module=module,
                     module_path=child_path,
                     workers_state=workers_state,
                     training=training,

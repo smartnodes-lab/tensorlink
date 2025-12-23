@@ -596,11 +596,16 @@ class Validator(Torchnode):
         job_data["worker_modules"] = {}
         for module_name, module_info in modules.items():
             module_id = hashlib.sha256(json.dumps(module_info).encode()).hexdigest()
-            worker_id = module_info.get("assigned_workers", [])[-1]
-            groups[module_id] = module_info
-            self.recruit_worker(worker_id, author, job_id, module_info, module_id)
-            job_data["worker_modules"][worker_id] = module_id
-            worker_connection_info[module_id] = worker_id
+
+            if "offloaded" in module_info.get("type", ""):
+                worker_id = module_info.get("assigned_workers", [])[-1]
+                groups[module_id] = module_info
+                self.recruit_worker(worker_id, author, job_id, module_info, module_id)
+                job_data["worker_modules"][worker_id] = module_id
+                worker_connection_info[module_id] = worker_id
+            else:
+                # Hosted modules on our device
+                groups[module_id] = module_info
 
         job_data["distribution"] = groups
 
@@ -630,32 +635,33 @@ class Validator(Torchnode):
         )
 
         for module_id, module_info in job_data["distribution"].items():
-            worker_id = module_info["assigned_workers"][0]
+            if "offloaded" in module_info.get("type", ""):
+                worker_id = module_info["assigned_workers"][0]
 
-            self.modules[module_id] = {
-                "job_id": job_id,
-                "mem_info": module_id,
-                "host": self.rsa_key_hash,
-                "model_name": job_data.get("model_name", ""),
-                "forward_queue": {},
-                "backward_queue": {},
-                "optimizer": None,
-                "training": False,
-                "assigned_workers": [worker_id],
-                "distribution": module_info,
-                "public": job_data.get("public", True),
-            }
-            self.state_updates[module_id] = []
+                self.modules[module_id] = {
+                    "job_id": job_id,
+                    "mem_info": module_id,
+                    "host": self.rsa_key_hash,
+                    "model_name": job_data.get("model_name", ""),
+                    "forward_queue": {},
+                    "backward_queue": {},
+                    "optimizer": None,
+                    "training": False,
+                    "assigned_workers": [worker_id],
+                    "distribution": module_info,
+                    "public": job_data.get("public", True),
+                }
+                self.state_updates[module_id] = []
 
-            if len(self.modules[module_id]["assigned_workers"]) < 1:
-                self.debug_print(
-                    f"Network could not find workers for job '{job_id}' module {module_id}.",
-                    level=logging.INFO,
-                    colour="red",
-                    tag="Validator",
-                )
-                self.response_queue.put({"status": "SUCCESS", "return": False})
-                return
+                if len(self.modules[module_id]["assigned_workers"]) < 1:
+                    self.debug_print(
+                        f"Network could not find workers for job '{job_id}' module {module_id}.",
+                        level=logging.INFO,
+                        colour="red",
+                        tag="Validator",
+                    )
+                    self.response_queue.put({"status": "SUCCESS", "return": False})
+                    return
 
     def _finalize_job(self, job_id, job_data):
         self.response_queue.put({"status": "SUCCESS", "return": job_data})
