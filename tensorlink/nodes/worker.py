@@ -243,8 +243,6 @@ class Worker(Torchnode):
         """When a validator requests a stats request, return stats"""
         self.available_gpu_memory = self.get_available_gpu_memory()
 
-        print(f"Available memory: {round(self.available_gpu_memory/1e9, 5)}GB")
-
         # If mining is active, report total GPU memory since we'll stop mining on job acceptance
         if self.mining_active is not None and self.mining_active.value:
             self.available_gpu_memory = self.total_gpu_memory

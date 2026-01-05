@@ -789,7 +789,7 @@ class Torchnode(Smartnode):
     def _listen_requests(self):
         while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
-            time.sleep(0.02)
+            time.sleep(0.001)
 
     def get_module_hash_from_id(self, mod_id: bytes):
         for mod_hash in self.modules:

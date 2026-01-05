@@ -62,11 +62,15 @@ def estimate_memory(
 
     if training:
         breakdown["gradients"] = param_bytes
+        param_numel = sum(p.numel() for p in module.parameters())
 
         if optimizer_type.lower() in {"adam", "adamw"}:
-            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * 4
+            # exp_avg + exp_avg_sq
+            opt_bytes = 2 * param_bytes * (4 / dtype_size)
+
         else:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
+            opt_bytes = param_numel * dtype_size
+
         breakdown["optimizer"] = opt_bytes
 
     # Only count activations if requested
@@ -95,7 +99,7 @@ def estimate_memory(
                 hidden_size = 512
 
         # More conservative activation multiplier
-        activation_multiplier = 5 if not training else 12
+        activation_multiplier = 4 if not training else 7
 
         breakdown["activations"] = (
             batch_size * seq_length * hidden_size * dtype_size * activation_multiplier
@@ -137,7 +141,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 3e8
+        memory += 1e9
 
     return memory
 

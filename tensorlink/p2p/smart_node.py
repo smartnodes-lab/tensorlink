@@ -1020,7 +1020,7 @@ class Smartnode(threading.Thread):
         stored_info = self.dht.query(node_info['node_id_hash']) or get_connection_info(
             thread_client,
             main_port=thread_client.main_port,
-            upnp=False if self.upnp is None else True,
+            upnp=self.upnp,
         )
 
         # Store node details
@@ -1087,6 +1087,10 @@ class Smartnode(threading.Thread):
         if isinstance(id_hash, bytes):
             id_hash = id_hash.decode()
 
+        # Override host for local testing BEFORE any connection checks
+        if self.local_test:
+            host = "127.0.0.1"
+
         # Verify if the host/port is reachable before attempting
         _can_connect = self._can_connect(host, port)
 
@@ -1113,10 +1117,6 @@ class Smartnode(threading.Thread):
                         f"Selected next port: {our_port} for new connection",
                         tag="Smartnode",
                     )
-
-                    # If running locally for testing, override host
-                    if self.local_test:
-                        host = "127.0.0.1"
 
                     # Bind locally and connect to target node
                     sock.bind((self.host, our_port))

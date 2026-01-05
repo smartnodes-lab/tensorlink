@@ -232,7 +232,9 @@ class ValidatorNode(BaseNode):
         from tensorlink.ml.validator import DistributedValidator
 
         super().start()
-        distributed_validator = DistributedValidator(self, trusted=self.trusted)
+        distributed_validator = DistributedValidator(
+            self, trusted=self.trusted, endpoint=self.endpoint
+        )
         if self.utilization:
             t = threading.Thread(target=distributed_validator.run, daemon=True)
             t.start()

@@ -21,6 +21,7 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 # Path to config/models.json relative to this script
 SUPPORTED_MODELS_PATH = os.path.join(base_dir, "..", "config", "models.json")
 
+
 with open(SUPPORTED_MODELS_PATH, "rb") as f:
     MODELS = json.load(f)
     DEFAULT_MODELS = MODELS["DEFAULT_MODELS"]
@@ -132,8 +133,9 @@ def format_chat_prompt(model_name, current_message, history):
 
 
 class DistributedValidator(DistributedWorker):
-    def __init__(self, node, trusted=False):
+    def __init__(self, node, trusted=False, endpoint=True):
         super().__init__(node, trusted)
+        self.endpoint = endpoint
         self.model_cache = load_models_cache()
         self.models = {}  # job_id -> model instance
         self.model_state = (
@@ -264,6 +266,9 @@ class DistributedValidator(DistributedWorker):
 
     def _manage_auto_loaded_models(self):
         """Manage auto-loaded models based on popularity from JSON cache, falling back to DEFAULT_MODELS"""
+        # If the API endpoint is not active, skip auto loading models
+        if not self.endpoint:
+            return
 
         # Get popular models based on their request counts
         model_demands = {}
@@ -369,7 +374,7 @@ class DistributedValidator(DistributedWorker):
             trusted=False,
             handle_layers=False,
             input_obfuscation=False,
-            optimizer_type=job_data.get("optimizer_type"),
+            optimizer_type=job_data.get("optimizer_type", "Adam"),
             host_load_small=hosted,
             host_max_depth=1,
             host_threshold_mb=75,
@@ -390,7 +395,7 @@ class DistributedValidator(DistributedWorker):
         if (
             len(distribution["config"]) == 0
             or offloaded_count
-            > 3  # TODO This limit on number of distributions is not ideal
+            > 4  # TODO This limit on number of distributions is not ideal
             or not distribution["success"]
         ):
             return {}
@@ -448,9 +453,8 @@ class DistributedValidator(DistributedWorker):
                     # Only call model management if we have models actively initializing
                     self._try_finalize_initializing_models()
 
-            # Get job data for inspection
+            # Get job data for inspection to see if we can accommodate the model
             job_data = self.send_request("get_jobs", None)
-
             if isinstance(job_data, dict):
                 model_name: str = job_data.get("model_name", "")
 

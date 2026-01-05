@@ -87,6 +87,39 @@ def _format_response(
         }
 
 
+def build_hf_job_data(
+    *,
+    model_name: str,
+    author: str,
+    model_type: str = "hf",
+    payment: int = 0,
+    time: int = 0,
+    hosted: bool = True,
+    training: bool = False,
+    seed_validators=None,
+):
+    if seed_validators is None:
+        seed_validators = [author]
+
+    return {
+        "author": author,
+        "api": True,
+        "active": True,
+        "hosted": hosted,
+        "training": training,
+        "payment": payment,
+        "time": time,
+        "capacity": 0,
+        "n_pipelines": 1,
+        "dp_factor": 1,
+        "distribution": {"model_name": model_name},
+        "n_workers": 0,
+        "model_name": model_name,
+        "seed_validators": seed_validators,
+        "model_type": model_type,
+    }
+
+
 class TensorlinkAPI:
     def __init__(self, smart_node, host="0.0.0.0", port=64747):
         self.smart_node = smart_node
@@ -214,7 +247,7 @@ class TensorlinkAPI:
                         detail="No user message found in messages array",
                     )
 
-                # Create our internal request with OpenAI format
+                # Create our internal request
                 gen_request = GenerationRequest(
                     hf_name=model,
                     message=current_message,
@@ -224,7 +257,6 @@ class TensorlinkAPI:
                     response_format="openai",
                 )
 
-                # Reuse the generate logic
                 return await generate(gen_request)
 
             except HTTPException:
@@ -259,25 +291,14 @@ class TensorlinkAPI:
                     )
 
                 # Trigger the loading process
-                job_data = {
-                    "author": self.smart_node.rsa_key_hash,
-                    "api": True,
-                    "active": True,
-                    "hosted": True,
-                    "training": False,
-                    "payment": job_request.payment,
-                    "time": job_request.time,
-                    "capacity": 0,
-                    "n_pipelines": 1,
-                    "dp_factor": 1,
-                    "distribution": {"model_name": model_name},
-                    "n_workers": 0,
-                    "model_name": model_name,
-                    "seed_validators": [self.smart_node.rsa_key_hash],
-                    "model_type": job_request.model_type,
-                }
+                job_data = build_hf_job_data(
+                    model_name=model_name,
+                    author=self.smart_node.rsa_key_hash,
+                    payment=job_request.payment,
+                    time=job_request.time,
+                    model_type=job_request.model_type,
+                )
 
-                # Store as HF job request
                 self.smart_node.create_hf_job(job_data, client_ip)
 
                 return ModelStatusResponse(
@@ -536,7 +557,11 @@ class TensorlinkAPI:
         try:
             # Mark as API requested
             self.api_requested_models.add(model_name)
-            self.smart_node.create_hf_job(model_name)
+            job_data = build_hf_job_data(
+                model_name=model_name,
+                author=self.smart_node.rsa_key_hash,
+            )
+            self.smart_node.create_hf_job(job_data)
 
         except Exception as e:
             logging.error(f"Error triggering model load: {e}")
