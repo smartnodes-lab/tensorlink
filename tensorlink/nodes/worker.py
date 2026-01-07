@@ -168,7 +168,7 @@ class Worker(Torchnode):
                 module_size = module_info["memory"]
                 model_name = module_info["name"]
                 training = module_info["training"]
-                optimizer_name = module_info["optimizer_type"]
+                optimizer_name = json.dumps(module_info["optimizer_spec"])
                 module_info["status"] = "loading"
 
                 if self.available_gpu_memory >= module_size:

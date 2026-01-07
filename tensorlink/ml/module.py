@@ -29,14 +29,8 @@ import os
 
 from tensorlink.ml.injector import generate_new_forward_method, get_loop_io_signature
 from tensorlink.ml.optim import DistributedParameter, create_distributed_optimizer
-from tensorlink.ml.graphing import (
-    ModelParser,
-    analyze_forward_loop,
-    extract_loop_components,
-    is_layer_loop,
-)
+from tensorlink.ml.graphing import ModelParser
 from tensorlink.ml.utils import (
-    resolve_module_from_path,
     get_gpu_memory,
     get_batch_size,
     chunk,
@@ -50,6 +44,8 @@ from tensorlink.ml.utils import (
     tensor_to_bytes,
     enable_grad,
     get_nested_module,
+    get_optimizer_from_spec,
+    optimizer_to_spec,
 )
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
 
@@ -146,7 +142,7 @@ class DistributedModel(nn.Module):
         self,
         model: Union[nn.Module, str],
         n_pipelines: int = 1,
-        optimizer_type: Optional[Type[optim.Optimizer]] = None,
+        optimizer: Optional[Type[optim.Optimizer]] = None,
         scheduler_type: Optional[Type[optim.lr_scheduler._LRScheduler]] = None,
         device: Optional[str] = None,
         dtype: torch.dtype = torch.float32,
@@ -160,7 +156,7 @@ class DistributedModel(nn.Module):
         Args:
             model (nn.Module): The base model to distribute.
             n_pipelines (int): Number of parallel pipelines for computation.
-            optimizer_type (Type[optim.Optimizer]): Optimizer class to use.
+            optimizer (Type[optim.Optimizer]): Optimizer class to use.
             scheduler_type (Optional[Type[optim.lr_scheduler._LRScheduler]]):
                 Optional learning rate scheduler.
             device (Optional[str]): Device to run the model on (default: auto-detect).
@@ -201,7 +197,7 @@ class DistributedModel(nn.Module):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
         # Optimizer and scheduler placeholders
-        self.optimizer = optimizer_type
+        self.optimizer = optimizer
         self.scheduler = scheduler_type
         self.training = training
 
@@ -759,6 +755,12 @@ class DistributedModel(nn.Module):
 
         # Spawn a worker thread for the offloaded module
         offloaded_module.spawn_worker(file_name, module_info)
+
+        if not module_path or module_path in ("model", ""):
+            self.model = offloaded_module
+            offloaded_module.entire_model = True
+            return
+
         module_path_list = module_path.split(".")
         target = self.model
 
@@ -861,15 +863,17 @@ class DistributedModel(nn.Module):
     def _initialize_distribution(self):
         """Initialize the distributed model."""
         if self.optimizer is None and self.training:
-            optimizer_type = torch.optim.Adam
+            optimizer_cls = torch.optim.Adam
         else:
-            optimizer_type = self.optimizer
+            optimizer_cls = self.optimizer
+
+        optimizer_spec = optimizer_to_spec(optimizer_cls)
 
         # Create the distribution on our end if we have the model loaded
         distribution = {
             "model_name": self.model_name,
             "training": self.training,
-            "optimizer": optimizer_type,
+            "optimizer": optimizer_spec,
         }
 
         # Request job from network
@@ -884,6 +888,8 @@ class DistributedModel(nn.Module):
 
         # Distribute the model according to the configuration
         self.distribute_model(distributed_config)
+
+        optimizer_type = get_optimizer_from_spec(optimizer_spec)
 
         # Create an optimizer creation function
         self.create_optimizer = lambda **kwargs: create_distributed_optimizer(

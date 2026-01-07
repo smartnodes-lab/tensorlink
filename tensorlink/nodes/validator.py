@@ -553,6 +553,21 @@ class Validator(Torchnode):
         self._update_job_distribution(job_data, n_pipelines, requesting_node)
 
         if requesting_node:
+            if any(
+                "offloaded" in module_info.get("type", "")
+                and (
+                    module_info.get("assigned_workers") is None
+                    or len(module_info.get("assigned_workers", [])) == 0
+                    or module_info.get("assigned_workers")[-1] is None
+                )
+                for module_info in job_data["distribution"].values()
+            ):
+                # Decline job workers not present
+                self._decline_job(
+                    job_data, requesting_node, "Could not find enough workers."
+                )
+                return
+
             self._send_acceptance(requesting_node, job_id, job_data)
         else:
             self._setup_hosted_job(job_id, job_data)

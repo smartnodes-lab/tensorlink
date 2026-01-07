@@ -1,4 +1,5 @@
 import gc
+import importlib
 import json
 import logging
 import os
@@ -24,7 +25,6 @@ from safetensors import safe_open
 from huggingface_hub import snapshot_download
 
 from tensorlink.ml.utils import (
-    get_optimizer_from_name,
     bytes_to_tensor,
     tensor_to_bytes,
     detach_tensor,
@@ -32,6 +32,7 @@ from tensorlink.ml.utils import (
     handle_output,
     enable_grad,
     get_nested_module,
+    get_optimizer_from_spec,
 )
 from tensorlink.ml.injector import LayerGroupModule
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
@@ -212,8 +213,15 @@ class DistributedWorker:
 
             # Retrieve intermediate values from storage
             inter_tag = tuple(tag)
-            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
-            assoc_input = assoc_input.to(self.device)
+            record = module.intermediates.pop(inter_tag)
+            assoc_input = record["inputs"]
+            assoc_output = record["output"]
+
+            if isinstance(assoc_input, (tuple, list)):
+                assoc_input = tuple(x.to(self.device) for x in assoc_input)
+            else:
+                assoc_input = assoc_input.to(self.device)
+
             assoc_output = assoc_output.to(self.device)
 
             # Backward pass
@@ -227,15 +235,16 @@ class DistributedWorker:
                 assoc_output.backward(loss)
 
             # Detach gradients and prepare for next node
-            if assoc_input.grad is None:
-                dvalues = detach_tensor(
-                    torch.zeros_like(assoc_input, dtype=torch.float32)
-                )
+            def extract_grad(x):
+                if x.grad is None:
+                    return torch.zeros_like(x, dtype=torch.float32)
+                return x.grad
+
+            if isinstance(assoc_input, (tuple, list)):
+                grads = tuple(extract_grad(x) for x in assoc_input)
+                dvalues = detach_tensor(grads)
             else:
-                # Clip gradients to prevent explosion (optional)
-                if self.use_amp:
-                    torch.nn.utils.clip_grad_norm_(module.parameters(), max_norm=1.0)
-                dvalues = detach_tensor(assoc_input.grad)
+                dvalues = detach_tensor(extract_grad(assoc_input))
 
             # Clean up to avoid memory leaks
             del assoc_input, assoc_output
@@ -280,7 +289,10 @@ class DistributedWorker:
 
         # Store intermediate results if training
         if module.training:
-            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
+            module.intermediates[key] = {
+                "inputs": inp,
+                "output": handle_output(out),
+            }
 
         # Detach and store output
         detached_out = detach_tensor(out)
@@ -428,9 +440,7 @@ class DistributedWorker:
 
         self.modules[module_id] = module
         if training:
-            optimizer_name = module_info.get("optimizer_type")
-            optimizer_cls = get_optimizer_from_name(optimizer_name)
-            # Placeholder - actual initialization happens in state_update
+            optimizer_cls = get_optimizer_from_spec(module_info["optimizer_spec"])
             self.optimizers[module_id] = optimizer_cls
 
         self.send_request("module_loaded", module_id)

@@ -366,6 +366,13 @@ class DistributedValidator(DistributedWorker):
             else:
                 batch_size = 1
 
+        if job_data.get("optimizer") is None:
+            optimizer_type = "adam"
+            optimizer_spec = {}
+        else:
+            optimizer_type = job_data["optimizer"]["type"]
+            optimizer_spec = job_data.get("optimizer")
+
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
             model_name,
@@ -374,7 +381,8 @@ class DistributedValidator(DistributedWorker):
             trusted=False,
             handle_layers=False,
             input_obfuscation=False,
-            optimizer_type=job_data.get("optimizer_type", "Adam"),
+            optimizer_type=optimizer_type,
+            optimizer_spec=optimizer_spec,
             host_load_small=hosted,
             host_max_depth=1,
             host_threshold_mb=75,
