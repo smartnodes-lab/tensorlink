@@ -862,7 +862,7 @@ class DistributedModel(nn.Module):
 
     def _initialize_distribution(self):
         """Initialize the distributed model."""
-        if self.optimizer is None and self.training:
+        if self.optimizer is None:
             optimizer_cls = torch.optim.Adam
         else:
             optimizer_cls = self.optimizer

@@ -1,11 +1,10 @@
-import time
+import logging
 import torch
 from collections import deque
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from tensorlink import DistributedModel
+from transformers import AutoTokenizer
+from tensorlink import DistributedModel, UserNode
 
 
-# model_name = "Qwen/Qwen2.5-1.5B-Instruct"
 model_name = "Qwen/Qwen2.5-7B-Instruct"
 
 # Parameters for distributed model request.
@@ -27,14 +26,14 @@ chat_history.append(
 
 if __name__ == "__main__":
     # Specifically spawning a user node to change debug print level
-    # user = UserNode(print_level=logging.DEBUG)
+    user = UserNode(print_level=logging.DEBUG)
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # Get distributed model with HF model name
     distributed_model = DistributedModel(
-        model_name, training=False, n_pipelines=PIPELINES  # , node=user
+        model_name, training=False, n_pipelines=PIPELINES, node=user
     )
 
     print("Chatbot is ready! Type 'exit' to quit.")

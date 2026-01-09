@@ -30,6 +30,7 @@ class Validator(Torchnode):
         off_chain_test=False,
         local_test=False,
         endpoint=True,
+        endpoint_ip="0.0.0.0",
         load_previous_state=False,
     ):
         super(Validator, self).__init__(
@@ -108,7 +109,7 @@ class Validator(Torchnode):
 
         # Start up the API for handling public jobs
         if endpoint:
-            self.endpoint = TensorlinkAPI(self)
+            self.endpoint = TensorlinkAPI(self, host=endpoint_ip)
             if not local_test:
                 self.add_port_mapping(64747, 64747)
 

@@ -1,5 +1,3 @@
-from torch.nn.functional import mse_loss
-
 """
 Tensorlink Distributed Model Workflow Example
 
@@ -26,8 +24,10 @@ Overview:
    - Demonstrates model distribution, gradient updates, and optimization across nodes.
 
 """
+
 from tensorlink import UserNode, ValidatorNode, WorkerNode, DistributedModel
 
+from transformers import AutoTokenizer
 import torch
 import logging
 import time
@@ -71,7 +71,7 @@ if __name__ == "__main__":
     time.sleep(1)
 
     # Connect worker node and user node to the validator node.
-    # This would only have to be done for local jobs, and will soon be replaced by a config.json
+    # This would only have to be done for local jobs.
     # For public jobs, the user will automatically be bootstrapped to the network.
     worker.connect_node(val_host, val_port, node_id=val_key, timeout=5)
     time.sleep(1)
@@ -80,19 +80,7 @@ if __name__ == "__main__":
 
     # Get distributed model directly from HuggingFace without loading
     distributed_model = DistributedModel(model_name, training=False, node=user)
-
-    from transformers import AutoTokenizer
-
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    # Alternatively, you could load a model to distribute (for hybrid jobs and custom models)
-    # from transformers import BertForSequenceClassification
-    # model = BertForSequenceClassification.from_pretrained('bert-base-uncased')
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    # distributed_model = DistributedModel(
-    #     model=model, optimizer_type=torch.optim.Adam, node=user, training=TRAINING
-    # )
-    # del model  # Free up some space
 
     # Initialize distributed optimizer
     if TRAINING:

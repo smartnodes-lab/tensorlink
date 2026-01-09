@@ -141,7 +141,7 @@ class TensorlinkAPI:
         self._start_server()
 
     def _define_routes(self):
-        @self.router.post("/generate")
+        @self.router.post("/v1/generate")
         async def generate(request: GenerationRequest):
             try:
                 start_time = time.time()
@@ -173,7 +173,8 @@ class TensorlinkAPI:
                     self._trigger_model_load(request.hf_name)
                     raise HTTPException(
                         status_code=503,
-                        detail=f"Model {request.hf_name} is currently loading. Please try again in a few moments.",
+                        detail=f"Model '{request.hf_name}' has been requested on the network. Please try again in a few "
+                        f"moments, or view available models at https://smartnodes.ca/app.",
                     )
                 elif model_status["status"] == "loading":
                     raise HTTPException(
@@ -266,7 +267,11 @@ class TensorlinkAPI:
 
         @self.router.post("/request-model", response_model=ModelStatusResponse)
         def request_model(job_request: JobRequest, request: Request):
-            """Explicitly request a model to be loaded on the network"""
+            """
+            Explicitly request a model to be loaded on the network. Currently, models
+            are only publicly accessible. Paid jobs for private use are unavailable at
+            this time.
+            """
             try:
                 client_ip = request.client.host
                 model_name = job_request.hf_name
