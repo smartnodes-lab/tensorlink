@@ -168,7 +168,7 @@ class Worker(Torchnode):
                 module_size = module_info["memory"]
                 model_name = module_info["name"]
                 training = module_info["training"]
-                optimizer_name = module_info["optimizer_type"]
+                optimizer_name = json.dumps(module_info["optimizer_spec"])
                 module_info["status"] = "loading"
 
                 if self.available_gpu_memory >= module_size:
@@ -233,17 +233,15 @@ class Worker(Torchnode):
 
         for module_id, module_info in self.modules.items():
             # Account for modules that are not in CUDA and are still initializing
-            # if module_info.get("status", "loading") == "loading":
-            module_size = module_info["memory"]
-            available_gpu_memory -= module_size
+            if module_info.get("status", "loading") == "loading":
+                module_size = module_info["memory"]
+                available_gpu_memory -= module_size
 
         return available_gpu_memory
 
     def handle_statistics_request(self, callee, additional_context: dict = None):
         """When a validator requests a stats request, return stats"""
         self.available_gpu_memory = self.get_available_gpu_memory()
-
-        print(f"Available memory: {round(self.available_gpu_memory/1e9, 5)}GB")
 
         # If mining is active, report total GPU memory since we'll stop mining on job acceptance
         if self.mining_active is not None and self.mining_active.value:

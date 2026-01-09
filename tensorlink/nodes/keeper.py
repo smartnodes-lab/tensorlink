@@ -769,3 +769,87 @@ class Keeper:
 
         # Return as dict with proposal_id keys
         return {pid: p for pid, p in proposals_list}
+
+    def clear_persistent_state(
+        self,
+        *,
+        clear_files: bool = True,
+        clear_memory: bool = True,
+        clear_network_stats: bool = True,
+    ):
+        """
+        Fully reset DHT + keeper state.
+
+        Args:
+            clear_files: Delete on-disk state files (DHT_STATE, NETWORK_STATS)
+            clear_memory: Clear in-memory caches and node/DHT state
+            clear_network_stats: Reset historical statistics in memory
+        """
+        try:
+            # Clear on-disk files
+            if clear_files:
+                for path in [DHT_STATE, NETWORK_STATS]:
+                    if os.path.exists(path):
+                        os.remove(path)
+                        self.node.debug_print(
+                            f"Deleted state file: {path}",
+                            level=logging.INFO,
+                            colour="yellow",
+                            tag="Keeper",
+                        )
+
+            # Reset in-memory caches
+            if clear_memory:
+                # Reset archive + caches
+                self.archive_cache = {cat: {} for cat in CATEGORIES}
+                self.archive_cache.update(
+                    {
+                        "available_capacity": 0,
+                        "used_capacity": 0,
+                        "total_capacity": 0,
+                    }
+                )
+                self.archive_cache_time = time.time()
+
+                self.current_state_cache = None
+                self.current_state_cache_time = 0
+
+                self._status_cache = None
+                self._status_cache_time = 0
+
+                # Clear node-local state (safe no-ops if missing)
+                if hasattr(self.node, "dht"):
+                    self.node.dht.routing_table.clear()
+
+                for attr in ["workers", "validators", "users", "proposals"]:
+                    if hasattr(self.node, attr):
+                        setattr(self.node, attr, [] if attr == "proposals" else {})
+
+                if hasattr(self.node, "all_workers"):
+                    self.node.all_workers.clear()
+
+            # Reset statistics
+            if clear_network_stats:
+                self.network_stats = {
+                    "daily": [],
+                    "weekly": [],
+                    "monthly": [],
+                }
+                self.last_daily_stats_update = 0
+
+            self.clean_ticker = 0
+
+            self.node.debug_print(
+                "Persistent state fully reset",
+                level=logging.INFO,
+                colour="green",
+                tag="Keeper",
+            )
+
+        except Exception as e:
+            self.node.debug_print(
+                f"Error clearing persistent state: {e}",
+                level=logging.ERROR,
+                colour="bright_red",
+                tag="Keeper",
+            )

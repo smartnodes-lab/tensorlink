@@ -215,6 +215,17 @@ class User(Torchnode):
                     for worker in mod_info["assigned_workers"]:
                         worker_info = self.dht.query(worker)
 
+                        if worker_info is None:
+                            worker_info = self.query_node(
+                                worker, self.nodes[job_data["seed_validators"][0]]
+                            )
+
+                        if worker_info is None:
+                            self.debug_print(
+                                f"Error connecting Module: {mod_id} to Worker: {worker_info}",
+                                tag="User",
+                            )
+
                         # Connect to workers for each model
                         connected = self.connect_worker(
                             worker_info["id"],
@@ -325,7 +336,6 @@ class User(Torchnode):
             }
         else:
             # The case where we have a huggingface model name for inference
-            optimizer_type = distribution.get("optimizer")
             job_request = {
                 "author": self.rsa_key_hash,
                 "active": True,
@@ -339,11 +349,7 @@ class User(Torchnode):
                 "distribution": {},
                 "n_workers": 0,
                 "model_name": distribution.get("model_name"),
-                "optimizer": (
-                    f"{optimizer_type.__module__}.{optimizer_type.__name__}"
-                    if optimizer_type
-                    else ""
-                ),
+                "optimizer": distribution.get("optimizer"),
                 "seed_validators": validator_ids,
             }
 

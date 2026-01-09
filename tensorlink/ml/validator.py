@@ -4,8 +4,9 @@ from tensorlink.ml.module import DistributedModel
 from tensorlink.ml.utils import load_models_cache, save_models_cache
 from tensorlink.api.models import GenerationRequest
 
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TextIteratorStreamer
 from collections import defaultdict
+from threading import Thread
 import torch
 import logging
 import json
@@ -19,6 +20,7 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 
 # Path to config/models.json relative to this script
 SUPPORTED_MODELS_PATH = os.path.join(base_dir, "..", "config", "models.json")
+
 
 with open(SUPPORTED_MODELS_PATH, "rb") as f:
     MODELS = json.load(f)
@@ -131,8 +133,9 @@ def format_chat_prompt(model_name, current_message, history):
 
 
 class DistributedValidator(DistributedWorker):
-    def __init__(self, node, trusted=False):
+    def __init__(self, node, trusted=False, endpoint=True):
         super().__init__(node, trusted)
+        self.endpoint = endpoint
         self.model_cache = load_models_cache()
         self.models = {}  # job_id -> model instance
         self.model_state = (
@@ -263,6 +266,9 @@ class DistributedValidator(DistributedWorker):
 
     def _manage_auto_loaded_models(self):
         """Manage auto-loaded models based on popularity from JSON cache, falling back to DEFAULT_MODELS"""
+        # If the API endpoint is not active, skip auto loading models
+        if not self.endpoint:
+            return
 
         # Get popular models based on their request counts
         model_demands = {}
@@ -360,6 +366,13 @@ class DistributedValidator(DistributedWorker):
             else:
                 batch_size = 1
 
+        if job_data.get("optimizer") is None:
+            optimizer_type = "adam"
+            optimizer_spec = {}
+        else:
+            optimizer_type = job_data["optimizer"]["type"]
+            optimizer_spec = job_data.get("optimizer")
+
         # Load HF model, create and save distribution
         distribution = parser.create_distributed_config(
             model_name,
@@ -368,22 +381,29 @@ class DistributedValidator(DistributedWorker):
             trusted=False,
             handle_layers=False,
             input_obfuscation=False,
-            optimizer_type=job_data.get("optimizer_type"),
-            host_load_small=True if hosted else False,
+            optimizer_type=optimizer_type,
+            optimizer_spec=optimizer_spec,
+            host_load_small=hosted,
             host_max_depth=1,
-            host_threshold_mb=20,
+            host_threshold_mb=75,
             max_offload_depth=3,
-            batch_size=batch_size,
+            batch_size=job_data.get("batch_size", batch_size),
             max_seq_len=job_data.get("max_seq_len", 4096),
             model_type=job_data.get("model_type", "chat"),
         )
 
         job_data["distribution"] = distribution
 
+        offloaded_count = sum(
+            1
+            for v in distribution["config"].values()
+            if "offloaded" in v.get("type", "")
+        )
+
         if (
             len(distribution["config"]) == 0
-            or len(distribution["config"])
-            > 5  # TODO This limit on number of distributions is not ideal
+            or offloaded_count
+            > 4  # TODO This limit on number of distributions is not ideal
             or not distribution["success"]
         ):
             return {}
@@ -441,9 +461,8 @@ class DistributedValidator(DistributedWorker):
                     # Only call model management if we have models actively initializing
                     self._try_finalize_initializing_models()
 
-            # Get job data for inspection
+            # Get job data for inspection to see if we can accommodate the model
             job_data = self.send_request("get_jobs", None)
-
             if isinstance(job_data, dict):
                 model_name: str = job_data.get("model_name", "")
 
@@ -519,6 +538,8 @@ class DistributedValidator(DistributedWorker):
             request.output = (
                 "Model is currently not available through the Tensorlink API."
             )
+        elif hasattr(request, "stream") and request.stream:
+            self._generate_streaming(request, job_id)
         else:
             distributed_model = self.models[job_id]
 
@@ -566,6 +587,125 @@ class DistributedValidator(DistributedWorker):
 
         # Return the clean response
         self.send_request("update_api_request", (request,))
+
+    def _generate_streaming(self, request: GenerationRequest, job_id: str):
+        """
+        Handle streaming generation requests using TextIteratorStreamer.
+        Sends tokens to the API as they're generated.
+        """
+        try:
+            # Prepare input
+            distributed_model = self.models[job_id]
+            tokenizer = self.tokenizers[request.hf_name]
+
+            # Format chat history into a standardized prompt
+            formatted_prompt = format_chat_prompt(
+                request.hf_name, request.message, request.history
+            )
+
+            # Tokenize formatted prompt
+            inputs = tokenizer(
+                formatted_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=request.max_length if request.max_length else 512,
+            )
+            input_ids = inputs.input_ids.to(self.device)
+
+            # Calculate prompt tokens for usage stats
+            prompt_tokens = input_ids.shape[1]
+
+            # Create text generation streamer
+            streamer = TextIteratorStreamer(
+                tokenizer, skip_prompt=True, skip_special_tokens=True
+            )
+
+            generation_kwargs = dict(
+                input_ids=input_ids,
+                streamer=streamer,
+                max_new_tokens=(
+                    request.max_new_tokens
+                    if hasattr(request, 'max_new_tokens')
+                    else 2048
+                ),
+                temperature=request.temperature if request.temperature else 0.6,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                do_sample=(
+                    request.do_sample if hasattr(request, 'do_sample') else True
+                ),
+                num_beams=request.num_beams if request.num_beams else 1,
+            )
+
+            # Start generation in a separate thread
+            generation_thread = Thread(
+                target=distributed_model.generate, kwargs=generation_kwargs
+            )
+            generation_thread.start()
+
+            # Stream tokens as they're generated
+            full_text = ""
+            token_count = 0
+
+            for token_text in streamer:
+                full_text += token_text
+                token_count += 1
+
+                # Send token update to API
+                self.send_request(
+                    "update_stream",
+                    (
+                        request.id,
+                        {
+                            "token": token_text,
+                            "done": False,
+                            "token_id": token_count,
+                            "timestamp": time.time(),
+                        },
+                    ),
+                )
+
+            # Wait for generation thread to complete
+            generation_thread.join()
+
+            # Clean up the response
+            cleaned_text = extract_assistant_response(full_text, request.hf_name)
+
+            # Send final completion message
+            self.send_request(
+                "update_stream",
+                (
+                    request.id,
+                    {
+                        "token": "",
+                        "done": True,
+                        "full_text": cleaned_text,
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": token_count,
+                        "total_tokens": token_count,
+                        "timestamp": time.time(),
+                    },
+                ),
+            )
+
+            # Also set the final output on the request object
+            request.output = cleaned_text
+
+        except Exception as e:
+            # Send error to API
+            self.send_request(
+                "update_stream",
+                (
+                    request.id,
+                    {
+                        "token": "",
+                        "done": True,
+                        "error": str(e),
+                        "timestamp": time.time(),
+                    },
+                ),
+            )
+            request.output = f"Error during generation: {str(e)}"
 
     def _try_finalize_initializing_models(self):
         """Attempt to finalize all models that are currently initializing."""
@@ -627,6 +767,7 @@ class DistributedValidator(DistributedWorker):
                 node=self.node,
                 training=False,
             )
+            distributed_model.config = job_data.get("distribution")
 
             self.models[job_id] = distributed_model
 
@@ -674,8 +815,9 @@ class DistributedValidator(DistributedWorker):
 
             # Register the distributed model's modules
             for module_id, module_info in distribution.items():
-                module_info["job_id"] = job_id
-                self.modules[module_id] = module_info
+                if "offloaded" in module_info.get("type", ""):
+                    module_info["job_id"] = job_id
+                    self.modules[module_id] = module_info
 
             # Distribute the model across workers
             distributed_model.distribute_model(distribution)
@@ -684,6 +826,7 @@ class DistributedValidator(DistributedWorker):
             # Load tokenizer
             if model_name not in self.tokenizers:
                 self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
+            setattr(distributed_model, 'tokenizer', self.tokenizers[model_name])
 
             # Mark as ready
             self.model_state[job_id] = "ready"
@@ -692,7 +835,7 @@ class DistributedValidator(DistributedWorker):
             self.send_request(
                 "debug_print",
                 (
-                    f"Finalized hosted job for {model_name} with module_id {module_id}",
+                    f"DistributedValidator -> Finalized hosted job for {model_name} with module_id {module_id}",
                     "green",
                     logging.INFO,
                 ),

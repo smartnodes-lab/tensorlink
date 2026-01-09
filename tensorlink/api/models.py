@@ -8,7 +8,6 @@ class NodeRequest(BaseModel):
 
 class JobRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-
     hf_name: str
     model_type: Optional[str] = None
     time: int = 1800
@@ -17,7 +16,6 @@ class JobRequest(BaseModel):
 
 class GenerationRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
-
     hf_name: str
     message: str
     prompt: str = None
@@ -31,6 +29,7 @@ class GenerationRequest(BaseModel):
     output: str = None
     processing: bool = False
     id: int = None
+    stream: bool = False
     response_format: Literal["simple", "openai", "full"] = "full"
 
 

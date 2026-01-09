@@ -489,9 +489,6 @@ class Torchnode(Smartnode):
         else:
             return_val = None
 
-        module_terminated = False
-        module_terminated_id = None
-
         for module_id, module in self.modules.items():
             if "mem_info" in module:
                 if self.role == "V":
@@ -508,12 +505,8 @@ class Torchnode(Smartnode):
 
             elif "termination" in module:
                 return_val = module_id
-                module_terminated = True
-                module_terminated_id = module_id
+                del self.modules[module_id]
                 break
-
-        if module_terminated:
-            del self.modules[module_terminated_id]
 
         self.response_queue.put({"status": "SUCCESS", "return": return_val})
 
@@ -715,7 +708,13 @@ class Torchnode(Smartnode):
             level = logging.DEBUG
         else:
             message, colour, level = request["args"]
-        self.debug_print(message, colour=colour, level=level, tag="Torchnode")
+
+        if " -> " not in message:
+            tag = "Torchnode"
+        else:
+            tag, message = message.split(" -> ", 1)
+
+        self.debug_print(message, colour=colour, level=level, tag=tag)
         self.response_queue.put({"status": "SUCCESS", "return": False})
 
     def send_forward(self, node: Connection, forward_bytes, context):
@@ -790,7 +789,7 @@ class Torchnode(Smartnode):
     def _listen_requests(self):
         while not self.mpc_terminate_flag.is_set():
             self.handle_requests()
-            time.sleep(0.02)
+            time.sleep(0.001)
 
     def get_module_hash_from_id(self, mod_id: bytes):
         for mod_hash in self.modules:

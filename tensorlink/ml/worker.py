@@ -1,4 +1,5 @@
 import gc
+import importlib
 import json
 import logging
 import os
@@ -24,7 +25,6 @@ from safetensors import safe_open
 from huggingface_hub import snapshot_download
 
 from tensorlink.ml.utils import (
-    get_optimizer_from_name,
     bytes_to_tensor,
     tensor_to_bytes,
     detach_tensor,
@@ -32,6 +32,7 @@ from tensorlink.ml.utils import (
     handle_output,
     enable_grad,
     get_nested_module,
+    get_optimizer_from_spec,
 )
 from tensorlink.ml.injector import LayerGroupModule
 from tensorlink.mpc.shared_memory import get_from_shared_memory, store_in_shared_memory
@@ -212,8 +213,15 @@ class DistributedWorker:
 
             # Retrieve intermediate values from storage
             inter_tag = tuple(tag)
-            assoc_input, assoc_output = module.intermediates.pop(inter_tag)
-            assoc_input = assoc_input.to(self.device)
+            record = module.intermediates.pop(inter_tag)
+            assoc_input = record["inputs"]
+            assoc_output = record["output"]
+
+            if isinstance(assoc_input, (tuple, list)):
+                assoc_input = tuple(x.to(self.device) for x in assoc_input)
+            else:
+                assoc_input = assoc_input.to(self.device)
+
             assoc_output = assoc_output.to(self.device)
 
             # Backward pass
@@ -227,15 +235,16 @@ class DistributedWorker:
                 assoc_output.backward(loss)
 
             # Detach gradients and prepare for next node
-            if assoc_input.grad is None:
-                dvalues = detach_tensor(
-                    torch.zeros_like(assoc_input, dtype=torch.float32)
-                )
+            def extract_grad(x):
+                if x.grad is None:
+                    return torch.zeros_like(x, dtype=torch.float32)
+                return x.grad
+
+            if isinstance(assoc_input, (tuple, list)):
+                grads = tuple(extract_grad(x) for x in assoc_input)
+                dvalues = detach_tensor(grads)
             else:
-                # Clip gradients to prevent explosion (optional)
-                if self.use_amp:
-                    torch.nn.utils.clip_grad_norm_(module.parameters(), max_norm=1.0)
-                dvalues = detach_tensor(assoc_input.grad)
+                dvalues = detach_tensor(extract_grad(assoc_input))
 
             # Clean up to avoid memory leaks
             del assoc_input, assoc_output
@@ -280,7 +289,10 @@ class DistributedWorker:
 
         # Store intermediate results if training
         if module.training:
-            module.intermediates[key] = [inp, handle_output(out).to(self.device)]
+            module.intermediates[key] = {
+                "inputs": inp,
+                "output": handle_output(out),
+            }
 
         # Detach and store output
         detached_out = detach_tensor(out)
@@ -428,12 +440,61 @@ class DistributedWorker:
 
         self.modules[module_id] = module
         if training:
-            optimizer_name = module_info.get("optimizer_type")
-            optimizer_cls = get_optimizer_from_name(optimizer_name)
-            # Placeholder - actual initialization happens in state_update
+            optimizer_cls = get_optimizer_from_spec(module_info["optimizer_spec"])
             self.optimizers[module_id] = optimizer_cls
 
         self.send_request("module_loaded", module_id)
+
+    def _load_grouped_layer_weights(
+        self,
+        model_name: str,
+        layer_paths: list[str],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Load weights for a grouped LayerGroupModule and REMAP global layer indices
+        to local ModuleList indices (0..N-1).
+        """
+
+        state_dict: dict[str, torch.Tensor] = {}
+
+        model_path = snapshot_download(
+            repo_id=model_name,
+            cache_dir=self.hf_cache_dir,
+            allow_patterns=["*.safetensors", "*.bin"],
+            local_files_only=False,
+        )
+
+        # Map full HF layer prefix → local index
+        # "model.layers.12" -> 0
+        layer_prefix_to_local_idx = {
+            layer_path: i for i, layer_path in enumerate(layer_paths)
+        }
+
+        safetensor_files = glob.glob(os.path.join(model_path, "*.safetensors"))
+
+        if not safetensor_files:
+            raise RuntimeError(
+                "No safetensors found; .bin fallback not implemented here"
+            )
+
+        for shard_path in safetensor_files:
+            with safe_open(shard_path, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    for layer_prefix, local_idx in layer_prefix_to_local_idx.items():
+                        full_prefix = layer_prefix + "."
+                        if not key.startswith(full_prefix):
+                            continue
+
+                        # Strip "model.layers.XX."
+                        subkey = key[len(full_prefix) :]
+
+                        # Remap to local ModuleList index
+                        new_key = f"layers.{local_idx}.{subkey}"
+
+                        state_dict[new_key] = f.get_tensor(key)
+                        break
+
+        return state_dict
 
     def _load_specific_layer_weights(
         self,
@@ -487,6 +548,7 @@ class DistributedWorker:
                                 if key.startswith(layer_prefix):
                                     # Extract the part after the layer path
                                     new_key = key[len(layer_prefix) :]
+
                                     if single and '.' in new_key:
                                         # For single modules, remove one more level
                                         new_key = new_key.split('.', 1)[1]
@@ -636,8 +698,9 @@ class DistributedWorker:
 
         # Now load only the weights for the assigned layers
         logging.info(f"Loading weights for layers {layer_range[0]}-{layer_range[1]}")
-        state_dict = self._load_specific_layer_weights(
-            model_name, layer_paths, base_model_prefix=base_model_prefix
+        state_dict = self._load_grouped_layer_weights(
+            model_name,
+            layer_paths,
         )
 
         # Load the state dict into the grouped module
@@ -645,6 +708,17 @@ class DistributedWorker:
         missing_keys, unexpected_keys = grouped_module.load_state_dict(
             state_dict, strict=False
         )
+
+        if missing_keys:
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Error loading grouped module weights on model: {model_name}"
+                    f"\n Module: {layer_paths}\n Missing keys: {missing_keys}\n Unexpected keys: {unexpected_keys}",
+                    "bright_red",
+                    logging.CRITICAL,
+                ),
+            )
 
         # Clean up state dict before GPU transfer
         with self.memory_efficient_context():
@@ -723,6 +797,17 @@ class DistributedWorker:
             state_dict, strict=False
         )
 
+        if missing_keys:
+            self.send_request(
+                "debug_print",
+                (
+                    f"DistributedWorker -> Error loading single module weights on model: {model_name}"
+                    f"\n Module: {effective_layer_path}\n Missing keys: {missing_keys}\n Unexpected keys: {unexpected_keys}",
+                    "bright_red",
+                    logging.CRITICAL,
+                ),
+            )
+
         # Move to device
         target_module = target_module.to(self.device)
 
@@ -753,7 +838,7 @@ class DistributedWorker:
 
             logging.info(f"Loading full model {model_name} with type {model_type}")
 
-            # Load model based on type (FIXED: removed duplicate loading)
+            # Load model based on type
             if model_type in ("causal", "chat"):
                 final_model = AutoModelForCausalLM.from_pretrained(
                     model_name, **load_kwargs

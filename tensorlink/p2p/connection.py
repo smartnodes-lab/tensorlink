@@ -5,9 +5,9 @@ import hashlib
 import socket
 import time
 import os
-import gc
 
-CHUNK_SIZE = 2048
+
+CHUNK_SIZE = 2048**2
 
 
 class Connection(threading.Thread):
@@ -55,6 +55,7 @@ class Connection(threading.Thread):
 
         # Connection state management
         self.terminate_flag = threading.Event()
+        self.file_lock = threading.Lock()
         self.last_seen = None
         self.ghosts = 0  # Number of ghost transmissions (unexpected data)
 
@@ -98,20 +99,19 @@ class Connection(threading.Thread):
 
             if chunk:
                 self.last_seen = datetime.now()
-                (
-                    buffer,
-                    prefix,
-                    is_transmission_complete,
-                ) = self._process_data_chunk(chunk, buffer, prefix)
+                (buffer, prefix, is_transmission_complete) = self._process_data_chunk(
+                    chunk, buffer, prefix, writing_threads
+                )
 
                 # Manage large buffers by writing to file
                 if len(buffer) > 20_000_000:
+                    file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
+                    while len(writing_threads) >= 2:
+                        writing_threads.pop(0).join()
+
                     writing_thread = threading.Thread(
                         target=self._write_to_file,
-                        args=(
-                            f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}",
-                            buffer,
-                        ),
+                        args=(file_name, buffer),
                     )
                     writing_threads.append(writing_thread)
                     writing_thread.start()
@@ -120,8 +120,6 @@ class Connection(threading.Thread):
             elif chunk == b"":
                 self._handle_connection_close()
                 break
-
-            gc.collect()
 
         self._cleanup_socket()
 
@@ -198,8 +196,6 @@ class Connection(threading.Thread):
                     self.sock.sendall(chunk)
                     chunk_number += 1
 
-                    gc.collect()
-
                 self.sock.sendall(self.EOT_CHAR)
 
             os.remove(file_name)
@@ -216,7 +212,9 @@ class Connection(threading.Thread):
     def stop(self) -> None:
         self.terminate_flag.set()
 
-    def _process_data_chunk(self, chunk: bytes, buffer: bytes, prefix: bytes) -> tuple:
+    def _process_data_chunk(
+        self, chunk: bytes, buffer: bytes, prefix: bytes, writing_threads: list
+    ) -> tuple:
         """
         Process an incoming data chunk and manage buffer and file writing.
 
@@ -224,38 +222,41 @@ class Connection(threading.Thread):
             chunk: Received network chunk
             buffer: Current data buffer
             prefix: Packet prefix (module/parameters)
+            writing_threads:
 
         Returns:
             Updated buffer, prefix, and a flag indicating if processing is complete
         """
         file_name = f"tmp/streamed_data_{self.host}_{self.port}_{self.main_node.host}_{self.main_node.port}"
 
-        # Handle special packet types with prefixes
-        if b"MODULE" == chunk[:6]:
+        if chunk.startswith(b"MODULE"):
             prefix = chunk[:70]
             buffer += chunk[70:]
-        elif b"PARAMETERS" == chunk[:10]:
+        elif chunk.startswith(b"PARAMETERS"):
             prefix = chunk[:74]
             buffer += chunk[74:]
         else:
             buffer += chunk
 
-        # Check for end of transmission
-        eot_pos = buffer.find(self.EOT_CHAR)
-        if eot_pos >= 0:
-            try:
+        while True:
+            eot_pos = buffer.find(self.EOT_CHAR)
+            if eot_pos < 0:
+                break
+
+            # 🔒 Ensure all async writes are finished
+            for t in writing_threads:
+                t.join()
+            writing_threads.clear()
+
+            # Write final remainder
+            with self.file_lock:
                 with open(file_name, "ab") as f:
                     f.write(buffer[:eot_pos])
-            except Exception as e:
-                self.main_node.debug_print(
-                    f"File writing error: {e}",
-                    colour="bright_red",
-                    level=logging.ERROR,
-                )
 
-            # Signal transmission completion
             self.main_node.handle_message(self, b"DONE STREAM" + prefix)
-            return buffer[eot_pos + len(self.EOT_CHAR) :], b"", True
+
+            buffer = buffer[eot_pos + len(self.EOT_CHAR) :]
+            prefix = b""
 
         return buffer, prefix, False
 
@@ -295,8 +296,9 @@ class Connection(threading.Thread):
 
     def _write_to_file(self, file_name, buffer):
         try:
-            with open(file_name, "ab") as f:
-                f.write(buffer)
+            with self.file_lock:
+                with open(file_name, "ab") as f:
+                    f.write(buffer)
         except Exception as e:
             self.main_node.debug_print(
                 f"File writing error: {e}",
@@ -320,10 +322,10 @@ class Connection(threading.Thread):
         Method to be implemented that adjusts the chunk size for higher reputation jobs / only during
         certain parts of the distributed training or proof of works (ie sending large models) TODO
         """
-        if chunk_size == "large":
-            self.chunk_size = CHUNK_SIZE**2
-        else:
-            self.chunk_size = CHUNK_SIZE
+        # if chunk_size == "large":
+        #     self.chunk_size = CHUNK_SIZE**2
+        # else:
+        self.chunk_size = CHUNK_SIZE
 
     def monitor_connection(self):
         """

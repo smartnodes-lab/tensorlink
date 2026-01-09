@@ -686,11 +686,11 @@ def get_loop_io_signature(parent_module) -> Dict:
         raise ValueError("No suitable loop found in forward pass")
 
     # Analyze variable usage in loop
-    loop_analyzer = VariableUsageAnalyzer()  # FIXED: renamed from var_analyzer
+    loop_analyzer = VariableUsageAnalyzer()
     for stmt in loop_finder.loop_node.body:
         loop_analyzer.visit(stmt)
 
-    # Analyze variables created BEFORE the loop
+    # Analyze variables created before the loop
     func_node = tree.body[0]  # The forward function
     pre_loop_analyzer = VariableUsageAnalyzer()
     for stmt in func_node.body:

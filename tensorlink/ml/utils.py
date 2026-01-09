@@ -1,16 +1,14 @@
+import importlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass
-from enum import Enum
-from typing import Dict, List, Tuple, Union
+from typing import Dict
 import time
 import os
-import numpy as np
+import inspect
 import torch
 import torch.nn as nn
-from huggingface_hub import HfApi, hf_hub_download
 from transformers.utils import ModelOutput
-from transformers import AutoModelForCausalLM, AutoTokenizer, BatchEncoding
+
 
 MODELS_CACHE_PATH = "logs/models.json"
 
@@ -62,11 +60,15 @@ def estimate_memory(
 
     if training:
         breakdown["gradients"] = param_bytes
+        param_numel = sum(p.numel() for p in module.parameters())
 
         if optimizer_type.lower() in {"adam", "adamw"}:
-            opt_bytes = 2 * sum(p.numel() for p in module.parameters()) * 4
+            # exp_avg + exp_avg_sq
+            opt_bytes = 2 * param_bytes * (4 / dtype_size)
+
         else:
-            opt_bytes = sum(p.numel() for p in module.parameters()) * dtype_size
+            opt_bytes = param_numel * dtype_size
+
         breakdown["optimizer"] = opt_bytes
 
     # Only count activations if requested
@@ -95,7 +97,7 @@ def estimate_memory(
                 hidden_size = 512
 
         # More conservative activation multiplier
-        activation_multiplier = 5 if not training else 12
+        activation_multiplier = 4 if not training else 7
 
         breakdown["activations"] = (
             batch_size * seq_length * hidden_size * dtype_size * activation_multiplier
@@ -137,7 +139,7 @@ def get_gpu_memory():
             memory += free
 
     else:
-        memory += 3e8
+        memory += 1e9
 
     return memory
 
@@ -516,45 +518,6 @@ def chunk(inputs, chunks):
         return inputs
 
 
-def get_optimizer_from_name(optimizer_name):
-    optimizer_class = None
-
-    module, name = optimizer_name.rsplit(".", 1)
-
-    # Check in torch.optim
-    if "torch.optim" in module:
-        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
-
-    # Check in transformers.optimization
-    elif "transformers.optimization" in module:
-        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
-
-    if optimizer_class is None:
-        raise ValueError(f"Optimizer class '{optimizer_name}' not found.")
-
-    return optimizer_class
-
-
-def get_optimizer_class(optimizer_name):
-    """Find and return the optimizer class from its fully qualified name."""
-    optimizer_class = None
-
-    module, name = optimizer_name.rsplit(".", 1)
-
-    # Check in torch.optim
-    if "torch.optim" in module:
-        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
-
-    # Check in transformers.optimization
-    elif "transformers.optimization" in module:
-        optimizer_class = getattr(__import__(module, fromlist=[optimizer_name]), name)
-
-    if optimizer_class is None:
-        raise ValueError(f"Optimizer class '{optimizer_name}' not found.")
-
-    return optimizer_class
-
-
 def tensor_to_bytes(tensor):
     """Serialize tensor or tensor-like structures into bytes, including dtype."""
 
@@ -798,8 +761,6 @@ def bytes_to_tensor(tensor_data):
                         else:
                             # For other stopping criteria, try constructor with deserialized data
                             try:
-                                import inspect
-
                                 sig = inspect.signature(criteria_class.__init__)
                                 param_names = list(sig.parameters.keys())[
                                     1:
@@ -850,8 +811,6 @@ def bytes_to_tensor(tensor_data):
                         except TypeError:
                             # If that fails, try with deserialized data as kwargs
                             try:
-                                import inspect
-
                                 sig = inspect.signature(cls.__init__)
                                 param_names = list(sig.parameters.keys())[
                                     1:
@@ -1104,3 +1063,23 @@ def resolve_module_from_path(model: nn.Module, path: str):
     child_name = parts[-1]
     child = getattr(parent, child_name)
     return parent, child, child_name
+
+
+def get_optimizer_from_spec(optimizer_spec: dict):
+    module_path, class_name = optimizer_spec["class_path"].rsplit(".", 1)
+    import_module = importlib.import_module(module_path)
+    optimizer_cls = getattr(import_module, class_name)
+    return optimizer_cls
+
+
+def optimizer_to_spec(optimizer_cls):
+    if not isinstance(optimizer_cls, type):
+        raise TypeError("optimizer must be an optimizer class")
+
+    optimizer_spec = {
+        "framework": "torch",
+        "class_path": f"{optimizer_cls.__module__}.{optimizer_cls.__name__}",
+    }
+
+    optimizer_spec["type"] = optimizer_spec["class_path"].rsplit(".", 1)[-1]
+    return optimizer_spec

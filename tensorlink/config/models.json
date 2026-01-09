@@ -1,5 +1,5 @@
 {
   "DEFAULT_MODELS": [
-     "Qwen/Qwen3-8B"
+     "HuggingFaceTB/SmolLM-135M"
   ]
 }
